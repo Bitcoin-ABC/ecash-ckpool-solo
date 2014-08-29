@@ -1024,6 +1024,7 @@ static void *watchdog(void *arg)
 
 static struct option long_options[] = {
 	{"standalone",	no_argument,		0,	'A'},
+	{"btcsolo",	no_argument,		0,	'B'},
 	{"config",	required_argument,	0,	'c'},
 	{"ckdb-name",	required_argument,	0,	'd'},
 	{"group",	required_argument,	0,	'g'},
@@ -1058,9 +1059,15 @@ int main(int argc, char **argv)
 		ckp.initial_args[ckp.args] = strdup(argv[ckp.args]);
 	ckp.initial_args[ckp.args] = NULL;
 
-	while ((c = getopt_long(argc, argv, "Ac:d:g:HhkLl:n:PpS:s:", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "ABc:d:g:HhkLl:n:PpS:s:", long_options, &i)) != -1) {
 		switch (c) {
 			case 'A':
+				ckp.standalone = true;
+				break;
+			case 'B':
+				if (ckp.proxy || ckp.passthrough)
+					quit(1, "Cannot set both proxy and btcsolo mode");
+				ckp.btcsolo = true;
 				ckp.standalone = true;
 				break;
 			case 'c':

@@ -138,6 +138,9 @@ struct ckpool_instance {
 	/* Are we running without ckdb */
 	bool standalone;
 
+	/* Are we running in btcsolo mode */
+	bool btcsolo;
+
 	/* Bitcoind data */
 	int btcds;
 	char **btcdurl;
