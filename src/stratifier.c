@@ -126,6 +126,7 @@ struct workbase {
 	char *coinb2; // coinbase2
 	uchar *coinb2bin;
 	int coinb2len; // length of above
+	int genoffset; // Offset into coinbase2 where the generation txn is
 
 	/* Cached header binary */
 	char headerbin[112];
@@ -185,6 +186,15 @@ static ckmsgq_t *ckdbq;		// ckdb
 static ckmsgq_t *sshareq;	// Stratum share sends
 static ckmsgq_t *sauthq;	// Stratum authorisations
 
+struct userwb {
+	UT_hash_handle hh;
+	int64_t id;
+
+	workbase_t *wb; // Master workbase
+	char *coinb2bin; // Coinb2 cointaining this user's address for generation
+	uchar *coinb2;
+};
+
 static int64_t user_instance_id;
 
 struct user_instance {
@@ -196,6 +206,7 @@ struct user_instance {
 
 	int workers;
 	char txnbin[25];
+	struct userwb *userwbs;
 };
 
 typedef struct user_instance user_instance_t;
@@ -365,6 +376,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	wb->coinb2len += 8;
 
 	wb->coinb2bin[wb->coinb2len++] = 25;
+	wb->genoffset = wb->coinb2len; // This is where the generation txn is
 	memcpy(wb->coinb2bin + wb->coinb2len, pubkeytxnbin, 25);
 	wb->coinb2len += 25;
 
@@ -395,9 +407,31 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 }
 
 static void stratum_broadcast_update(bool clean);
+static void stratum_broadcast_updates(bool clean);
 
-static void clear_workbase(workbase_t *wb)
+static void clear_userwb(int64_t id)
 {
+	user_instance_t *instance, *tmp;
+
+	ck_rlock(&instance_lock);
+	HASH_ITER(hh, user_instances, instance, tmp) {
+		struct userwb *userwb;
+
+		HASH_FIND_I64(instance->userwbs, &id, userwb);
+		if (!userwb)
+			continue;
+		HASH_DEL(instance->userwbs, userwb);
+		free(userwb->coinb2bin);
+		free(userwb->coinb2);
+		free(userwb);
+	}
+	ck_runlock(&instance_lock);
+}
+
+static void clear_workbase(ckpool_t *ckp, workbase_t *wb)
+{
+	if (ckp->btcsolo)
+		clear_userwb(wb->id);
 	free(wb->flags);
 	free(wb->txn_data);
 	free(wb->txn_hashes);
@@ -530,6 +564,33 @@ static void send_ageworkinfo(ckpool_t *ckp, int64_t id)
 	ckdbq_add(ckp, ID_AGEWORKINFO, val);
 }
 
+static void __generate_userwb(workbase_t *wb, user_instance_t *instance)
+{
+	struct userwb *userwb;
+
+	userwb = ckzalloc(sizeof(struct userwb));
+	userwb->wb = wb;
+	userwb->id = wb->id;
+	userwb->coinb2bin = ckalloc(wb->coinb2len);
+	memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
+	memcpy(userwb->coinb2bin + wb->genoffset, instance->txnbin, 25);
+	userwb->coinb2 = bin2hex(userwb->coinb2bin, wb->coinb2len);
+	HASH_ADD_I64(instance->userwbs, id, userwb);
+}
+
+static void generate_userwbs(workbase_t *wb)
+{
+	user_instance_t *instance, *tmp;
+
+	ck_rlock(&instance_lock);
+	HASH_ITER(hh, user_instances, instance, tmp) {
+		if (!instance->btcaddress)
+			continue;
+		__generate_userwb(wb, instance);
+	}
+	ck_runlock(&instance_lock);
+}
+
 static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 {
 	workbase_t *tmp, *tmpa, *aged = NULL;
@@ -573,6 +634,9 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 	current_workbase = wb;
 	ck_wunlock(&workbase_lock);
 
+	if (ckp->btcsolo)
+		generate_userwbs(wb);
+
 	if (*new_block)
 		purge_share_hashtable(wb->id);
 
@@ -582,7 +646,7 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 	 * to prevent taking recursive locks */
 	if (aged) {
 		send_ageworkinfo(ckp, aged->id);
-		clear_workbase(aged);
+		clear_workbase(ckp, aged);
 	}
 }
 
@@ -647,7 +711,10 @@ static void update_base(ckpool_t *ckp)
 
 	add_base(ckp, wb, &new_block);
 
-	stratum_broadcast_update(new_block);
+	if (ckp->btcsolo)
+		stratum_broadcast_updates(new_block);
+	else
+		stratum_broadcast_update(new_block);
 }
 
 static void drop_allclients(ckpool_t *ckp)
@@ -2016,6 +2083,54 @@ static void stratum_send_update(int64_t client_id, bool clean)
 	stratum_add_send(json_msg, client_id);
 }
 
+static json_t *__user_notify(user_instance_t *user_instance, bool clean)
+{
+	int64_t id = current_workbase->id;
+	struct userwb *userwb;
+	json_t *val;
+
+	HASH_FIND_I64(user_instance->userwbs, &id, userwb);
+	if (unlikely(!userwb)) {
+		LOGWARNING("Failed to find userwb in __user_notify!");
+		return NULL;
+	}
+
+	JSON_CPACK(val, "{s:[ssssosssb],s:o,s:s}",
+			"params",
+			current_workbase->idstring,
+			current_workbase->prevhash,
+			current_workbase->coinb1,
+			userwb->coinb2,
+			json_deep_copy(current_workbase->merkle_array),
+			current_workbase->bbversion,
+			current_workbase->nbit,
+			current_workbase->ntime,
+			clean,
+			"id", json_null(),
+			"method", "mining.notify");
+	return val;
+}
+
+/* Current workbase can't be pulled out from under us here even without
+ * locking since it's serialised with this code. Sends a stratum update with
+ * a unique coinb2 for every client. */
+static void stratum_broadcast_updates(bool clean)
+{
+	stratum_instance_t *client, *tmp;
+	json_t *json_msg;
+
+	ck_rlock(&instance_lock);
+	HASH_ITER(hh, stratum_instances, client, tmp) {
+		if (!client->user_instance)
+			continue;
+
+		json_msg = __user_notify(client->user_instance, clean);
+		if (likely(json_msg))
+			stratum_add_send(json_msg, client->id);
+	}
+	ck_runlock(&instance_lock);
+}
+
 static void send_json_err(int64_t client_id, json_t *id_val, const char *err_msg)
 {
 	json_t *val;
@@ -2024,6 +2139,7 @@ static void send_json_err(int64_t client_id, json_t *id_val, const char *err_msg
 	stratum_add_send(val, client_id);
 }
 
+/* FIXME: First work in btcsolo mode can't use base address */
 static void update_client(const int64_t client_id)
 {
 	stratum_instance_t *client;
