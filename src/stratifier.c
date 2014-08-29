@@ -207,6 +207,12 @@ struct user_instance {
 	int workers;
 	char txnbin[25];
 	struct userwb *userwbs;
+
+	double dsps1; /* Diff shares per second, 1 minute rolling average */
+	double dsps5; /* ... 5 minute ... */
+	double dsps60;/* etc */
+	double dsps1440;
+	tv_t last_share;
 };
 
 typedef struct user_instance user_instance_t;
@@ -1596,6 +1602,7 @@ static double sane_tdiff(tv_t *end, tv_t *start)
 static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool valid)
 {
 	double tdiff, bdiff, dsps, drr, network_diff, bias;
+	user_instance_t *instance = client->user_instance;
 	int64_t next_blockid, optimal;
 	tv_t now_t;
 
@@ -1618,7 +1625,12 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	decay_time(&client->dsps5, diff, tdiff, 300);
 	decay_time(&client->dsps60, diff, tdiff, 3600);
 	decay_time(&client->dsps1440, diff, tdiff, 86400);
+	decay_time(&instance->dsps1, diff, tdiff, 60);
+	decay_time(&instance->dsps5, diff, tdiff, 300);
+	decay_time(&instance->dsps60, diff, tdiff, 3600);
+	decay_time(&instance->dsps1440, diff, tdiff, 86400);
 	copy_tv(&client->last_share, &now_t);
+	copy_tv(&instance->last_share, &now_t);
 	client->idle = false;
 
 	client->ssdc++;
@@ -2573,10 +2585,11 @@ static void *statsupdate(void *arg)
 
 	while (42) {
 		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
-		double ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, tdiff, bias;
+		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, tdiff, bias;
 		char suffix360[16], suffix1440[16];
-		double sps1, sps5, sps15, sps60;
+		user_instance_t *instance, *tmpuser;
 		stratum_instance_t *client, *tmp;
+		double sps1, sps5, sps15, sps60;
 		char fname[512] = {};
 		tv_t now, diff;
 		ts_t ts_now;
@@ -2659,14 +2672,10 @@ static void *statsupdate(void *arg)
 
 		ck_rlock(&instance_lock);
 		HASH_ITER(hh, stratum_instances, client, tmp) {
-			double ghs;
-			bool idle;
-
 			if (!client->authorised)
 				continue;
 
 			if (now.tv_sec - client->last_share.tv_sec > 60) {
-				idle = true;
 				/* No shares for over a minute, decay to 0 */
 				decay_time(&client->dsps1, 0, tdiff, 60);
 				decay_time(&client->dsps5, 0, tdiff, 300);
@@ -2674,35 +2683,47 @@ static void *statsupdate(void *arg)
 				decay_time(&client->dsps1440, 0, tdiff, 86400);
 				if (now.tv_sec - client->last_share.tv_sec > 600)
 					client->idle = true;
-			} else
-				idle = false;
-			ghs = client->dsps1 * nonces;
+				continue;
+			}
+		}
+
+		HASH_ITER(hh, user_instances, instance, tmpuser) {
+			bool idle = false;
+
+			if (now.tv_sec - instance->last_share.tv_sec > 60) {
+				/* No shares for over a minute, decay to 0 */
+				decay_time(&instance->dsps1, 0, tdiff, 60);
+				decay_time(&instance->dsps5, 0, tdiff, 300);
+				decay_time(&instance->dsps60, 0, tdiff, 3600);
+				decay_time(&instance->dsps1440, 0, tdiff, 86400);
+				idle = true;
+			}
+			ghs = instance->dsps1 * nonces;
 			suffix_string(ghs, suffix1, 16, 0);
-			ghs = client->dsps5 * nonces;
+			ghs = instance->dsps5 * nonces;
 			suffix_string(ghs, suffix5, 16, 0);
-			ghs = client->dsps60 * nonces;
+			ghs = instance->dsps60 * nonces;
 			suffix_string(ghs, suffix60, 16, 0);
-			ghs = client->dsps1440 * nonces;
+			ghs = instance->dsps1440 * nonces;
 			suffix_string(ghs, suffix1440, 16, 0);
 
-			JSON_CPACK(val, "{ss,ss,ss,ss}",
+			JSON_CPACK(val, "{ss,ss,ss,ss,si}",
 					"hashrate1m", suffix1,
 					"hashrate5m", suffix5,
 					"hashrate1hr", suffix60,
-					"hashrate1d", suffix1440);
+					"hashrate1d", suffix1440,
+					"workers", instance->workers);
 
-			snprintf(fname, 511, "%s/%s", ckp->logdir, client->workername);
+			snprintf(fname, 511, "%s/%s", ckp->logdir, instance->username);
 			fp = fopen(fname, "we");
 			if (unlikely(!fp)) {
 				LOGERR("Failed to fopen %s", fname);
 				continue;
 			}
-			s = json_dumps(val, JSON_NO_UTF8);
+			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 			fprintf(fp, "%s\n", s);
-			/* Only display the status of connected users to the
-			 * console log. */
 			if (!idle)
-				LOGNOTICE("Worker %s:%s", client->workername, s);
+				LOGNOTICE("User %s:%s", instance->username, s);
 			dealloc(s);
 			json_decref(val);
 			fclose(fp);
