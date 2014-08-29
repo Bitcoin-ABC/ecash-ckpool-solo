@@ -195,6 +195,7 @@ struct user_instance {
 	bool btcaddress;
 
 	int workers;
+	char txnbin[25];
 };
 
 typedef struct user_instance user_instance_t;
@@ -1301,8 +1302,11 @@ static user_instance_t *authorise_user(ckpool_t *ckp, const char *workername)
 
 	if (new) {
 		/* Is this a btc address based username? */
-		if (len > 26 && len < 35)
+		if (len > 26 && len < 35) {
 			instance->btcaddress = test_address(ckp, username);
+			if (instance->btcaddress)
+				address_to_pubkeytxn(instance->txnbin, username);
+		}
 		LOGNOTICE("Added new user %s%s", username, instance->btcaddress ?
 			  " as address based registration" : "");
 	}
