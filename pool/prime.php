@@ -24,9 +24,9 @@ function process($p, $user)
 		'Payouts' => 'payout'
 	)
  );
- if ($user == 'Kano' || $user == 'ckolivas')
+ if ($user == 'Kano' || $user == 'ckolivas' || $user == 'aphorise')
 	$menu['Help']['ckp'] = 'ckp';
- if ($user == 'Kano' || $user == 'ckolivas' || $user == 'wvr2')
+ if ($user == 'Kano' || $user == 'ckolivas' || $user == 'wvr2' || $user == 'aphorise')
 	$menu['Pool']['PPLNS'] = 'pplns';
  $page = '';
  $n = '';

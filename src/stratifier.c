@@ -1913,7 +1913,8 @@ out_unlock:
 	json_set_int(val, "workinfoid", id);
 	json_set_int(val, "clientid", client->id);
 	json_set_string(val, "enonce1", client->enonce1);
-	json_set_string(val, "secondaryuserid", user_instance->secondaryuserid);
+	if (!ckp->standalone)
+		json_set_string(val, "secondaryuserid", user_instance->secondaryuserid);
 	json_set_string(val, "nonce2", nonce2);
 	json_set_string(val, "nonce", nonce);
 	json_set_string(val, "ntime", ntime);
