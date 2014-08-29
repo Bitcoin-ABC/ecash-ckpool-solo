@@ -191,8 +191,8 @@ struct userwb {
 	int64_t id;
 
 	workbase_t *wb; // Master workbase
-	char *coinb2bin; // Coinb2 cointaining this user's address for generation
-	uchar *coinb2;
+	uchar *coinb2bin; // Coinb2 cointaining this user's address for generation
+	char *coinb2;
 };
 
 static int64_t user_instance_id;
@@ -1470,6 +1470,16 @@ static void queue_delayed_auth(stratum_instance_t *client)
 	ckdbq_add(ckp, ID_AUTH, val);
 }
 
+static json_t *__user_notify(user_instance_t *user_instance, bool clean);
+
+static void __update_solo_client(stratum_instance_t *client, user_instance_t *user_instance)
+{
+	json_t *json_msg;
+
+	json_msg = __user_notify(user_instance, true);
+	stratum_add_send(json_msg, client->id);
+}
+
 static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, json_t **err_val,
 			       const char *address, int *errnum)
 {
@@ -1530,6 +1540,14 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 	if (client->authorised)
 		inc_worker(user_instance);
 out:
+	if (ckp->btcsolo && ret) {
+		ck_rlock(&workbase_lock);
+		__generate_userwb(current_workbase, user_instance);
+		__update_solo_client(client, user_instance);
+		ck_runlock(&workbase_lock);
+
+		stratum_send_diff(client);
+	}
 	return json_boolean(ret);
 }
 
@@ -1729,6 +1747,21 @@ test_blocksolve(stratum_instance_t *client, workbase_t *wb, const uchar *data, c
 	ckdbq_add(ckp, ID_BLOCK, val);
 }
 
+static inline uchar *user_coinb2(stratum_instance_t *client, workbase_t *wb)
+{
+	struct userwb *userwb;
+	int64_t id;
+
+	if (!client->ckp->btcsolo)
+		return wb->coinb2bin;
+
+	id = wb->id;
+	HASH_FIND_I64(client->user_instance->userwbs, &id, userwb);
+	if (unlikely(!userwb))
+		return wb->coinb2bin;
+	return userwb->coinb2bin;
+}
+
 static double submission_diff(stratum_instance_t *client, workbase_t *wb, const char *nonce2,
 			      uint32_t ntime32, const char *nonce, uchar *hash)
 {
@@ -1736,6 +1769,7 @@ static double submission_diff(stratum_instance_t *client, workbase_t *wb, const 
 	uint32_t *data32, *swap32, benonce32;
 	char *coinbase, data[80];
 	uchar swap[80], hash1[32];
+	uchar *coinb2bin;
 	int cblen, i;
 	double ret;
 
@@ -1746,7 +1780,8 @@ static double submission_diff(stratum_instance_t *client, workbase_t *wb, const 
 	cblen += wb->enonce1constlen + wb->enonce1varlen;
 	hex2bin(coinbase + cblen, nonce2, wb->enonce2varlen);
 	cblen += wb->enonce2varlen;
-	memcpy(coinbase + cblen, wb->coinb2bin, wb->coinb2len);
+	coinb2bin = user_coinb2(client, wb);
+	memcpy(coinbase + cblen, coinb2bin, wb->coinb2len);
 	cblen += wb->coinb2len;
 
 	gen_hash((uchar *)coinbase, merkle_root, cblen);
@@ -2139,7 +2174,6 @@ static void send_json_err(int64_t client_id, json_t *id_val, const char *err_msg
 	stratum_add_send(val, client_id);
 }
 
-/* FIXME: First work in btcsolo mode can't use base address */
 static void update_client(const int64_t client_id)
 {
 	stratum_instance_t *client;
@@ -2150,8 +2184,7 @@ static void update_client(const int64_t client_id)
 	client = __instance_by_id(client_id);
 	ck_runlock(&instance_lock);
 
-	if (likely(client))
-		stratum_send_diff(client);
+	stratum_send_diff(client);
 }
 
 static json_params_t *create_json_params(const int64_t client_id, const json_t *params, const json_t *id_val, const char *address)
@@ -2172,6 +2205,15 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 	const char *method;
 	char buf[256];
 
+	ck_rlock(&instance_lock);
+	client = __instance_by_id(client_id);
+	ck_runlock(&instance_lock);
+
+	if (unlikely(!client)) {
+		LOGINFO("Failed to find client id %d in hashtable!", client_id);
+		return;
+	}
+
 	/* Random broken clients send something not an integer as the id so we copy
 	 * the json item for id_val as is for the response. */
 	method = json_string_value(method_val);
@@ -2185,16 +2227,8 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 		json_object_set_nocheck(val, "id", id_val);
 		json_object_set_new_nocheck(val, "error", json_null());
 		stratum_add_send(val, client_id);
-		update_client(client_id);
-		return;
-	}
-
-	ck_rlock(&instance_lock);
-	client = __instance_by_id(client_id);
-	ck_runlock(&instance_lock);
-
-	if (unlikely(!client)) {
-		LOGINFO("Failed to find client id %d in hashtable!", client_id);
+		if (!client->ckp->btcsolo)
+			update_client(client_id);
 		return;
 	}
 
