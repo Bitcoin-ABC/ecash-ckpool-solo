@@ -1403,6 +1403,7 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 			       const char *address, int *errnum)
 {
 	user_instance_t *user_instance;
+	ckpool_t *ckp = client->ckp;
 	bool ret = false;
 	const char *buf;
 	int arr_size;
@@ -1430,7 +1431,7 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 		*err_val = json_string("Empty username parameter");
 		goto out;
 	}
-	user_instance = client->user_instance = authorise_user(client->ckp, buf);
+	user_instance = client->user_instance = authorise_user(ckp, buf);
 	client->user_id = user_instance->id;
 	ts_realtime(&now);
 	client->start_time = now.tv_sec;
@@ -1439,9 +1440,10 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 	LOGNOTICE("Authorised client %ld worker %s as user %s", client->id, buf,
 		  user_instance->username);
 	client->workername = strdup(buf);
-	if (client->ckp->standalone)
-		ret = true;
-	else {
+	if (ckp->standalone) {
+		if (!ckp->btcsolo || client->user_instance->btcaddress)
+			ret = true;
+	} else {
 		*errnum = send_recv_auth(client);
 		if (!*errnum)
 			ret = true;
