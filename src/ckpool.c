@@ -1229,6 +1229,18 @@ int main(int argc, char **argv)
 	if (ret && errno != EEXIST)
 		quit(1, "Failed to make log directory %s", ckp.logdir);
 
+	/* Create the user logdir */
+	sprintf(buf, "%s/users", ckp.logdir);
+	ret = mkdir(buf, 0750);
+	if (ret && errno != EEXIST)
+		quit(1, "Failed to make user log directory %s", buf);
+
+	/* Create the pool logdir */
+	sprintf(buf, "%s/pool", ckp.logdir);
+	ret = mkdir(buf, 0750);
+	if (ret && errno != EEXIST)
+		quit(1, "Failed to make pool log directory %s", buf);
+
 	/* Create the logfile */
 	sprintf(buf, "%s%s.log", ckp.logdir, ckp.name);
 	ckp.logfp = fopen(buf, "ae");

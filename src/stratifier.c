@@ -2630,7 +2630,7 @@ static void *statsupdate(void *arg)
 		ghs1440 = stats.dsps1440 * nonces / bias;
 		suffix_string(ghs1440, suffix1440, 16, 0);
 
-		snprintf(fname, 511, "%s/pool.status", ckp->logdir);
+		snprintf(fname, 511, "%s/pool/pool.status", ckp->logdir);
 		fp = fopen(fname, "we");
 		if (unlikely(!fp))
 			LOGERR("Failed to fopen %s", fname);
@@ -2639,7 +2639,7 @@ static void *statsupdate(void *arg)
 				"runtime", diff.tv_sec,
 				"Users", stats.users,
 				"Workers", stats.workers);
-		s = json_dumps(val, JSON_NO_UTF8);
+		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 		json_decref(val);
 		LOGNOTICE("Pool:%s", s);
 		fprintf(fp, "%s\n", s);
@@ -2652,7 +2652,7 @@ static void *statsupdate(void *arg)
 				"hashrate1hr", suffix60,
 				"hashrate6hr", suffix360,
 				"hashrate1d", suffix1440);
-		s = json_dumps(val, JSON_NO_UTF8);
+		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 		json_decref(val);
 		LOGNOTICE("Pool:%s", s);
 		fprintf(fp, "%s\n", s);
@@ -2663,7 +2663,7 @@ static void *statsupdate(void *arg)
 				"SPS5m", sps5,
 				"SPS15m", sps15,
 				"SPS1h", sps60);
-		s = json_dumps(val, JSON_NO_UTF8);
+		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 		json_decref(val);
 		LOGNOTICE("Pool:%s", s);
 		fprintf(fp, "%s\n", s);
@@ -2714,7 +2714,7 @@ static void *statsupdate(void *arg)
 					"hashrate1d", suffix1440,
 					"workers", instance->workers);
 
-			snprintf(fname, 511, "%s/%s", ckp->logdir, instance->username);
+			snprintf(fname, 511, "%s/users/%s", ckp->logdir, instance->username);
 			fp = fopen(fname, "we");
 			if (unlikely(!fp)) {
 				LOGERR("Failed to fopen %s", fname);
