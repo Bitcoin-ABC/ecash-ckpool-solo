@@ -803,6 +803,10 @@ static void __shutdown_children(ckpool_t *ckp, int sig)
 
 	cancel_join_pthread(&ckp->pth_watchdog);
 
+	/* They never got set up in the first place */
+	if (!ckp->children)
+		return;
+
 	for (i = 0; i < ckp->proc_instances; i++) {
 		pid_t pid = ckp->children[i]->pid;
 		if (!kill_pid(pid, 0))

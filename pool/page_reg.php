@@ -59,7 +59,7 @@ function safepass($pass)
 	return false;
 
  # Invalid characters
- $p2 = preg_replace('/[^ -~]/', '', $pass);
+ $p2 = preg_replace('/[\011]/', '', $pass);
  if ($p2 != $pass)
 	return false;
 
@@ -109,7 +109,7 @@ function show_reg($menu, $name, $u)
 	{
 		$ok = false;
 		$data['error'] = "Password is unsafe - requires 6 or more characters, including<br>" .
-				 "at least one of each uppercase, lowercase and digits";
+				 "at least one of each uppercase, lowercase and digits, but not Tab";
 	}
 	elseif ($pass2 != $pass)
 	{
@@ -118,11 +118,11 @@ function show_reg($menu, $name, $u)
 	}
 
 	$orig = $user;
-	$user = preg_replace('/[_\\.]/', '', $orig);
+	$user = preg_replace('/[\._\/\011]/', '', $orig);
 	if ($user != $orig)
 	{
 		$ok = false;
-		$data['error'] = "Username cannot include '.' or '_'";
+		$data['error'] = "Username cannot include '.', '_', '/' or Tab";
 		$data['user'] = $user;
 	}
  }

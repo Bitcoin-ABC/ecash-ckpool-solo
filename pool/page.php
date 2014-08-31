@@ -110,6 +110,9 @@ h1 {margin-top: 20px; float:middle; font-size: 20px;}
 .dl {text-align: left; padding: 2px 8px;}
 .dr {text-align: right; padding: 2px 8px;}
 .dc {text-align: center; padding: 2px 8px;}
+.dls {text-align: left; padding: 2px 8px; text-decoration:line-through; font-weight:lighter; }
+.drs {text-align: right; padding: 2px 8px; text-decoration:line-through; font-weight:lighter; }
+.dcs {text-align: center; padding: 2px 8px; text-decoration:line-through; font-weight:lighter; }
 </style>\n";
 
  $head .= '<meta name="robots" content="noindex">';

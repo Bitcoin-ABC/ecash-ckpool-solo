@@ -94,5 +94,7 @@ extern K_LIST *_k_free_list(K_LIST *list, KLIST_FFL_ARGS);
 #define k_free_list(_list) _k_free_list(_list, KLIST_FFL_HERE)
 extern K_STORE *_k_free_store(K_STORE *store, KLIST_FFL_ARGS);
 #define k_free_store(_store) _k_free_store(_store, KLIST_FFL_HERE)
+extern void _k_cull_list(K_LIST *list, KLIST_FFL_ARGS);
+#define k_cull_list(_list) _k_cull_list(_list, KLIST_FFL_HERE)
 
 #endif

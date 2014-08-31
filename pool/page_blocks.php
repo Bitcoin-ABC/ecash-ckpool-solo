@@ -12,7 +12,8 @@ function doblocks($data, $user)
  $pg .= "<td class=dl>Height</td>";
  $pg .= "<td class=dl>Who</td>";
  $pg .= "<td class=dr>Reward</td>";
- $pg .= "<td class=dr>When</td>";
+ $pg .= "<td class=dc>When</td>";
+ $pg .= "<td class=dr>Status</td>";
  $pg .= "</tr>\n";
  if ($ans['STATUS'] == 'ok')
  {
@@ -24,11 +25,19 @@ function doblocks($data, $user)
 		else
 			$row = 'odd';
 
+		$ex = '';
+		$stat = $ans['status'.$i];
+		if ($stat == 'Orphan')
+			$ex = 's';
+		if ($stat == '1-Confirm')
+			$stat = 'Conf';
+
 		$pg .= "<tr class=$row>";
-		$pg .= '<td class=dl>'.$ans['height'.$i].'</td>';
-		$pg .= '<td class=dl>'.$ans['workername'.$i].'</td>';
-		$pg .= '<td class=dr>'.btcfmt($ans['reward'.$i]).'</td>';
-		$pg .= '<td class=dl>'.gmdate('Y-m-d H:i:s+00', $ans['createdate'.$i]).'</td>';
+		$pg .= "<td class=dl$ex>".$ans['height'.$i].'</td>';
+		$pg .= "<td class=dl$ex>".$ans['workername'.$i].'</td>';
+		$pg .= "<td class=dr$ex>".btcfmt($ans['reward'.$i]).'</td>';
+		$pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['createdate'.$i]).'</td>';
+		$pg .= "<td class=dr$ex>".$stat.'</td>';
 		$pg .= "</tr>\n";
 	}
  }

@@ -19,6 +19,7 @@ function doworker($data, $user)
  $pg .= "</tr>\n";
  if ($ans['STATUS'] == 'ok')
  {
+	$thr = 0;
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
 	{
@@ -89,6 +90,7 @@ function doworker($data, $user)
 			$uhr = '?GHs';
 		else
 		{
+			$thr += $uhr;
 			$uhr /= 10000000;
 			if ($uhr < 0.01)
 				$uhr = '0GHs';
@@ -104,6 +106,21 @@ function doworker($data, $user)
 		$pg .= "</tr>\n";
 	}
  }
+ $thr /= 10000000;
+ if ($thr < 0.01)
+	$thr = '0GHs';
+ else
+ {
+	if ($thr < 100000)
+		$thr = number_format(round($thr)/100,2).'GHs';
+	else
+		$thr = number_format(round($thr/1000)/100,2).'THs';
+ }
+ if (($i % 2) == 0)
+	$row = 'even';
+ else
+	$row = 'odd';
+ $pg .= "<tr class=$row><td colspan=3 class=dl></td><td class=dr>$thr</td></tr>\n";
  $pg .= "</table>\n";
 
  return $pg;

@@ -378,3 +378,36 @@ K_STORE *_k_free_store(K_STORE *store, KLIST_FFL_ARGS)
 
 	return NULL;
 }
+
+// Must be locked and none in use and/or unlinked
+void _k_cull_list(K_LIST *list, KLIST_FFL_ARGS)
+{
+	int i;
+
+	if (list->is_store) {
+		quithere(1, "List %s can't %s() a store" KLIST_FFL,
+				list->name, __func__, KLIST_FFL_PASS);
+	}
+
+	if (list->count != list->total) {
+		quithere(1, "List %s can't %s() a list in use" KLIST_FFL,
+				list->name, __func__, KLIST_FFL_PASS);
+	}
+
+	for (i = 0; i < list->item_mem_count; i++)
+		free(list->item_memory[i]);
+	free(list->item_memory);
+	list->item_memory = NULL;
+	list->item_mem_count = 0;
+
+	for (i = 0; i < list->data_mem_count; i++)
+		free(list->data_memory[i]);
+	free(list->data_memory);
+	list->data_memory = NULL;
+	list->data_mem_count = 0;
+
+	list->total = list->count = list->count_up = 0;
+	list->head = list->tail = NULL;
+
+	k_alloc_items(list, KLIST_FFL_PASS);
+}
