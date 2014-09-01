@@ -1616,20 +1616,23 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 		network_diff = current_workbase->network_diff;
 	ck_runlock(&workbase_lock);
 
-	tdiff = sane_tdiff(&now_t, &client->last_share);
 	if (!client->first_share.tv_sec) {
 		copy_tv(&client->first_share, &now_t);
 		copy_tv(&client->ldc, &now_t);
 	}
+
+	tdiff = sane_tdiff(&now_t, &client->last_share);
 	decay_time(&client->dsps1, diff, tdiff, 60);
 	decay_time(&client->dsps5, diff, tdiff, 300);
 	decay_time(&client->dsps60, diff, tdiff, 3600);
 	decay_time(&client->dsps1440, diff, tdiff, 86400);
+	copy_tv(&client->last_share, &now_t);
+
+	tdiff = sane_tdiff(&now_t, &instance->last_share);
 	decay_time(&instance->dsps1, diff, tdiff, 60);
 	decay_time(&instance->dsps5, diff, tdiff, 300);
 	decay_time(&instance->dsps60, diff, tdiff, 3600);
 	decay_time(&instance->dsps1440, diff, tdiff, 86400);
-	copy_tv(&client->last_share, &now_t);
 	copy_tv(&instance->last_share, &now_t);
 	client->idle = false;
 
