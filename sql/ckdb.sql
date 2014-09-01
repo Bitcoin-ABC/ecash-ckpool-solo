@@ -289,7 +289,12 @@ CREATE TABLE blocks (
     nonce2 character varying(256) NOT NULL,
     nonce character varying(64) NOT NULL,
     reward bigint NOT NULL, -- satoshis
-    confirmed char DEFAULT '' NOT NULL, -- blank, 'c'onfirmed or 'o'rphan
+    confirmed char DEFAULT '' NOT NULL,
+    diffacc float DEFAULT 0 NOT NULL,
+    differr float DEFAULT 0 NOT NULL,
+    sharecount bigint DEFAULT 0 NOT NULL,
+    errorcount bigint DEFAULT 0 NOT NULL,
+    elapsed bigint DEFAULT 0 NOT NULL,
     createdate timestamp with time zone NOT NULL,
     createby character varying(64) DEFAULT ''::character varying NOT NULL,
     createcode character varying(128) DEFAULT ''::character varying NOT NULL,
@@ -340,6 +345,7 @@ CREATE TABLE auths (
     clientid integer NOT NULL,
     enonce1 character varying(64) NOT NULL,
     useragent character varying(256) NOT NULL,
+    preauth char DEFAULT 'N' NOT NULL,
     createdate timestamp with time zone NOT NULL,
     createby character varying(64) DEFAULT ''::character varying NOT NULL,
     createcode character varying(128) DEFAULT ''::character varying NOT NULL,
@@ -391,4 +397,4 @@ CREATE TABLE version (
     PRIMARY KEY (vlock)
 );
 
-insert into version (vlock,version) values (1,'0.7');
+insert into version (vlock,version) values (1,'0.8');

@@ -36,7 +36,7 @@ function doblocks($data, $user)
 		$pg .= "<td class=dl$ex>".$ans['height'.$i].'</td>';
 		$pg .= "<td class=dl$ex>".$ans['workername'.$i].'</td>';
 		$pg .= "<td class=dr$ex>".btcfmt($ans['reward'.$i]).'</td>';
-		$pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['createdate'.$i]).'</td>';
+		$pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['firstcreatedate'.$i]).'</td>';
 		$pg .= "<td class=dr$ex>".$stat.'</td>';
 		$pg .= "</tr>\n";
 	}

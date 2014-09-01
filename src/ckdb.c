@@ -46,8 +46,8 @@
  */
 
 #define DB_VLOCK "1"
-#define DB_VERSION "0.7"
-#define CKDB_VERSION DB_VERSION"-0.106"
+#define DB_VERSION "0.8"
+#define CKDB_VERSION DB_VERSION"-0.202"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -128,8 +128,6 @@ static char *restorefrom;
  *  ckdb aborting and needing a complete restart resolves it
  * The users table, required for the authorise messages, is always updated
  *  immediately and is not affected by ckpool messages until we
- *   TODO: allow bitcoin addresses - this will also need to be handled
- *    while filling the queue during reload, once we allow BTC addresses
  * During the reload, when checking the timeframe for summarisation, we
  *  use the current last userstats createdate as 'now' to avoid touching a
  *  timeframe where data could still be waiting to be loaded
@@ -767,6 +765,7 @@ enum cmd_values {
 	CMD_LOGLEVEL,
 	CMD_SHARELOG,
 	CMD_AUTH,
+	CMD_ADDRAUTH,
 	CMD_ADDUSER,
 	CMD_NEWPASS,
 	CMD_CHKPASS,
@@ -841,6 +840,8 @@ static K_LIST *transfer_free;
 // older version missing field defaults
 static TRANSFER auth_1 = { "poolinstance", "", auth_1.value };
 static K_ITEM auth_poolinstance = { "tmp", NULL, NULL, (void *)(&auth_1) };
+static TRANSFER auth_2 = { "preauth", FALSE_STR, auth_2.value };
+static K_ITEM auth_preauth = { "tmp", NULL, NULL, (void *)(&auth_2) };
 static TRANSFER poolstats_1 = { "elapsed", "0", poolstats_1.value };
 static K_ITEM poolstats_elapsed = { "tmp", NULL, NULL, (void *)(&poolstats_1) };
 static TRANSFER userstats_1 = { "elapsed", "0", userstats_1.value };
@@ -1043,7 +1044,7 @@ static K_LIST *optioncontrol_free;
 static K_STORE *optioncontrol_store;
 */
 
-// TODO: aging/discarding workinfo,shares
+// TODO: discarding workinfo,shares
 // WORKINFO workinfo.id.json={...}
 typedef struct workinfo {
 	int64_t workinfoid;
@@ -1254,6 +1255,7 @@ typedef struct auths {
 	int32_t clientid;
 	char enonce1[TXT_SML+1];
 	char useragent[TXT_BIG+1];
+	char preauth[TXT_FLAG+1];
 	HISTORYDATECONTROLFIELDS;
 } AUTHS;
 
@@ -2475,7 +2477,7 @@ unparam:
 	return ok;
 }
 
-static bool users_add(PGconn *conn, char *username, char *emailaddress,
+static K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 			char *passwordhash, char *by, char *code, char *inet,
 			tv_t *cd, K_TREE *trf_root)
 {
@@ -2568,7 +2570,10 @@ unitem:
 	}
 	K_WUNLOCK(users_free);
 
-	return ok;
+	if (ok)
+		return item;
+	else
+		return NULL;
 }
 
 static bool users_fill(PGconn *conn)
@@ -3158,7 +3163,7 @@ static bool payments_fill(PGconn *conn)
 
 	LOGDEBUG("%s(): select", __func__);
 
-	// TODO: handle selecting a subset, eg 20 per web page
+	// TODO: handle selecting a subset, eg 20 per web page (in blocklist also)
 	sel = "select "
 		"userid,paydate,payaddress,originaltxn,amount,committxn,commitblockhash"
 		HISTORYDATECONTROL
@@ -3481,20 +3486,6 @@ static bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row
 static cmp_t cmp_sharesummary_workinfoid(K_ITEM *a, K_ITEM *b);
 static cmp_t cmp_shares(K_ITEM *a, K_ITEM *b);
 
-/* N.B. a DB check can be done to find sharesummaries that have missed being
- *  aged (and a possible problem with the aging process):
- *  e.g. for a date D in the past of at least a few hours
- *	select count(*) from sharesummary where createdate<'D' and complete='n';
- *   and can be easily corrected:
- *	update sharesummary set complete='a' where createdate<'D' and complete='n';
- * It's important to make sure the D value is far enough in the past such that
- *  all the matching sharesummary records in ckdb have certainly completed
- *  ckdb would need to restart to get the updated DB information though it would
- *  not affect current ckdb code
- * TODO: This will happen until auto aging is added here - since ckpool can not reliably
- *  age all workinfo that was active when it exits (e.g. a crash) so best to not
- *  try, but get ckdb to auto age old unaged data
- */
 static bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 			 char *by, char *code, char *inet, tv_t *cd,
 			 tv_t *ss_first, tv_t *ss_last, int64_t *ss_count,
@@ -4000,7 +3991,6 @@ static bool shares_add(PGconn *conn, char *workinfoid, char *username, char *wor
 
 	shares = DATA_SHARES(s_item);
 
-	// TODO: allow BTC address later?
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
@@ -4097,9 +4087,6 @@ unitem:
 
 static bool shares_fill()
 {
-	// TODO: reload shares from workinfo from log file
-	// and verify workinfo while doing that
-
 	return true;
 }
 
@@ -4143,7 +4130,6 @@ static bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 
 	shareerrors = DATA_SHAREERRORS(s_item);
 
-	// TODO: allow BTC address later?
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
@@ -4234,9 +4220,6 @@ unitem:
 
 static bool shareerrors_fill()
 {
-	// TODO: reload shareerrors from workinfo from log file
-	// and verify workinfo while doing that
-
 	return true;
 }
 
@@ -4836,6 +4819,38 @@ void sharesummary_reload()
 	PQfinish(conn);
 }
 
+// TODO: do this better ... :)
+static void dsp_hash(char *hash, char *buf, size_t siz)
+{
+	char *ptr;
+
+	ptr = hash + strlen(hash) - (siz - 1) - 8;
+	if (ptr < hash)
+		ptr = hash;
+	STRNCPYSIZ(buf, ptr, siz);
+}
+
+static void dsp_blocks(K_ITEM *item, FILE *stream)
+{
+	char createdate_buf[DATE_BUFSIZ], expirydate_buf[DATE_BUFSIZ];
+	BLOCKS *b = NULL;
+	char hash_dsp[16+1];
+
+	if (!item)
+		fprintf(stream, "%s() called with (null) item\n", __func__);
+	else {
+		b = DATA_BLOCKS(item);
+
+		dsp_hash(b->blockhash, hash_dsp, sizeof(hash_dsp));
+		tv_to_buf(&(b->createdate), createdate_buf, sizeof(createdate_buf));
+		tv_to_buf(&(b->expirydate), expirydate_buf, sizeof(expirydate_buf));
+		fprintf(stream, " hi=%d hash='%.16s' uid=%"PRId64" w='%s' "
+				"cd=%s ed=%s\n",
+				b->height, hash_dsp, b->userid, b->workername,
+				createdate_buf, expirydate_buf);
+	}
+}
+
 // order by height asc,blockhash asc,expirydate desc
 static cmp_t cmp_blocks(K_ITEM *a, K_ITEM *b)
 {
@@ -4896,7 +4911,7 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 	K_TREE_CTX ctx[1];
 	K_ITEM *b_item, *u_item, *old_b_item;
 	char cd_buf[DATE_BUFSIZ];
-	char blk_dsp[16+1], *ptr;
+	char hash_dsp[16+1];
 	BLOCKS *row;
 	char *upd, *ins;
 	char *params[11 + HISTORYDATECOUNT];
@@ -4918,11 +4933,7 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 
 	HISTORYDATEINIT(row, cd, by, code, inet);
 
-	// TODO: do this better ... :)
-	ptr = blockhash + strlen(blockhash) - (sizeof(blk_dsp)-1) - 8;
-	if (ptr < blockhash)
-		ptr = blockhash;
-	STRNCPY(blk_dsp, ptr);
+	dsp_hash(blockhash, hash_dsp, sizeof(hash_dsp));
 
 	K_WLOCK(blocks_free);
 	old_b_item = find_blocks(row->height, blockhash);
@@ -4940,7 +4951,7 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 						__func__,
 						blocks_confirmed(DATA_BLOCKS(old_b_item)->confirmed),
 						blocks_confirmed(confirmed),
-						height, blk_dsp, cd_buf);
+						height, hash_dsp, cd_buf);
 				}
 				return true;
 			}
@@ -5007,7 +5018,7 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 					"Ignored: Block: %s/...%s/%s",
 					__func__,
 					blocks_confirmed(confirmed),
-					height, blk_dsp, cd_buf);
+					height, hash_dsp, cd_buf);
 				goto flail;
 			}
 			want = BLOCKS_CONFIRM;
@@ -5017,7 +5028,7 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 				tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 				LOGERR("%s(): Can't %s a non-existent Block: %s/...%s/%s",
 					__func__, blocks_confirmed(confirmed),
-					height, blk_dsp, cd_buf);
+					height, hash_dsp, cd_buf);
 				goto flail;
 			}
 			if (confirmed[0] == BLOCKS_CONFIRM)
@@ -5026,15 +5037,14 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 				k_add_head(blocks_free, b_item);
 				K_WUNLOCK(blocks_free);
 				// No mismatch messages during startup
-				if (!startup_complete) {
+				if (startup_complete) {
 					tv_to_buf(cd, cd_buf, sizeof(cd_buf));
-					LOGERR("%s(): Request Status: %s requires Status: %s. "
+					LOGERR("%s(): New Status: %s requires Status: %c. "
 						"Ignored: Status: %s, Block: %s/...%s/%s",
 						__func__,
-						blocks_confirmed(confirmed),
-						blocks_confirmed(BLOCKS_CONFIRM_STR),
+						blocks_confirmed(confirmed), want,
 						blocks_confirmed(DATA_BLOCKS(old_b_item)->confirmed),
-						height, blk_dsp, cd_buf);
+						height, hash_dsp, cd_buf);
 				}
 				goto flail;
 			}
@@ -5174,9 +5184,10 @@ flail:
 				}
 				tv_to_buf(&(DATA_BLOCKS(b_item)->createdate), cd_buf, sizeof(cd_buf));
 				snprintf(tmp, sizeof(tmp),
-					 " Reward: %f, User: %s, Worker: %s, ShareEst: %.1f %s%s%% UTC:%s",
+					 " Reward: %f, Worker: %s, ShareEst: %.1f %s%s%% UTC:%s",
 					 BTC_TO_D(DATA_BLOCKS(b_item)->reward),
-					 username, workername, pool.diffacc, est, pct, cd_buf);
+					 DATA_BLOCKS(b_item)->workername,
+					 pool.diffacc, est, pct, cd_buf);
 				if (pool.workinfoid < DATA_BLOCKS(b_item)->workinfoid) {
 					pool.workinfoid = DATA_BLOCKS(b_item)->workinfoid;
 					pool.diffacc = pool.differr =
@@ -5194,7 +5205,7 @@ flail:
 		LOGWARNING("%s(): %sStatus: %s, Block: %s/...%s%s",
 			   __func__, blk ? "BLOCK! " : "",
 			   blocks_confirmed(confirmed),
-			   height, blk_dsp, tmp);
+			   height, hash_dsp, tmp);
 	}
 
 	return ok;
@@ -5574,8 +5585,9 @@ static cmp_t cmp_auths(K_ITEM *a, K_ITEM *b)
 
 static char *auths_add(PGconn *conn, char *poolinstance, char *username,
 			char *workername, char *clientid, char *enonce1,
-			char *useragent, char *by, char *code, char *inet,
-			tv_t *cd, bool igndup, K_TREE *trf_root)
+			char *useragent, char *preauth, char *by, char *code,
+			char *inet, tv_t *cd, bool igndup, K_TREE *trf_root,
+			bool addressuser)
 {
 	ExecStatusType rescode;
 	bool conned = false;
@@ -5587,7 +5599,7 @@ static char *auths_add(PGconn *conn, char *poolinstance, char *username,
 	AUTHS *row;
 	char *ins;
 	char *secuserid = NULL;
-	char *params[7 + HISTORYDATECOUNT];
+	char *params[8 + HISTORYDATECOUNT];
 	int par;
 
 	LOGDEBUG("%s(): add", __func__);
@@ -5601,8 +5613,18 @@ static char *auths_add(PGconn *conn, char *poolinstance, char *username,
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
-	if (!u_item)
-		goto unitem;
+	if (!u_item) {
+		if (addressuser) {
+			if (conn == NULL) {
+				conn = dbconnect();
+				conned = true;
+			}
+			u_item = users_add(conn, username, EMPTY, EMPTY,
+					   by, code, inet, cd, trf_root);
+		}
+		if (!u_item)
+			goto unitem;
+	}
 
 	STRNCPY(row->poolinstance, poolinstance);
 	row->userid = DATA_USERS(u_item)->userid;
@@ -5614,6 +5636,7 @@ static char *auths_add(PGconn *conn, char *poolinstance, char *username,
 	TXT_TO_INT("clientid", clientid, row->clientid);
 	STRNCPY(row->enonce1, enonce1);
 	STRNCPY(row->useragent, useragent);
+	STRNCPY(row->preauth, preauth);
 
 	HISTORYDATEINIT(row, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, row);
@@ -5622,6 +5645,9 @@ static char *auths_add(PGconn *conn, char *poolinstance, char *username,
 	if (find_in_ktree(auths_root, a_item, cmp_auths, ctx)) {
 		k_add_head(auths_free, a_item);
 		K_WUNLOCK(auths_free);
+
+		if (conned)
+			PQfinish(conn);
 
 		if (!igndup) {
 			tv_to_buf(cd, cd_buf, sizeof(cd_buf));
@@ -5653,12 +5679,13 @@ static char *auths_add(PGconn *conn, char *poolinstance, char *username,
 	params[par++] = int_to_buf(row->clientid, NULL, 0);
 	params[par++] = str_to_buf(row->enonce1, NULL, 0);
 	params[par++] = str_to_buf(row->useragent, NULL, 0);
+	params[par++] = str_to_buf(row->preauth, NULL, 0);
 	HISTORYDATEPARAMS(params, par, row);
 	PARCHK(par, params);
 
 	ins = "insert into auths "
-		"(authid,poolinstance,userid,workername,clientid,enonce1,useragent"
-		HISTORYDATECONTROL ") values (" PQPARAM12 ")";
+		"(authid,poolinstance,userid,workername,clientid,enonce1,useragent,preauth"
+		HISTORYDATECONTROL ") values (" PQPARAM13 ")";
 
 	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
 	rescode = PQresultStatus(res);
@@ -5704,7 +5731,7 @@ static bool auths_fill(PGconn *conn)
 
 	LOGDEBUG("%s(): select", __func__);
 
-	// TODO: keep last x - since a user may login and mine for 100 days
+	// TODO: add/update a (single) fake auth every ~10min or 10min after the last one?
 	sel = "select "
 		"authid,userid,workername,clientid,enonce1,useragent"
 		HISTORYDATECONTROL
@@ -6810,7 +6837,6 @@ static void clean_up(ckpool_t *ckp)
 	fclose(ckp->logfp);
 }
 
-// TODO: skip ones not needed for confirm_summaries()
 static void alloc_storage()
 {
 	workqueue_free = k_new_list("WorkQueue", sizeof(WORKQUEUE),
@@ -6869,6 +6895,7 @@ static void alloc_storage()
 					ALLOC_BLOCKS, LIMIT_BLOCKS, true);
 	blocks_store = k_new_store(blocks_free);
 	blocks_root = new_ktree();
+	blocks_free->dsp_func = dsp_blocks;
 
 	miningpayouts_free = k_new_list("MiningPayouts", sizeof(MININGPAYOUTS),
 					ALLOC_MININGPAYOUTS, LIMIT_MININGPAYOUTS, true);
@@ -6955,9 +6982,7 @@ static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
-
-	K_ITEM *i_username, *i_emailaddress, *i_passwordhash;
-	bool ok;
+	K_ITEM *i_username, *i_emailaddress, *i_passwordhash, *u_item;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -6973,12 +6998,12 @@ static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 	if (!i_passwordhash)
 		return strdup(reply);
 
-	ok = users_add(conn, DATA_TRANSFER(i_username)->data,
-			     DATA_TRANSFER(i_emailaddress)->data,
-			     DATA_TRANSFER(i_passwordhash)->data,
-			     by, code, inet, now, trf_root);
+	u_item = users_add(conn, DATA_TRANSFER(i_username)->data,
+				 DATA_TRANSFER(i_emailaddress)->data,
+				 DATA_TRANSFER(i_passwordhash)->data,
+				 by, code, inet, now, trf_root);
 
-	if (!ok) {
+	if (!u_item) {
 		LOGERR("%s() %s.failed.DBE", __func__, id);
 		return strdup("failed.DBE");
 	}
@@ -7272,6 +7297,8 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 	char tmp[1024];
 	char *buf;
 	size_t len, off;
+	int32_t height = -1;
+	tv_t first_cd = {0,0};
 	int rows;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
@@ -7282,6 +7309,10 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_RLOCK(blocks_free);
 	b_item = last_in_ktree(blocks_root, ctx);
 	while (b_item && rows < 42) {
+		if (height != DATA_BLOCKS(b_item)->height) {
+			height = DATA_BLOCKS(b_item)->height;
+			copy_tv(&first_cd, &(DATA_BLOCKS(b_item)->createdate));
+		}
 		if (CURRENT(&(DATA_BLOCKS(b_item)->expirydate))) {
 			int_to_buf(DATA_BLOCKS(b_item)->height, reply, sizeof(reply));
 			snprintf(tmp, sizeof(tmp), "height%d=%s%c", rows, reply, FLDSEP);
@@ -7301,6 +7332,11 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 			str_to_buf(DATA_BLOCKS(b_item)->workername, reply, sizeof(reply));
 			snprintf(tmp, sizeof(tmp), "workername%d=%s%c", rows, reply, FLDSEP);
+			APPEND_REALLOC(buf, off, len, tmp);
+
+			snprintf(tmp, sizeof(tmp),
+				 "firstcreatedate%d=%ld%c", rows,
+				 first_cd.tv_sec, FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 
 			snprintf(tmp, sizeof(tmp),
@@ -8210,7 +8246,10 @@ static char *cmd_blocks_do(PGconn *conn, char *cmd, char *id, char *by,
 	}
 
 	if (!ok) {
-		LOGERR("%s() %s.failed.DBE", __func__, id);
+		/* Ignore during startup,
+		 * another error should have shown if it matters */
+		if (startup_complete)
+			LOGERR("%s() %s.failed.DBE", __func__, id);
 		return strdup("failed.DBE");
 	}
 
@@ -8244,7 +8283,7 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
 	K_ITEM *i_poolinstance, *i_username, *i_workername, *i_clientid;
-	K_ITEM *i_enonce1, *i_useragent;
+	K_ITEM *i_enonce1, *i_useragent, *i_preauth;
 	char *secuserid;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
@@ -8273,13 +8312,18 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	if (!i_useragent)
 		return strdup(reply);
 
+	i_preauth = optional_name(trf_root, "preauth", 1, NULL);
+	if (!i_preauth)
+		i_preauth = &auth_preauth;
+
 	secuserid = auths_add(conn, DATA_TRANSFER(i_poolinstance)->data,
 				    DATA_TRANSFER(i_username)->data,
 				    DATA_TRANSFER(i_workername)->data,
 				    DATA_TRANSFER(i_clientid)->data,
 				    DATA_TRANSFER(i_enonce1)->data,
 				    DATA_TRANSFER(i_useragent)->data,
-				    by, code, inet, cd, igndup, trf_root);
+				    DATA_TRANSFER(i_preauth)->data,
+				    by, code, inet, cd, igndup, trf_root, false);
 
 	if (!secuserid) {
 		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
@@ -8307,6 +8351,83 @@ static char *cmd_auth(PGconn *conn, char *cmd, char *id,
 	}
 
 	return cmd_auth_do(conn, cmd, id, by, code, inet, cd, igndup, trf_root);
+}
+
+static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
+				char *code, char *inet, tv_t *cd, bool igndup,
+				K_TREE *trf_root)
+{
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	K_ITEM *i_poolinstance, *i_username, *i_workername, *i_clientid;
+	K_ITEM *i_enonce1, *i_useragent, *i_preauth;
+	char *secuserid;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	i_poolinstance = optional_name(trf_root, "poolinstance", 1, NULL);
+	if (!i_poolinstance)
+		i_poolinstance = &auth_poolinstance;
+
+	i_username = require_name(trf_root, "username", 1, NULL, reply, siz);
+	if (!i_username)
+		return strdup(reply);
+
+	i_workername = require_name(trf_root, "workername", 1, NULL, reply, siz);
+	if (!i_workername)
+		return strdup(reply);
+
+	i_clientid = require_name(trf_root, "clientid", 1, NULL, reply, siz);
+	if (!i_clientid)
+		return strdup(reply);
+
+	i_enonce1 = require_name(trf_root, "enonce1", 1, NULL, reply, siz);
+	if (!i_enonce1)
+		return strdup(reply);
+
+	i_useragent = require_name(trf_root, "useragent", 0, NULL, reply, siz);
+	if (!i_useragent)
+		return strdup(reply);
+
+	i_preauth = require_name(trf_root, "preauth", 1, NULL, reply, siz);
+	if (!i_preauth)
+		return strdup(reply);
+
+	secuserid = auths_add(conn, DATA_TRANSFER(i_poolinstance)->data,
+				    DATA_TRANSFER(i_username)->data,
+				    DATA_TRANSFER(i_workername)->data,
+				    DATA_TRANSFER(i_clientid)->data,
+				    DATA_TRANSFER(i_enonce1)->data,
+				    DATA_TRANSFER(i_useragent)->data,
+				    DATA_TRANSFER(i_preauth)->data,
+				    by, code, inet, cd, igndup, trf_root, true);
+
+	if (!secuserid) {
+		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
+		return strdup("failed.DBE");
+	}
+
+	LOGDEBUG("%s.ok.auth added for %s", id, secuserid);
+	snprintf(reply, siz, "ok.%s", secuserid);
+	return strdup(reply);
+}
+
+static char *cmd_addrauth(PGconn *conn, char *cmd, char *id,
+			__maybe_unused tv_t *now, char *by,
+			char *code, char *inet, tv_t *cd,
+			K_TREE *trf_root)
+{
+	bool igndup = false;
+
+	// confirm_summaries() doesn't call this
+	if (reloading) {
+		if (tv_equal(cd, &(dbstatus.newest_createdate_auths)))
+			igndup = true;
+		else if (tv_newer(cd, &(dbstatus.newest_createdate_auths)))
+			return NULL;
+	}
+
+	return cmd_addrauth_do(conn, cmd, id, by, code, inet, cd, igndup, trf_root);
 }
 
 static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
@@ -8347,7 +8468,9 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	}
 
 	// TODO: handle orphans
+	K_RLOCK(blocks_free);
 	b_item = last_in_ktree(blocks_root, ctx);
+	K_RUNLOCK(blocks_free);
 	if (b_item) {
 		tvs_to_buf(&(DATA_BLOCKS(b_item)->createdate), reply, sizeof(reply));
 		snprintf(tmp, sizeof(tmp), "lastblock=%s%cconfirmed=%s%c",
@@ -8509,6 +8632,7 @@ static K_TREE *upd_add_mu(K_TREE *mu_root, K_STORE *mu_store, int64_t userid, in
    The value of diff_want defaults to the block's network difficulty
     (block_ndiff) but can be changed with diff_times and diff_add to:
 	block_ndiff * diff_times + diff_add
+    N.B. diff_times and diff_add can be zero, positive or negative
    The pplns_elapsed time of the shares is from the createdate of the
     begin_workinfoid that has shares accounted to the total,
     up to the createdate of the last share
@@ -8573,8 +8697,10 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	blocks.height = height + 1;
 	blocks.blockhash[0] = '\0';
 	look.data = (void *)(&blocks);
+	K_RLOCK(blocks_free);
 	b_item = find_before_in_ktree(blocks_root, &look, cmp_blocks, ctx);
 	if (!b_item) {
+		K_RUNLOCK(blocks_free);
 		snprintf(reply, siz, "ERR.no block height %d", height);
 		return strdup(reply);
 	}
@@ -8583,6 +8709,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 			break;
 		b_item = prev_in_ktree(ctx);
 	}
+	K_RUNLOCK(blocks_free);
 	if (!b_item || DATA_BLOCKS(b_item)->height != height) {
 		snprintf(reply, siz, "ERR.unconfirmed block %d", height);
 		return strdup(reply);
@@ -8600,6 +8727,13 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	hex2bin(ndiffbin, DATA_WORKINFO(w_item)->bits, 4);
 	ndiff = diff_from_nbits(ndiffbin);
 	diff_want = ndiff * diff_times + diff_add;
+	if (diff_want < 1.0) {
+		snprintf(reply, siz,
+			 "ERR.invalid diff_want result %f",
+			 diff_want);
+		return strdup(reply);
+	}
+
 	begin_workinfoid = 0;
 	share_count = 0;
 	total = 0;
@@ -8634,7 +8768,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 					break;
 			default:
 				snprintf(reply, siz,
-					 "ERR.sharesummary not ready in workinfo %"PRId64,
+					 "ERR.sharesummary1 not ready in workinfo %"PRId64,
 					 DATA_SHARESUMMARY(ss_item)->workinfoid);
 				goto shazbot;
 		}
@@ -8659,7 +8793,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 					break;
 			default:
 				snprintf(reply, siz,
-					 "ERR.sharesummary not ready in workinfo %"PRId64,
+					 "ERR.sharesummary2 not ready in workinfo %"PRId64,
 					 DATA_SHARESUMMARY(ss_item)->workinfoid);
 				goto shazbot;
 		}
@@ -8818,6 +8952,8 @@ static char *cmd_dsp(__maybe_unused PGconn *conn, __maybe_unused char *cmd,
 	if (!i_file)
 		return strdup(reply);
 
+	dsp_ktree(blocks_free, blocks_root, DATA_BLOCKS(i_file)->data, NULL);
+
 	dsp_ktree(transfer_free, trf_root, DATA_TRANSFER(i_file)->data, NULL);
 
 	dsp_ktree(sharesummary_free, sharesummary_root, DATA_TRANSFER(i_file)->data, NULL);
@@ -8964,6 +9100,7 @@ static struct CMDS {
 	{ CMD_SHARELOG,	STR_SHAREERRORS, false,	true,	cmd_sharelog,	ACCESS_POOL },
 	{ CMD_SHARELOG,	STR_AGEWORKINFO, false,	true,	cmd_sharelog,	ACCESS_POOL },
 	{ CMD_AUTH,	"authorise",	false,	true,	cmd_auth,	ACCESS_POOL },
+	{ CMD_ADDRAUTH,	"addrauth",	false,	true,	cmd_addrauth,	ACCESS_POOL },
 	{ CMD_ADDUSER,	"adduser",	false,	false,	cmd_adduser,	ACCESS_WEB },
 	{ CMD_NEWPASS,	"newpass",	false,	false,	cmd_newpass,	ACCESS_WEB },
 	{ CMD_CHKPASS,	"chkpass",	false,	false,	cmd_chkpass,	ACCESS_WEB },
@@ -9470,6 +9607,16 @@ static void *logger(__maybe_unused void *arg)
 	return NULL;
 }
 
+#define STORELASTREPLY(_cmd) do { \
+		if (last_ ## _cmd) \
+			free(last_ ## _cmd); \
+		last_ ## _cmd = buf; \
+		buf = NULL; \
+		if (reply_ ## _cmd) \
+			free(reply_ ## _cmd); \
+		reply_ ## _cmd = rep; \
+	} while (0)
+
 static void *socketer(__maybe_unused void *arg)
 {
 	proc_instance_t *pi = (proc_instance_t *)arg;
@@ -9477,6 +9624,7 @@ static void *socketer(__maybe_unused void *arg)
 	char *end, *ans = NULL, *rep = NULL, *buf = NULL, *dot;
 	char cmd[CMD_SIZ+1], id[ID_SIZ+1], reply[1024+1];
 	char *last_auth = NULL, *reply_auth = NULL;
+	char *last_addrauth = NULL, *reply_addrauth = NULL;
 	char *last_chkpass = NULL, *reply_chkpass = NULL;
 	char *last_adduser = NULL, *reply_adduser = NULL;
 	char *last_newpass = NULL, *reply_newpass = NULL;
@@ -9547,6 +9695,7 @@ static void *socketer(__maybe_unused void *arg)
 			 *   the reply without reprocessing the message
 			 */
 			dup = false;
+			// These are ordered approximately most likely first
 			if (last_auth && strcmp(last_auth, buf) == 0) {
 				reply_last = reply_auth;
 				dup = true;
@@ -9561,6 +9710,9 @@ static void *socketer(__maybe_unused void *arg)
 				dup = true;
 			} else if (last_newid && strcmp(last_newid, buf) == 0) {
 				reply_last = reply_newid;
+				dup = true;
+			} else if (last_addrauth && strcmp(last_addrauth, buf) == 0) {
+				reply_last = reply_auth;
 				dup = true;
 			} else if (last_web && strcmp(last_web, buf) == 0) {
 				reply_last = reply_web;
@@ -9636,6 +9788,7 @@ static void *socketer(__maybe_unused void *arg)
 						break;
 					// Always process immediately:
 					case CMD_AUTH:
+					case CMD_ADDRAUTH:
 						// First message from the pool
 						if (want_first) {
 							ck_wlock(&fpm_lock);
@@ -9662,49 +9815,22 @@ static void *socketer(__maybe_unused void *arg)
 						ans = NULL;
 						switch (cmdnum) {
 							case CMD_AUTH:
-								if (last_auth)
-									free(last_auth);
-								last_auth = buf;
-								buf = NULL;
-								if (reply_auth)
-									free(reply_auth);
-								reply_auth = rep;
+								STORELASTREPLY(auth);
+								break;
+							case CMD_ADDRAUTH:
+								STORELASTREPLY(addrauth);
 								break;
 							case CMD_CHKPASS:
-								if (last_chkpass)
-									free(last_chkpass);
-								last_chkpass = buf;
-								buf = NULL;
-								if (reply_chkpass)
-									free(reply_chkpass);
-								reply_chkpass = rep;
+								STORELASTREPLY(chkpass);
 								break;
 							case CMD_ADDUSER:
-								if (last_adduser)
-									free(last_adduser);
-								last_adduser = buf;
-								buf = NULL;
-								if (reply_adduser)
-									free(reply_adduser);
-								reply_adduser = rep;
+								STORELASTREPLY(adduser);
 								break;
 							case CMD_NEWPASS:
-								if (last_newpass)
-									free(last_newpass);
-								last_newpass = buf;
-								buf = NULL;
-								if (reply_newpass)
-									free(reply_newpass);
-								reply_newpass = rep;
+								STORELASTREPLY(newpass);
 								break;
 							case CMD_NEWID:
-								if (last_newid)
-									free(last_newid);
-								last_newid = buf;
-								buf = NULL;
-								if (reply_newid)
-									free(reply_newid);
-								reply_newid = rep;
+								STORELASTREPLY(newid);
 								break;
 							default:
 								free(rep);
@@ -9904,6 +10030,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 					__func__, count, cmd);
 				break;
 			case CMD_AUTH:
+			case CMD_ADDRAUTH:
 			case CMD_POOLSTAT:
 			case CMD_USERSTAT:
 			case CMD_BLOCK:
@@ -10411,11 +10538,8 @@ static void confirm_reload()
 	/* The last workinfo we should process
 	 * The reason for going past the last 'a' up to before
 	 *  the first 'n' is in case there were shares missed between them -
-	 *  but that should only be the case with a code bug - so it checks that
-	 * TODO: auto aging will clear 'n' sections inside the 'a's that
-	 *  will always occur when ckpool restarts, since ckpool will never
-	 *  send workinfo age records for workinfo that's active at shutdown -
-	 *  Aging these can (for now) easily be done manually in psql */
+	 *  but that should only be the case with a code bug -
+	 *  so it checks that */
 	if (dbstatus.newest_workinfoid_a > 0) {
 		confirm_last_workinfoid = dbstatus.newest_workinfoid_a;
 		last_reason = "newest aged";

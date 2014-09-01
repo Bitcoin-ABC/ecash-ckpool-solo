@@ -1,5 +1,7 @@
 <?php
 #
+# See function sendsockreply($fun, $msg) at the end
+#
 # Note that $port in AF_UNIX should be the socket filename
 function _getsock($fun, $port, $unix=true)
 {
@@ -144,6 +146,11 @@ function sendsock($fun, $msg)
  }
  return $ret;
 }
+#
+# This is the only function in here you call
+# You pass it a string $fun for debugging
+# and the data $msg to send to ckdb
+# and it returns $ret = false on error or $ret = the string reply
 #
 function sendsockreply($fun, $msg)
 {

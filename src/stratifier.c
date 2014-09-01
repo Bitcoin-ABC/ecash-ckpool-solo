@@ -1617,7 +1617,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	ck_runlock(&workbase_lock);
 
 	tdiff = sane_tdiff(&now_t, &client->last_share);
-	if (unlikely(!client->first_share.tv_sec)) {
+	if (!client->first_share.tv_sec) {
 		copy_tv(&client->first_share, &now_t);
 		copy_tv(&client->ldc, &now_t);
 	}
@@ -1653,6 +1653,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 
 	if (diff != client->diff) {
 		client->ssdc = 0;
+		client->first_share.tv_sec = 0;
 		return;
 	}
 
@@ -1665,10 +1666,6 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 		return;
 
 	optimal = round(dsps * 3.33);
-	/* Don't drop diff to rapidly in case the client simply switched away
-	 * and has just returned */
-	if (optimal < client->diff / 2)
-		optimal = client->diff / 2;
 	/* Clamp to mindiff ~ network_diff */
 	if (optimal < ckp->mindiff)
 		optimal = ckp->mindiff;
@@ -1677,6 +1674,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	if (client->diff == optimal)
 		return;
 
+	client->first_share.tv_sec = 0;
 	client->ssdc = 0;
 
 	LOGINFO("Client %d biased dsps %.2f dsps %.2f drr %.2f adjust diff from %ld to: %ld ",
