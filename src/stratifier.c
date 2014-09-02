@@ -278,6 +278,13 @@ static share_t *shares;
 
 static cklock_t share_lock;
 
+static int gen_priority;
+
+/* Priority levels for generator messages */
+#define GEN_LAX 0
+#define GEN_NORMAL 1
+#define GEN_PRIORITY 2
+
 #define ID_AUTH 0
 #define ID_WORKINFO 1
 #define ID_AGEWORKINFO 2
@@ -656,17 +663,62 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 	}
 }
 
+/* Mandatory send_recv to the generator which sets the message priority if this
+ * message is higher priority. Races galore on gen_priority mean this might
+ * read the wrong priority but occasional wrong values are harmless. */
+static char *__send_recv_generator(ckpool_t *ckp, const char *msg, int prio)
+{
+	char *buf = NULL;
+	bool set;
+
+	if (prio > gen_priority) {
+		gen_priority = prio;
+		set = true;
+	} else
+		set = false;
+	buf = send_recv_proc(ckp->generator, msg);
+	if (set)
+		gen_priority = 0;
+
+	return buf;
+}
+
+/* Conditionally send_recv a message only if it's equal or higher priority than
+ * any currently being serviced. */
+static char *send_recv_generator(ckpool_t *ckp, const char *msg, int prio)
+{
+	char *buf = NULL;
+
+	if (prio >= gen_priority)
+		buf = __send_recv_generator(ckp, msg, prio);
+	return buf;
+}
+
+static void send_generator(ckpool_t *ckp, const char *msg, int prio)
+{
+	bool set;
+
+	if (prio > gen_priority) {
+		gen_priority = prio;
+		set = true;
+	} else
+		set = false;
+	send_proc(ckp->generator, msg);
+	if (set)
+		gen_priority = 0;
+}
+
 /* This function assumes it will only receive a valid json gbt base template
  * since checking should have been done earlier, and creates the base template
  * for generating work templates. */
-static void update_base(ckpool_t *ckp)
+static void update_base(ckpool_t *ckp, int prio)
 {
 	bool new_block = false;
 	workbase_t *wb;
 	json_t *val;
 	char *buf;
 
-	buf = send_recv_proc(ckp->generator, "getbase");
+	buf = send_recv_generator(ckp, "getbase", prio);
 	if (unlikely(!buf)) {
 		LOGWARNING("Failed to get base from generator in update_base");
 		return;
@@ -1094,7 +1146,7 @@ static void block_solve(ckpool_t *ckp)
 			"createinet", ckp->serverurl);
 	ck_runlock(&workbase_lock);
 
-	update_base(ckp);
+	update_base(ckp, GEN_PRIORITY);
 
 	ck_rlock(&workbase_lock);
 	json_set_string(val, "blockhash", current_workbase->prevhash);
@@ -1127,7 +1179,7 @@ retry:
 				copy_tv(&start_tv, &end_tv);
 				LOGDEBUG("%ds elapsed in strat_loop, updating gbt base",
 					 ckp->update_interval);
-				update_base(ckp);
+				update_base(ckp, GEN_NORMAL);
 				continue;
 			}
 		}
@@ -1166,7 +1218,7 @@ retry:
 		ret = 0;
 		goto out;
 	} else if (cmdmatch(buf, "update")) {
-		update_base(ckp);
+		update_base(ckp, GEN_PRIORITY);
 	} else if (cmdmatch(buf, "subscribe")) {
 		/* Proxifier has a new subscription */
 		if (!update_subscribe(ckp))
@@ -1222,7 +1274,7 @@ static void *blockupdate(void *arg)
 	memset(hash, 0, 68);
 	while (42) {
 		dealloc(buf);
-		buf = send_recv_proc(ckp->generator, request);
+		buf = send_recv_generator(ckp, request, GEN_LAX);
 		if (buf && strcmp(buf, hash) && !cmdmatch(buf, "failed")) {
 			strcpy(hash, buf);
 			LOGNOTICE("Block hash changed to %s", hash);
@@ -1333,7 +1385,8 @@ static bool test_address(ckpool_t *ckp, const char *address)
 	char *buf, *msg;
 
 	ASPRINTF(&msg, "checkaddr:%s", address);
-	buf = send_recv_proc(ckp->generator, msg);
+	/* Must wait for a response here */
+	buf = __send_recv_generator(ckp, msg, GEN_LAX);
 	dealloc(msg);
 	if (!buf)
 		return ret;
@@ -1616,7 +1669,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 		network_diff = current_workbase->network_diff;
 	ck_runlock(&workbase_lock);
 
-	if (!client->first_share.tv_sec) {
+	if (unlikely(!client->first_share.tv_sec)) {
 		copy_tv(&client->first_share, &now_t);
 		copy_tv(&client->ldc, &now_t);
 	}
@@ -1656,7 +1709,6 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 
 	if (diff != client->diff) {
 		client->ssdc = 0;
-		client->first_share.tv_sec = 0;
 		return;
 	}
 
@@ -1677,7 +1729,14 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	if (client->diff == optimal)
 		return;
 
-	client->first_share.tv_sec = 0;
+	/* If this is the first share in a change, reset the last diff change
+	 * to make sure the client hasn't just fallen back after a leave of
+	 * absence */
+	if (optimal < client->diff && client->ssdc == 1) {
+		copy_tv(&client->ldc, &now_t);
+		return;
+	}
+
 	client->ssdc = 0;
 
 	LOGINFO("Client %d biased dsps %.2f dsps %.2f drr %.2f adjust diff from %ld to: %ld ",
@@ -1740,7 +1799,7 @@ test_blocksolve(stratum_instance_t *client, workbase_t *wb, const uchar *data, c
 	if (wb->transactions)
 		realloc_strcat(&gbt_block, wb->txn_data);
 	ckp = wb->ckp;
-	send_proc(ckp->generator, gbt_block);
+	send_generator(ckp, gbt_block, GEN_PRIORITY);
 	free(gbt_block);
 
 	flip_32(swap, hash);
@@ -1878,7 +1937,7 @@ static void submit_share(stratum_instance_t *client, int64_t jobid, const char *
 			     "msg_id", msg_id);
 	msg = json_dumps(json_msg, 0);
 	json_decref(json_msg);
-	send_proc(ckp->generator, msg);
+	send_generator(ckp, msg, GEN_LAX);
 	free(msg);
 }
 
