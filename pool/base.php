@@ -65,9 +65,38 @@ function emailStr($str)
  return preg_replace(array($all,$beg,$fin), '', $str);
 }
 #
+function safepass($pass)
+{
+ if (strlen($pass) < 6)
+	return false;
+
+ # Invalid characters
+ $p2 = preg_replace('/[\011]/', '', $pass);
+ if ($p2 != $pass)
+	return false;
+
+ # At least one lowercase
+ $p2 = preg_replace('/[a-z]/', '', $pass);
+ if ($p2 == $pass)
+	return false;
+
+ # At least one uppercase
+ $p2 = preg_replace('/[A-Z]/', '', $pass);
+ if ($p2 == $pass)
+	return false;
+
+ # At least one digit
+ $p2 = preg_replace('/[0-9]/', '', $pass);
+ if ($p2 == $pass)
+	return false;
+
+ return true;
+}
+#
 function loginStr($str)
 {
- $all = '/[^!-~]/'; // no spaces
+ // Anything but . _ / Tab
+ $all = '/[\._\/\011]/';
  return preg_replace($all, '', $str);
 }
 #
@@ -137,34 +166,34 @@ function safetext($txt, $len = 1024)
 #
 function dbd($data, $user)
 {
- return "<font color=red size=+10><br>Web site is currently down</font>";
+ return "<span class=alert><br>Web site is currently down</span>";
 }
 #
 function dbdown()
 {
- gopage(NULL, 'dbd', NULL, '', false, true, false);
+ gopage(NULL, 'dbd', 'dbd', NULL, '', '', true, false, false);
 }
 #
 function f404($data)
 {
- return "<font color=red size=+10><br>404</font>";
+ return "<span class=alert><br>404</span>";
 }
 #
 function do404()
 {
- gopage(NULL, 'f404', NULL, '', false, true, false);
+ gopage(NULL, 'f404', 'f404', NULL, '', '', true, false, false);
 }
 #
 function showPage($page, $menu, $name, $user)
 {
 # If you are doing development, use without '@'
 # Then switch to '@' when finished
-# @include_once("page_$page.php");
- include_once("page_$page.php");
+# include_once("page_$page.php");
+ @include_once("page_$page.php");
 
  $fun = 'show_' . $page;
  if (function_exists($fun))
-	$fun($menu, $name, $user);
+	$fun($page, $menu, $name, $user);
  else
 	do404();
 }
@@ -179,8 +208,9 @@ function offline()
  if (file_exists('./maintenance.txt'))
  {
 	$ip = $_SERVER['REMOTE_ADDR'];
-	if ($ip != '192.168.7.74')
-		gopage(NULL, file_get_contents('./maintenance.txt'), NULL, '', false, false, false, false);
+	if ($ip != '192.168.1.666')
+		gopage(NULL, file_get_contents('./maintenance.txt'),
+			'offline', NULL, '', '', false, false, false);
  }
 }
 #
@@ -192,10 +222,11 @@ include_once('db.php');
 #
 function validUserPass($user, $pass)
 {
- $rep = checkpass($user, $pass);
- $ans = repDecode($rep);
+ $rep = checkPass($user, $pass);
+ if ($rep != null)
+	 $ans = repDecode($rep);
  usleep(100000); // Max 10x per second
- if ($ans['STATUS'] == 'ok')
+ if ($rep != null && $ans['STATUS'] == 'ok')
  {
 	$key = 'ckp'.rand(1000000,9999999);
 	$_SESSION['ckpkey'] = $key;

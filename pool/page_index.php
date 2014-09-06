@@ -9,9 +9,9 @@ Welcome to CKPool
  return $pg;
 }
 #
-function show_index($menu, $name, $user)
+function show_index($page, $menu, $name, $user)
 {
- gopage(NULL, 'doindex', $menu, $name, $user);
+ gopage(NULL, 'doindex', $page, $menu, $name, $user);
 }
 #
 ?>

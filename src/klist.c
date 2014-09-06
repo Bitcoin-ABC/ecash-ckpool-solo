@@ -409,5 +409,7 @@ void _k_cull_list(K_LIST *list, KLIST_FFL_ARGS)
 	list->total = list->count = list->count_up = 0;
 	list->head = list->tail = NULL;
 
+	list->cull_count++;
+
 	k_alloc_items(list, KLIST_FFL_PASS);
 }

@@ -4,8 +4,7 @@ function dopayments($data, $user)
 {
  $pg = '<h1>Payments</h1>';
 
- $rep = getPayments($user);
- $ans = repDecode($rep);
+ $ans = getPayments($user);
 
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= "<tr class=title>";
@@ -24,9 +23,9 @@ function dopayments($data, $user)
 			$row = 'odd';
 
 		$pg .= "<tr class=$row>";
-		$pg .= '<td class=dl>'.$ans['paydate'.$i].'</td>';
-		$pg .= '<td class=dl>'.$ans['payaddress'.$i].'</td>';
-		$pg .= '<td class=dr>'.btcfmt($ans['amount'.$i]).'</td>';
+		$pg .= '<td class=dl>'.$ans['paydate:'.$i].'</td>';
+		$pg .= '<td class=dl>'.$ans['payaddress:'.$i].'</td>';
+		$pg .= '<td class=dr>'.btcfmt($ans['amount:'.$i]).'</td>';
 		$pg .= "</tr>\n";
 	}
  }
@@ -35,9 +34,9 @@ function dopayments($data, $user)
  return $pg;
 }
 #
-function show_payments($menu, $name, $user)
+function show_payments($page, $menu, $name, $user)
 {
- gopage(NULL, 'dopayments', $menu, $name, $user);
+ gopage(NULL, 'dopayments', $page, $menu, $name, $user);
 }
 #
 ?>

@@ -12,8 +12,7 @@ function dostats($data, $user)
 {
  $pg = '<h1>Pool Stats</h1>';
 
- $rep = getAllUsers();
- $ans = repDecode($rep);
+ $ans = getAllUsers();
 
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= "<tr class=title>";
@@ -26,9 +25,9 @@ function dostats($data, $user)
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
 	{
-		$all[] = array('username' => $ans['username'.$i],
-				'userid' => $ans['userid'.$i],
-				'u_hashrate5m' => $ans['u_hashrate5m'.$i]);
+		$all[] = array('username' => $ans['username:'.$i],
+				'userid' => $ans['userid:'.$i],
+				'u_hashrate5m' => $ans['u_hashrate5m:'.$i]);
 	}
 
 	usort($all, 'allusersort');
@@ -66,9 +65,9 @@ function dostats($data, $user)
  return $pg;
 }
 #
-function show_stats($menu, $name, $user)
+function show_stats($page, $menu, $name, $user)
 {
- gopage(NULL, 'dostats', $menu, $name, $user);
+ gopage(NULL, 'dostats', $page, $menu, $name, $user);
 }
 #
 ?>

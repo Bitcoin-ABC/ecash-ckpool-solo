@@ -22,9 +22,9 @@ A flat rate of 0.5% is reserved for further development, with an initial focus o
  return $pg;
 }
 #
-function show_payout($menu, $name, $user)
+function show_payout($page, $menu, $name, $user)
 {
- gopage(NULL, 'dopayout', $menu, $name, $user);
+ gopage(NULL, 'dopayout', $page, $menu, $name, $user);
 }
 #
 ?>

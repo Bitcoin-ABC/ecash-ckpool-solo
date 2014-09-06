@@ -17,8 +17,8 @@ function doreg($data, $u)
  $pg = '<h1>Register</h1>';
  if (isset($data['error']))
 	$pg .= "<br><b>".$data['error']." - please try again</b><br><br>";
+ $pg .= makeForm('');
  $pg .= "
-<form action=index.php method=POST>
 <table>
 <tr><td class=dr>Username:</td>
  <td class=dl><input name=user value=\"$user\"></td></tr>
@@ -53,35 +53,7 @@ function doreg2($data)
  return $pg;
 }
 #
-function safepass($pass)
-{
- if (strlen($pass) < 6)
-	return false;
-
- # Invalid characters
- $p2 = preg_replace('/[\011]/', '', $pass);
- if ($p2 != $pass)
-	return false;
-
- # At least one lowercase
- $p2 = preg_replace('/[a-z]/', '', $pass);
- if ($p2 == $pass)
-	return false;
-
- # At least one uppercase
- $p2 = preg_replace('/[A-Z]/', '', $pass);
- if ($p2 == $pass)
-	return false;
-
- # At least one digit
- $p2 = preg_replace('/[0-9]/', '', $pass);
- if ($p2 == $pass)
-	return false;
-
- return true;
-}
-#
-function show_reg($menu, $name, $u)
+function show_reg($page, $menu, $name, $u)
 {
  $user = getparam('user', false);
  $mail = trim(getparam('mail', false));
@@ -118,7 +90,7 @@ function show_reg($menu, $name, $u)
 	}
 
 	$orig = $user;
-	$user = preg_replace('/[\._\/\011]/', '', $orig);
+	$user = loginStr($orig);
 	if ($user != $orig)
 	{
 		$ok = false;
@@ -129,23 +101,14 @@ function show_reg($menu, $name, $u)
 
  if ($ok === true)
  {
-	$passhash = myhash($pass);
-	$flds = array('username' => $user,
-			'emailaddress' => $mail,
-			'passwordhash' => $passhash);
-	$msg = msgEncode('adduser', 'reg', $flds);
-	$rep = sendsockreply('show_reg', $msg);
-	if (!$rep)
-		dbdown();
-
-	$ans = repDecode($rep);
+	$ans = userReg($user, $mail, $pass);
 	if ($ans['STATUS'] == 'ok')
-		gopage($data, 'doreg2', $menu, $name, $u, true, true, false);
+		gopage($data, 'doreg2', $page, $menu, $name, $u, true, true, false);
 	else
-		$data['error'] = "Invalid details";
+		$data['error'] = "Invalid username, password or email address";
  }
 
- gopage($data, 'doreg', $menu, $name, $u, true, true, false);
+ gopage($data, 'doreg', $page, $menu, $name, $u, true, true, false);
 }
 #
 ?>

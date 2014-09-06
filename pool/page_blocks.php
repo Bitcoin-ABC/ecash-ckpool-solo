@@ -2,10 +2,11 @@
 #
 function doblocks($data, $user)
 {
+ $blink = '<a href=https://blockchain.info/block-height/';
+
  $pg = '<h1>Blocks</h1>';
 
- $rep = getBlocks($user);
- $ans = repDecode($rep);
+ $ans = getBlocks($user);
 
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= "<tr class=title>";
@@ -26,17 +27,20 @@ function doblocks($data, $user)
 			$row = 'odd';
 
 		$ex = '';
-		$stat = $ans['status'.$i];
+		$stat = $ans['status:'.$i];
 		if ($stat == 'Orphan')
 			$ex = 's';
 		if ($stat == '1-Confirm')
 			$stat = 'Conf';
 
+		$hi = $ans['height:'.$i];
+		$hifld = "$blink$hi>$hi</a>";
+
 		$pg .= "<tr class=$row>";
-		$pg .= "<td class=dl$ex>".$ans['height'.$i].'</td>';
-		$pg .= "<td class=dl$ex>".$ans['workername'.$i].'</td>';
-		$pg .= "<td class=dr$ex>".btcfmt($ans['reward'.$i]).'</td>';
-		$pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['firstcreatedate'.$i]).'</td>';
+		$pg .= "<td class=dl$ex>$hifld</td>";
+		$pg .= "<td class=dl$ex>".$ans['workername:'.$i].'</td>';
+		$pg .= "<td class=dr$ex>".btcfmt($ans['reward:'.$i]).'</td>';
+		$pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['firstcreatedate:'.$i]).'</td>';
 		$pg .= "<td class=dr$ex>".$stat.'</td>';
 		$pg .= "</tr>\n";
 	}
@@ -46,9 +50,9 @@ function doblocks($data, $user)
  return $pg;
 }
 #
-function show_blocks($menu, $name, $user)
+function show_blocks($page, $menu, $name, $user)
 {
- gopage(NULL, 'doblocks', $menu, $name, $user);
+ gopage(NULL, 'doblocks', $page, $menu, $name, $user);
 }
 #
 ?>

@@ -34,3 +34,4 @@ addid paymentid ${now}200000
 addid authid ${now}300000
 addid userid ${now}400000
 addid markerid ${now}500000
+addid paymentaddressid ${now}600000

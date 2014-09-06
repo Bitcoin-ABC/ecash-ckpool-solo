@@ -243,6 +243,7 @@ struct stratum_instance {
 	time_t start_time;
 
 	char address[INET6_ADDRSTRLEN];
+	bool subscribed;
 	bool authorised;
 	bool idle;
 	bool notified_idle;
@@ -1312,9 +1313,8 @@ static void new_enonce1(stratum_instance_t *client)
 }
 
 /* Extranonce1 must be set here */
-static json_t *parse_subscribe(int64_t client_id, json_t *params_val)
+static json_t *parse_subscribe(stratum_instance_t *client, int64_t client_id, json_t *params_val)
 {
-	stratum_instance_t *client = NULL;
 	bool old_match = false;
 	int arr_size;
 	json_t *ret;
@@ -1322,15 +1322,6 @@ static json_t *parse_subscribe(int64_t client_id, json_t *params_val)
 
 	if (unlikely(!json_is_array(params_val)))
 		return json_string("params not an array");
-
-	ck_rlock(&instance_lock);
-	client = __instance_by_id(client_id);
-	ck_runlock(&instance_lock);
-
-	if (unlikely(!client)) {
-		LOGERR("Failed to find client id %d in hashtable!", client_id);
-		return NULL;
-	}
 
 	if (unlikely(!current_workbase))
 		return json_string("Initialising");
@@ -1375,6 +1366,8 @@ static json_t *parse_subscribe(int64_t client_id, json_t *params_val)
 	JSON_CPACK(ret, "[[[s,s]],s,i]", "mining.notify", client->enonce1, client->enonce1,
 			n2len);
 	ck_runlock(&workbase_lock);
+
+	client->subscribed = true;
 
 	return ret;
 }
@@ -2250,16 +2243,9 @@ static void send_json_err(int64_t client_id, json_t *id_val, const char *err_msg
 	stratum_add_send(val, client_id);
 }
 
-static void update_client(const int64_t client_id)
+static void update_client(stratum_instance_t *client, const int64_t client_id)
 {
-	stratum_instance_t *client;
-
 	stratum_send_update(client_id, true);
-
-	ck_rlock(&instance_lock);
-	client = __instance_by_id(client_id);
-	ck_runlock(&instance_lock);
-
 	stratum_send_diff(client);
 }
 
@@ -2294,17 +2280,20 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 	 * the json item for id_val as is for the response. */
 	method = json_string_value(method_val);
 	if (cmdmatch(method, "mining.subscribe")) {
-		json_t *val, *result_val = parse_subscribe(client_id, params_val);
+		json_t *val, *result_val = parse_subscribe(client, client_id, params_val);
 
-		if (!result_val)
+		/* Shouldn't happen, sanity check */
+		if (unlikely(!result_val)) {
+			LOGWARNING("parse_subscribe returned NULL result_val");
 			return;
+		}
 		val = json_object();
 		json_object_set_new_nocheck(val, "result", result_val);
 		json_object_set_nocheck(val, "id", id_val);
 		json_object_set_new_nocheck(val, "error", json_null());
 		stratum_add_send(val, client_id);
-		if (!client->ckp->btcsolo)
-			update_client(client_id);
+		if (!client->ckp->btcsolo && likely(client->subscribed))
+			update_client(client, client_id);
 		return;
 	}
 
@@ -2324,7 +2313,7 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 		return;
 	}
 
-	if (cmdmatch(method, "mining.auth")) {
+	if (cmdmatch(method, "mining.auth") && client->subscribed) {
 		json_params_t *jp = create_json_params(client_id, params_val, id_val, address);
 
 		ckmsgq_add(sauthq, jp);
