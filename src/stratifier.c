@@ -71,6 +71,7 @@ struct pool_stats {
 	double dsps60;
 	double dsps360;
 	double dsps1440;
+	double dsps10080;
 };
 
 typedef struct pool_stats pool_stats_t;
@@ -212,6 +213,7 @@ struct user_instance {
 	double dsps5; /* ... 5 minute ... */
 	double dsps60;/* etc */
 	double dsps1440;
+	double dsps10080;
 	tv_t last_share;
 };
 
@@ -236,6 +238,7 @@ struct stratum_instance {
 	double dsps5; /* ... 5 minute ... */
 	double dsps60;/* etc */
 	double dsps1440;
+	double dsps10080;
 	tv_t ldc; /* Last diff change */
 	int ssdc; /* Shares since diff change */
 	tv_t first_share;
@@ -1678,6 +1681,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	decay_time(&client->dsps5, diff, tdiff, 300);
 	decay_time(&client->dsps60, diff, tdiff, 3600);
 	decay_time(&client->dsps1440, diff, tdiff, 86400);
+	decay_time(&client->dsps10080, diff, tdiff, 604800);
 	copy_tv(&client->last_share, &now_t);
 
 	tdiff = sane_tdiff(&now_t, &instance->last_share);
@@ -1685,6 +1689,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	decay_time(&instance->dsps5, diff, tdiff, 300);
 	decay_time(&instance->dsps60, diff, tdiff, 3600);
 	decay_time(&instance->dsps1440, diff, tdiff, 86400);
+	decay_time(&instance->dsps10080, diff, tdiff, 604800);
 	copy_tv(&instance->last_share, &now_t);
 	client->idle = false;
 
@@ -2639,9 +2644,9 @@ static void *statsupdate(void *arg)
 	sleep(1);
 
 	while (42) {
+		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080, tdiff, bias;
 		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
-		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, tdiff, bias;
-		char suffix360[16], suffix1440[16];
+		char suffix360[16], suffix1440[16], suffix10080[16];
 		user_instance_t *instance, *tmpuser;
 		stratum_instance_t *client, *tmp;
 		double sps1, sps5, sps15, sps60;
@@ -2685,6 +2690,10 @@ static void *statsupdate(void *arg)
 		ghs1440 = stats.dsps1440 * nonces / bias;
 		suffix_string(ghs1440, suffix1440, 16, 0);
 
+		bias = time_bias(tdiff, 604800);
+		ghs10080 = stats.dsps10080 * nonces / bias;
+		suffix_string(ghs10080, suffix10080, 16, 0);
+
 		snprintf(fname, 511, "%s/pool/pool.status", ckp->logdir);
 		fp = fopen(fname, "we");
 		if (unlikely(!fp))
@@ -2700,13 +2709,14 @@ static void *statsupdate(void *arg)
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
 
-		JSON_CPACK(val, "{ss,ss,ss,ss,ss,ss}",
+		JSON_CPACK(val, "{ss,ss,ss,ss,ss,ss,ss}",
 				"hashrate1m", suffix1,
 				"hashrate5m", suffix5,
 				"hashrate15m", suffix15,
 				"hashrate1hr", suffix60,
 				"hashrate6hr", suffix360,
-				"hashrate1d", suffix1440);
+				"hashrate1d", suffix1440,
+				"hashrate7d", suffix10080);
 		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 		json_decref(val);
 		LOGNOTICE("Pool:%s", s);
@@ -2736,6 +2746,7 @@ static void *statsupdate(void *arg)
 				decay_time(&client->dsps5, 0, tdiff, 300);
 				decay_time(&client->dsps60, 0, tdiff, 3600);
 				decay_time(&client->dsps1440, 0, tdiff, 86400);
+				decay_time(&client->dsps10080, 0, tdiff, 604800);
 				if (now.tv_sec - client->last_share.tv_sec > 600)
 					client->idle = true;
 				continue;
@@ -2751,6 +2762,7 @@ static void *statsupdate(void *arg)
 				decay_time(&instance->dsps5, 0, tdiff, 300);
 				decay_time(&instance->dsps60, 0, tdiff, 3600);
 				decay_time(&instance->dsps1440, 0, tdiff, 86400);
+				decay_time(&instance->dsps10080, 0, tdiff, 604800);
 				idle = true;
 			}
 			ghs = instance->dsps1 * nonces;
@@ -2761,12 +2773,15 @@ static void *statsupdate(void *arg)
 			suffix_string(ghs, suffix60, 16, 0);
 			ghs = instance->dsps1440 * nonces;
 			suffix_string(ghs, suffix1440, 16, 0);
+			ghs = instance->dsps10080 * nonces;
+			suffix_string(ghs, suffix10080, 16, 0);
 
-			JSON_CPACK(val, "{ss,ss,ss,ss,si}",
+			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si}",
 					"hashrate1m", suffix1,
 					"hashrate5m", suffix5,
 					"hashrate1hr", suffix60,
 					"hashrate1d", suffix1440,
+					"hashrate7d", suffix10080,
 					"workers", instance->workers);
 
 			snprintf(fname, 511, "%s/users/%s", ckp->logdir, instance->username);
@@ -2825,6 +2840,7 @@ static void *statsupdate(void *arg)
 			decay_time(&stats.dsps60, stats.unaccounted_diff_shares, 20, 3600);
 			decay_time(&stats.dsps360, stats.unaccounted_diff_shares, 20, 21600);
 			decay_time(&stats.dsps1440, stats.unaccounted_diff_shares, 20, 86400);
+			decay_time(&stats.dsps10080, stats.unaccounted_diff_shares, 20, 604800);
 
 			stats.unaccounted_shares =
 			stats.unaccounted_diff_shares =
