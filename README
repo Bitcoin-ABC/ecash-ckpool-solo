@@ -95,7 +95,12 @@ sudo apt-get install build-essential libpq-dev autoconf automake libtool
 make
 
 
-Binaries will be built in the src/ subdirectory.
+Binaries will be built in the src/ subdirectory. Binaries generated will be:
+ckpool - The main pool back end
+ckdb - The pool's database
+ckpmsg - An application for passing messages in libckpool format to ckpool/ckdb
+notifier - An application designed to be run with bitcoind's -blocknotify to
+	notify ckpool of block changes.
 
 
 Installation is NOT required and ckpool can be run directly from the directory
@@ -179,6 +184,27 @@ talk to.
 sockets (/tmp by default)
 
 
+ckdb takes the following options:
+
+-b DBPREFIX | --dbprefix DBPREFIX
+-c CONFIG | --config CONFIG
+-d DBNAME | --dbname DBNAME
+-h | --help
+-k | --killold
+-l LOGLEVEL | --loglevel LOGLEVEL
+-n NAME | --name NAME
+-p DBPASS | --dbpass DBPASS
+-r CKPOOL-LOGDIR | --ckpool-logdir CKPOOL-LOGDIR
+-R LOGDIR | --logdir LOGDIR
+-s SOCKDIR | --sockdir SOCKDIR
+-u DBUSER | --dbuser DBUSER
+-v | --version
+-y | --confirm
+-Y CONFIRMRANGE | --confirmrange CONFIRMRANGE
+
+
+ckpmsg and notifier support the -n, -p and -s options
+
 ---
 CONFIGURATION
 
@@ -204,7 +230,8 @@ proxy and passthrough mode to set the upstream pool and is mandatory.
 blocks.
 
 "blockpoll" : This is the frequency in milliseconds for how often to check for
-new network blocks and is 500 by default.
+new network blocks and is 5000 by default. It is intended to be a backup only
+for when the notifier is not set up or a sanity check for it.
 
 "update_interval" : This is the frequency that stratum updates are sent out to
 miners and is set to 30 seconds by default to help perpetuate transactions for

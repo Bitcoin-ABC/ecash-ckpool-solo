@@ -46,8 +46,8 @@
  */
 
 #define DB_VLOCK "1"
-#define DB_VERSION "0.8"
-#define CKDB_VERSION DB_VERSION"-0.234"
+#define DB_VERSION "0.9"
+#define CKDB_VERSION DB_VERSION"-0.276"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -62,6 +62,9 @@
 // So they can fit into a 1 byte flag field
 #define TRUE_STR "Y"
 #define FALSE_STR "N"
+
+#define TRUE_CHR 'Y'
+#define FALSE_CHR 'N'
 
 #define coinbase1height(_cb1) _coinbase1height(_cb1, WHERE_FFL_HERE)
 #define cmp_height(_cb1a, _cb1b) _cmp_height(_cb1a, _cb1b, WHERE_FFL_HERE)
@@ -170,11 +173,9 @@ static char *restorefrom;
  *  DB+RAM blocks: resolved by workinfo - any unsaved blocks (if any)
  *	will be after the last DB workinfo
  *  DB+RAM accountbalance (TODO): resolved by shares/workinfo/blocks
- *  RAM workerstatus: last_auth, last_share, last_stats all handled by
- *	DB load up to whatever the CCL reload point is, and then
- *	corrected with the CCL reload
- *	last_idle will be the last idle userstats in the CCL load or 0
- *	Code currently doesn't use last_idle, so for now this is OK
+ *  RAM workerstatus: all except last_idle are set at the end of the
+ *	CCL reload
+ *	Code currently doesn't use last_idle
  *
  *  idcontrol: only userid reuse is critical and the user is added
  *	immeditately to the DB before replying to the add message
@@ -234,13 +235,15 @@ static LOADSTATUS dbstatus;
 typedef struct poolstatus {
 	int64_t workinfoid; // Last block
 	double diffacc;
-	double differr;
-	double best_sdiff; // TODO
+	double diffinv; // Non-acc
+	double shareacc;
+	double shareinv; // Non-acc
+	double best_sdiff; // TODO (maybe)
 } POOLSTATUS;
 static POOLSTATUS pool;
 /* TODO: when we know about orphans, the count reset to zero
  * will need to be undone - i.e. recalculate this data from
- * the memory tables */
+ * the memory tables - maybe ... */
 
 // size limit on the command string
 #define CMD_SIZ 31
@@ -282,7 +285,7 @@ static char *safe_text(char *txt)
 	char *ret, *buf;
 
 	if (!txt) {
-		buf = strdup("(null)");
+		buf = strdup("(Null)");
 		if (!buf)
 			quithere(1, "malloc OOM");
 		return buf;
@@ -671,7 +674,8 @@ static const tv_t date_begin = { DATE_BEGIN, 0L };
 #define PQPARAM14 PQPARAM8 ",$9,$10,$11,$12,$13,$14"
 #define PQPARAM15 PQPARAM8 ",$9,$10,$11,$12,$13,$14,$15"
 #define PQPARAM16 PQPARAM8 ",$9,$10,$11,$12,$13,$14,$15,$16"
-#define PQPARAM27 PQPARAM16 ",$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27"
+#define PQPARAM22 PQPARAM16 ",$17,$18,$19,$20,$21,$22"
+#define PQPARAM27 PQPARAM22 ",$23,$24,$25,$26,$27"
 
 #define PARCHK(_par, _params) do { \
 		if (_par != (int)(sizeof(_params)/sizeof(_params[0]))) { \
@@ -908,7 +912,7 @@ static char *_transfer_data(K_ITEM *item, WHERE_FFL_ARGS)
 		 * since mvalue is NULL */
 		quitfrom(1, file, func, line,
 			 "Transfer '%s' '%s' has NULL mvalue",
-			 transfer->name, transfer->mvalue);
+			 transfer->name, transfer->svalue);
 	}
 	return mvalue;
 }
@@ -957,6 +961,7 @@ typedef struct users {
 #define LIMIT_USERS 0
 #define INIT_USERS(_item) INIT_GENERIC(_item, users)
 #define DATA_USERS(_var, _item) DATA_GENERIC(_var, _item, users, true)
+#define DATA_USERS_NULL(_var, _item) DATA_GENERIC(_var, _item, users, false)
 
 static K_TREE *users_root;
 static K_TREE *userid_root;
@@ -1274,6 +1279,12 @@ typedef struct blocks {
 	char nonce[TXT_SML+1];
 	int64_t reward;
 	char confirmed[TXT_FLAG+1];
+	double diffacc;
+	double diffinv;
+	double shareacc;
+	double shareinv;
+	int64_t elapsed;
+	char statsconfirmed[TXT_FLAG+1];
 	HISTORYDATECONTROLFIELDS;
 } BLOCKS;
 
@@ -1291,6 +1302,11 @@ typedef struct blocks {
 #define BLOCKS_42_STR "F"
 #define BLOCKS_ORPHAN 'O'
 #define BLOCKS_ORPHAN_STR "O"
+
+#define BLOCKS_STATSPENDING FALSE_CHR
+#define BLOCKS_STATSPENDING_STR FALSE_STR
+#define BLOCKS_STATSCONFIRMED TRUE_CHR
+#define BLOCKS_STATSCONFIRMED_STR TRUE_STR
 
 static const char *blocks_new = "New";
 static const char *blocks_confirm = "1-Confirm";
@@ -1510,6 +1526,11 @@ typedef struct workerstatus {
 	double last_diff;
 	tv_t last_stats;
 	tv_t last_idle;
+	// Below gets reset on each block
+	double diffacc;
+	double diffinv; // Non-acc
+	double shareacc;
+	double shareinv; // Non-acc
 } WORKERSTATUS;
 
 #define ALLOC_WORKERSTATUS 1000
@@ -2216,7 +2237,7 @@ static int64_t nextid(PGconn *conn, char *idname, int64_t increment,
 		conn = dbconnect();
 		conned = true;
 	}
-	
+
 	res = PQexec(conn, qry, CKPQ_WRITE);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
@@ -2288,6 +2309,9 @@ static cmp_t cmp_workerstatus(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
+/* TODO: replace a lot of the code for all data types that codes finds,
+ *  each with specific functions for finding, to centralise the finds,
+ *  with passed ctx's */
 static K_ITEM *get_workerstatus(int64_t userid, char *workername)
 {
 	WORKERSTATUS workerstatus;
@@ -2305,13 +2329,29 @@ static K_ITEM *get_workerstatus(int64_t userid, char *workername)
 	return find;
 }
 
-static K_ITEM *_find_create_workerstatus(int64_t userid, char *workername, bool create)
+/* Worker loading/creation calls this with create = true
+ * All others with create = false since the workerstatus should exist
+ * Failure is a code bug and a reported error, but handled anyway
+ * This has 2 sets of file/func/line to allow 2 levels of traceback
+ */
+static K_ITEM *_find_create_workerstatus(int64_t userid, char *workername,
+					 bool create, const char *file2,
+					 const char *func2, const int line2,
+					 WHERE_FFL_ARGS)
 {
 	WORKERSTATUS *row;
 	K_ITEM *item;
 
 	item = get_workerstatus(userid, workername);
-	if (!item && create) {
+	if (!item) {
+		if (!create) {
+			LOGEMERG("%s(): Missing workerstatus %"PRId64"/%s"
+				 WHERE_FFL WHERE_FFL,
+				 __func__, userid, workername,
+				 file2, func2, line2, WHERE_FFL_PASS);
+			return NULL;
+		}
+
 		K_WLOCK(workerstatus_free);
 		item = k_unlink_head(workerstatus_free);
 
@@ -2328,15 +2368,107 @@ static K_ITEM *_find_create_workerstatus(int64_t userid, char *workername, bool 
 	return item;
 }
 
-#define find_create_workerstatus(_u, _w)  _find_create_workerstatus(_u, _w, true)
-#define find_workerstatus(_u, _w)  _find_create_workerstatus(_u, _w, false)
+#define find_create_workerstatus(_u, _w, _file, _func, _line) \
+	_find_create_workerstatus(_u, _w, true, _file, _func, _line, WHERE_FFL_HERE)
+#define find_workerstatus(_u, _w, _file, _func, _line) \
+	 _find_create_workerstatus(_u, _w, false, _file, _func, _line, WHERE_FFL_HERE)
 
 static cmp_t cmp_userstats_workerstatus(K_ITEM *a, K_ITEM *b);
 static cmp_t cmp_sharesummary(K_ITEM *a, K_ITEM *b);
 
+static void zero_on_new_block()
+{
+	WORKERSTATUS *workerstatus;
+	K_TREE_CTX ctx[1];
+	K_ITEM *ws_item;
+
+	K_WLOCK(workerstatus_free);
+	pool.diffacc = pool.diffinv = pool.shareacc =
+	pool.shareinv = pool.best_sdiff = 0;
+	ws_item = first_in_ktree(workerstatus_root, ctx);
+	while (ws_item) {
+		DATA_WORKERSTATUS(workerstatus, ws_item);
+		workerstatus->diffacc = workerstatus->diffinv =
+		workerstatus->shareacc = workerstatus->shareinv = 0.0;
+		ws_item = next_in_ktree(ctx);
+	}
+	K_WUNLOCK(workerstatus_free);
+
+}
+
+/* Currently only used at the end of the startup
+ * Will need to add locking if it's used, later, after startup completes */
+static void set_block_share_counters()
+{
+	K_TREE_CTX ctx[1];
+	K_ITEM *ss_item, ss_look, *ws_item;
+	WORKERSTATUS *workerstatus;
+	SHARESUMMARY *sharesummary, looksharesummary;
+
+	INIT_SHARESUMMARY(&ss_look);
+
+	zero_on_new_block();
+
+	ws_item = NULL;
+	/* From the end backwards so we can skip the workinfoid's we don't
+	 * want by jumping back to just before the current worker when the
+	 * workinfoid goes below the limit */
+	K_RLOCK(sharesummary_free);
+	ss_item = last_in_ktree(sharesummary_root, ctx);
+	while (ss_item) {
+		DATA_SHARESUMMARY(sharesummary, ss_item);
+		if (sharesummary->workinfoid < pool.workinfoid) {
+			// Skip back to the next worker
+			looksharesummary.userid = sharesummary->userid;
+			STRNCPY(looksharesummary.workername,
+				sharesummary->workername);
+			looksharesummary.workinfoid = -1;
+			ss_look.data = (void *)(&looksharesummary);
+			ss_item = find_before_in_ktree(sharesummary_root, &ss_look,
+							cmp_sharesummary, ctx);
+			continue;
+		}
+
+		/* Check for user/workername change for new workerstatus
+		 * The tree has user/workername grouped together in order
+		 *  so this will only be once per user/workername */
+		if (!ws_item ||
+		    sharesummary->userid != workerstatus->userid ||
+		    strcmp(sharesummary->workername, workerstatus->workername)) {
+			/* This is to trigger a console error if it is missing
+			 *  since it should always exist
+			 * However, it is simplest to simply create it
+			 *  and keep going */
+			K_RUNLOCK(sharesummary_free);
+			ws_item = find_workerstatus(sharesummary->userid,
+						    sharesummary->workername,
+						    __FILE__, __func__, __LINE__);
+			if (!ws_item) {
+				ws_item = find_create_workerstatus(sharesummary->userid,
+								   sharesummary->workername,
+								   __FILE__, __func__, __LINE__);
+			}
+			K_RLOCK(sharesummary_free);
+			DATA_WORKERSTATUS(workerstatus, ws_item);
+		}
+
+		pool.diffacc += sharesummary->diffacc;
+		pool.diffinv += sharesummary->diffsta + sharesummary->diffdup +
+				sharesummary->diffhi + sharesummary->diffrej;
+		workerstatus->diffacc += sharesummary->diffacc;
+		workerstatus->diffinv += sharesummary->diffsta + sharesummary->diffdup +
+					 sharesummary->diffhi + sharesummary->diffrej;
+		workerstatus->shareacc += sharesummary->shareacc;
+		workerstatus->shareinv += sharesummary->sharesta + sharesummary->sharedup +
+					  sharesummary->sharehi + sharesummary->sharerej;
+
+		ss_item = prev_in_ktree(ctx);
+	}
+	K_RUNLOCK(sharesummary_free);
+}
+
 /* All data is loaded, now update workerstatus fields
- * Since shares are all part of a sharesummary, there's no need to search shares
- */
+   TODO: combine set_block_share_counters() with this? */
 static void workerstatus_ready()
 {
 	K_TREE_CTX ws_ctx[1], us_ctx[1], ss_ctx[1];
@@ -2378,8 +2510,10 @@ static void workerstatus_ready()
 		STRNCPY(looksharesummary.workername, workerstatus->workername);
 		looksharesummary.workinfoid = MAXID;
 		ss_look.data = (void *)(&looksharesummary);
+		K_RLOCK(sharesummary_free);
 		ss_item = find_before_in_ktree(sharesummary_root, &ss_look,
 					       cmp_sharesummary, ss_ctx);
+		K_RUNLOCK(sharesummary_free);
 		if (ss_item) {
 			DATA_SHARESUMMARY(sharesummary, ss_item);
 			if (tv_newer(&(workerstatus->last_share),
@@ -2395,46 +2529,63 @@ static void workerstatus_ready()
 	}
 }
 
-static void workerstatus_update(AUTHS *auths, SHARES *shares, USERSTATS *userstats,
-				SHARESUMMARY *sharesummary)
+#define workerstatus_update(_auths, _shares, _userstats) \
+	_workerstatus_update(_auths, _shares, _userstats, WHERE_FFL_HERE)
+
+static void _workerstatus_update(AUTHS *auths, SHARES *shares,
+				 USERSTATS *userstats, WHERE_FFL_ARGS)
 {
 	WORKERSTATUS *row;
 	K_ITEM *item;
 
 	if (auths) {
-		item = find_create_workerstatus(auths->userid, auths->workername);
-		DATA_WORKERSTATUS(row, item);
-		if (tv_newer(&(row->last_auth), &(auths->createdate)))
-			copy_tv(&(row->last_auth), &(auths->createdate));
+		item = find_workerstatus(auths->userid, auths->workername,
+					 file, func, line);
+		if (item) {
+			DATA_WORKERSTATUS(row, item);
+			if (tv_newer(&(row->last_auth), &(auths->createdate)))
+				copy_tv(&(row->last_auth), &(auths->createdate));
+		}
 	}
 
 	if (startup_complete && shares) {
-		item = find_create_workerstatus(shares->userid, shares->workername);
-		DATA_WORKERSTATUS(row, item);
-		if (tv_newer(&(row->last_share), &(shares->createdate))) {
-			copy_tv(&(row->last_share), &(shares->createdate));
-			row->last_diff = shares->diff;
+		if (shares->errn == SE_NONE) {
+			pool.diffacc += shares->diff;
+			pool.shareacc++;
+		} else {
+			pool.diffinv += shares->diff;
+			pool.shareinv++;
+		}
+		item = find_workerstatus(shares->userid, shares->workername,
+					 file, func, line);
+		if (item) {
+			DATA_WORKERSTATUS(row, item);
+			if (tv_newer(&(row->last_share), &(shares->createdate))) {
+				copy_tv(&(row->last_share), &(shares->createdate));
+				row->last_diff = shares->diff;
+			}
+			if (shares->errn == SE_NONE) {
+				row->diffacc += shares->diff;
+				row->shareacc++;
+			} else {
+				row->diffinv += shares->diff;
+				row->shareinv++;
+			}
 		}
 	}
 
 	if (startup_complete && userstats) {
-		item = find_create_workerstatus(userstats->userid, userstats->workername);
-		DATA_WORKERSTATUS(row, item);
-		if (userstats->idle) {
-			if (tv_newer(&(row->last_idle), &(userstats->statsdate)))
-				copy_tv(&(row->last_idle), &(userstats->statsdate));
-		} else {
-			if (tv_newer(&(row->last_stats), &(userstats->statsdate)))
-				copy_tv(&(row->last_stats), &(userstats->statsdate));
-		}
-	}
-
-	if (startup_complete && sharesummary) {
-		item = find_create_workerstatus(sharesummary->userid, sharesummary->workername);
-		DATA_WORKERSTATUS(row, item);
-		if (tv_newer(&(row->last_share), &(sharesummary->lastshare))) {
-			copy_tv(&(row->last_share), &(sharesummary->lastshare));
-			row->last_diff = sharesummary->lastdiffacc;
+		item = find_workerstatus(userstats->userid, userstats->workername,
+					 file, func, line);
+		if (item) {
+			DATA_WORKERSTATUS(row, item);
+			if (userstats->idle) {
+				if (tv_newer(&(row->last_idle), &(userstats->statsdate)))
+					copy_tv(&(row->last_idle), &(userstats->statsdate));
+			} else {
+				if (tv_newer(&(row->last_stats), &(userstats->statsdate)))
+					copy_tv(&(row->last_stats), &(userstats->statsdate));
+			}
 		}
 	}
 }
@@ -2764,6 +2915,11 @@ static bool users_fill(PGconn *conn)
 		item = k_unlink_head(users_free);
 		DATA_USERS(row, item);
 
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
+
 		PQ_GET_FLD(res, i, "userid", field, ok);
 		if (!ok)
 			break;
@@ -2967,6 +3123,9 @@ unitem:
 	else {
 		workers_root = add_to_ktree(workers_root, item, cmp_workers);
 		k_add_head(workers_store, item);
+		// Ensure there is a matching workerstatus
+		find_create_workerstatus(userid, workername,
+					 __FILE__, __func__, __LINE__);
 	}
 	K_WUNLOCK(workers_free);
 
@@ -3209,6 +3368,11 @@ static bool workers_fill(PGconn *conn)
 		item = k_unlink_head(workers_free);
 		DATA_WORKERS(row, item);
 
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
+
 		PQ_GET_FLD(res, i, "userid", field, ok);
 		if (!ok)
 			break;
@@ -3245,6 +3409,13 @@ static bool workers_fill(PGconn *conn)
 
 		workers_root = add_to_ktree(workers_root, item, cmp_workers);
 		k_add_head(workers_store, item);
+
+		/* Make sure a workerstatus exists for each worker
+		 * This is to ensure that code can use the workerstatus tree
+		 *  to reference other tables and not miss workers in the
+		 *  other tables */
+		find_create_workerstatus(row->userid, row->workername,
+					 __FILE__, __func__, __LINE__);
 	}
 	if (!ok)
 		k_add_head(workers_free, item);
@@ -3491,6 +3662,11 @@ static bool paymentaddresses_fill(PGconn *conn)
 		item = k_unlink_head(paymentaddresses_free);
 		DATA_PAYMENTADDRESSES(row, item);
 
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
+
 		PQ_GET_FLD(res, i, "paymentaddressid", field, ok);
 		if (!ok)
 			break;
@@ -3597,6 +3773,11 @@ static bool payments_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(payments_free);
 		DATA_PAYMENTS(row, item);
+
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
 
 		PQ_GET_FLD(res, i, "userid", field, ok);
 		if (!ok)
@@ -3733,7 +3914,7 @@ static K_ITEM *find_workinfo(int64_t workinfoid)
 {
 	WORKINFO workinfo;
 	K_TREE_CTX ctx[1];
-	K_ITEM look;
+	K_ITEM look, *item;
 
 	workinfo.workinfoid = workinfoid;
 	workinfo.expirydate.tv_sec = default_expiry.tv_sec;
@@ -3741,7 +3922,10 @@ static K_ITEM *find_workinfo(int64_t workinfoid)
 
 	INIT_WORKINFO(&look);
 	look.data = (void *)(&workinfo);
-	return find_in_ktree(workinfo_root, &look, cmp_workinfo, ctx);
+	K_RLOCK(workinfo_free);
+	item = find_in_ktree(workinfo_root, &look, cmp_workinfo, ctx);
+	K_RUNLOCK(workinfo_free);
+	return item;
 }
 
 static int64_t workinfo_add(PGconn *conn, char *workinfoidstr, char *poolinstance,
@@ -3945,7 +4129,9 @@ static bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 	ok = true;
 	ss_tot = ss_already = ss_failed = shares_tot = shares_dumped = 0;
 	ss_look.data = (void *)(&looksharesummary);
+	K_RLOCK(sharesummary_free);
 	ss_item = find_after_in_ktree(sharesummary_workinfoid_root, &ss_look, cmp_sharesummary_workinfoid, ss_ctx);
+	K_RUNLOCK(sharesummary_free);
 	DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 	while (ss_item && sharesummary->workinfoid == workinfoid) {
 		ss_tot++;
@@ -4026,7 +4212,9 @@ static bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 			s_item = tmp_item;
 		}
 		K_WUNLOCK(shares_free);
+		K_RLOCK(sharesummary_free);
 		ss_item = next_in_ktree(ss_ctx);
+		K_RUNLOCK(sharesummary_free);
 		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 
 		if (error[0])
@@ -4081,6 +4269,8 @@ static void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 	looksharesummary.workername[0] = '\0';
 	INIT_SHARESUMMARY(&look);
 	look.data = (void *)(&looksharesummary);
+
+	K_RLOCK(sharesummary_free);
 	ss_item = find_after_in_ktree(sharesummary_workinfoid_root, &look,
 				      cmp_sharesummary_workinfoid, ctx);
 	DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
@@ -4100,6 +4290,7 @@ static void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 		ss_item = next_in_ktree(ctx);
 		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 	}
+	K_RUNLOCK(sharesummary_free);
 
 	LOGDEBUG("%s(): age_id=%"PRId64" found=%d", __func__, age_id, found);
 	// Don't repeat searching old items to avoid accessing their ram
@@ -4135,10 +4326,12 @@ static void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 
 			to_id = do_id;
 			wid_count++;
+			K_RLOCK(sharesummary_free);
 			while (ss_item && sharesummary->workinfoid == to_id) {
 				ss_item = next_in_ktree(ctx);
 				DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 			}
+			K_RUNLOCK(sharesummary_free);
 
 			if (ss_item) {
 				do_id = sharesummary->workinfoid;
@@ -4210,7 +4403,7 @@ static bool workinfo_fill(PGconn *conn)
 
 	// TODO: select the data based on sharesummary since old data isn't needed
 	//  however, the ageing rules for workinfo will decide that also
-	//  keep the last block + current?
+	//  keep the last block + current? Rules will depend on payout scheme also
 	sel = "select "
 //		"workinfoid,poolinstance,transactiontree,merklehash,prevhash,"
 		"workinfoid,poolinstance,merklehash,prevhash,"
@@ -4243,6 +4436,11 @@ static bool workinfo_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(workinfo_free);
 		DATA_WORKINFO(row, item);
+
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
 
 		PQ_GET_FLD(res, i, "workinfoid", field, ok);
 		if (!ok)
@@ -4478,11 +4676,6 @@ static bool shares_add(PGconn *conn, char *workinfoid, char *username, char *wor
 			}
 
 			if (!sharesummary->reset) {
-				if (sharesummary->workinfoid >= pool.workinfoid) {
-					// Negate coz the shares will re-add
-					pool.diffacc -= sharesummary->sharecount;
-					pool.differr -= sharesummary->errorcount;
-				}
 				zero_sharesummary(sharesummary, cd, shares->diff);
 				sharesummary->reset = true;
 			}
@@ -4490,7 +4683,7 @@ static bool shares_add(PGconn *conn, char *workinfoid, char *username, char *wor
 	}
 
 	if (!confirm_sharesummary)
-		workerstatus_update(NULL, shares, NULL, NULL);
+		workerstatus_update(NULL, shares, NULL);
 
 	sharesummary_update(conn, shares, NULL, NULL, by, code, inet, cd);
 
@@ -4615,11 +4808,6 @@ static bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 			}
 
 			if (!sharesummary->reset) {
-				if (sharesummary->workinfoid >= pool.workinfoid) {
-					// Negate coz the shares will re-add
-					pool.diffacc -= sharesummary->sharecount;
-					pool.differr -= sharesummary->errorcount;
-				}
 				zero_sharesummary(sharesummary, cd, 0.0);
 				sharesummary->reset = true;
 			}
@@ -4766,7 +4954,9 @@ static bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row
 			sharecreatedate = &(e_row->createdate);
 		}
 
+		K_RLOCK(sharesummary_free);
 		item = find_sharesummary(userid, workername, workinfoid);
+		K_RUNLOCK(sharesummary_free);
 		if (item) {
 			new = false;
 			DATA_SHARESUMMARY(row, item);
@@ -4792,32 +4982,22 @@ static bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row
 				case SE_NONE:
 					row->diffacc += s_row->diff;
 					row->shareacc++;
-					if (row->workinfoid >= pool.workinfoid)
-						pool.diffacc += s_row->diff;
 					break;
 				case SE_STALE:
 					row->diffsta += s_row->diff;
 					row->sharesta++;
-					if (row->workinfoid >= pool.workinfoid)
-						pool.differr += s_row->diff;
 					break;
 				case SE_DUPE:
 					row->diffdup += s_row->diff;
 					row->sharedup++;
-					if (row->workinfoid >= pool.workinfoid)
-						pool.differr += s_row->diff;
 					break;
 				case SE_HIGH_DIFF:
 					row->diffhi += s_row->diff;
 					row->sharehi++;
-					if (row->workinfoid >= pool.workinfoid)
-						pool.differr += s_row->diff;
 					break;
 				default:
 					row->diffrej += s_row->diff;
 					row->sharerej++;
-					if (row->workinfoid >= pool.workinfoid)
-						pool.differr += s_row->diff;
 					break;
 			}
 		}
@@ -4861,6 +5041,10 @@ static bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row
 		}
 	}
 
+	// During startup, don't save 'new' sharesummaries, to reduce DB I/O
+	if (!startup_complete && row->complete[0] == SUMMARY_NEW)
+		goto startupskip;
+
 	if (conn == NULL && !confirm_sharesummary) {
 		conn = dbconnect();
 		conned = true;
@@ -4870,6 +5054,7 @@ static bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row
 		MODIFYDATEINIT(row, cd, by, code, inet);
 
 		par = 0;
+
 		if (!confirm_sharesummary) {
 			params[par++] = bigint_to_buf(row->userid, NULL, 0);
 			params[par++] = str_to_buf(row->workername, NULL, 0);
@@ -4998,7 +5183,7 @@ static bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row
 			}
 		}
 	}
-
+startupskip:
 	ok = true;
 unparam:
 	if (par) {
@@ -5065,10 +5250,14 @@ static bool sharesummary_fill(PGconn *conn)
 	n = PQntuples(res);
 	LOGDEBUG("%s(): tree build count %d", __func__, n);
 	ok = true;
-	K_WLOCK(sharesummary_free);
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(sharesummary_free);
 		DATA_SHARESUMMARY(row, item);
+
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
 
 		row->inserted = true;
 
@@ -5177,8 +5366,6 @@ static bool sharesummary_fill(PGconn *conn)
 		sharesummary_workinfoid_root = add_to_ktree(sharesummary_workinfoid_root, item, cmp_sharesummary_workinfoid);
 		k_add_head(sharesummary_store, item);
 
-		workerstatus_update(NULL, NULL, NULL, row);
-
 		// A share summary is currently only shares in a single workinfo, at all 3 levels n,a,y
 		if (tolower(row->complete[0]) == SUMMARY_NEW) {
 			if (dbstatus.oldest_sharesummary_firstshare_n.tv_sec == 0 ||
@@ -5207,18 +5394,11 @@ static bool sharesummary_fill(PGconn *conn)
 			}
 		}
 
-		if (row->workinfoid >= pool.workinfoid) {
-			pool.diffacc += row->diffacc;
-			pool.differr += row->diffsta + row->diffdup +
-					row->diffhi + row->diffrej;
-		}
-
 		tick();
 	}
 	if (!ok)
 		k_add_head(sharesummary_free, item);
 
-	K_WUNLOCK(sharesummary_free);
 	PQclear(res);
 
 	if (ok) {
@@ -5233,11 +5413,9 @@ void sharesummary_reload()
 {
 	PGconn *conn = dbconnect();
 
-	K_WLOCK(sharesummary_free);
 	sharesummary_root = free_ktree(sharesummary_root, NULL);
 	sharesummary_workinfoid_root = free_ktree(sharesummary_workinfoid_root, NULL);
 	k_list_transfer_to_head(sharesummary_store, sharesummary_free);
-	K_WUNLOCK(sharesummary_free);
 
 	sharesummary_fill(conn);
 
@@ -5269,9 +5447,10 @@ static void dsp_blocks(K_ITEM *item, FILE *stream)
 		dsp_hash(b->blockhash, hash_dsp, sizeof(hash_dsp));
 		tv_to_buf(&(b->createdate), createdate_buf, sizeof(createdate_buf));
 		tv_to_buf(&(b->expirydate), expirydate_buf, sizeof(expirydate_buf));
-		fprintf(stream, " hi=%d hash='%.16s' uid=%"PRId64" w='%s' "
-				"cd=%s ed=%s\n",
-				b->height, hash_dsp, b->userid, b->workername,
+		fprintf(stream, " hi=%d hash='%.16s' conf=%s uid=%"PRId64
+				" w='%s' sconf=%s cd=%s ed=%s\n",
+				b->height, hash_dsp, b->confirmed, b->userid,
+				b->workername, b->statsconfirmed,
 				createdate_buf, expirydate_buf);
 	}
 }
@@ -5291,6 +5470,9 @@ static cmp_t cmp_blocks(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
+/* TODO: and make sure all block searches use these
+ * or add new ones as required here */
+
 // Must be R or W locked before call - gets current status (default_expiry)
 static K_ITEM *find_blocks(int32_t height, char *blockhash)
 {
@@ -5308,6 +5490,34 @@ static K_ITEM *find_blocks(int32_t height, char *blockhash)
 	return find_in_ktree(blocks_root, &look, cmp_blocks, ctx);
 }
 
+// Must be R or W locked before call
+static K_ITEM *find_prev_blocks(int32_t height)
+{
+	BLOCKS lookblocks, *blocks;
+	K_TREE_CTX ctx[1];
+	K_ITEM look, *b_item;
+
+	/* TODO: For self orphaned (if that ever happens)
+	 * this will find based on blockhash order if it has two,
+	 * not NEW, blocks, which might not find the right one */
+	lookblocks.height = height;
+	lookblocks.blockhash[0] = '\0';
+	lookblocks.expirydate.tv_sec = 0L;
+	lookblocks.expirydate.tv_usec = 0L;
+
+	INIT_BLOCKS(&look);
+	look.data = (void *)(&lookblocks);
+	b_item = find_before_in_ktree(blocks_root, &look, cmp_blocks, ctx);
+	while (b_item) {
+		DATA_BLOCKS(blocks, b_item);
+		if (blocks->confirmed[0] != BLOCKS_NEW &&
+		    CURRENT(&(blocks->expirydate)))
+			return b_item;
+		b_item = prev_in_ktree(ctx);
+	}
+	return NULL;
+}
+
 static const char *blocks_confirmed(char *confirmed)
 {
 	switch (confirmed[0]) {
@@ -5321,6 +5531,150 @@ static const char *blocks_confirmed(char *confirmed)
 			return blocks_orphan;
 	}
 	return blocks_unknown;
+}
+
+static bool blocks_stats(PGconn *conn, int32_t height, char *blockhash,
+			 double diffacc, double diffinv, double shareacc,
+			 double shareinv, int64_t elapsed,
+			 char *by, char *code, char *inet, tv_t *cd)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	PGresult *res = NULL;
+	K_TREE_CTX ctx[1];
+	K_ITEM *b_item, *old_b_item;
+	BLOCKS *row, *oldblocks;
+	char hash_dsp[16+1];
+	char *upd, *ins;
+	char *params[8 + HISTORYDATECOUNT];
+	bool ok = false, update_old = false;
+	int par = 0;
+	int n;
+
+	LOGDEBUG("%s(): confirm", __func__);
+
+	dsp_hash(blockhash, hash_dsp, sizeof(hash_dsp));
+
+	K_RLOCK(blocks_free);
+	old_b_item = find_blocks(height, blockhash);
+	K_RUNLOCK(blocks_free);
+
+	if (!old_b_item) {
+		LOGERR("%s(): Non-existent Block: %d/...%s",
+			__func__, height, hash_dsp);
+		return false;
+	}
+
+	DATA_BLOCKS(oldblocks, old_b_item);
+
+	K_WLOCK(blocks_free);
+	b_item = k_unlink_head(blocks_free);
+	K_WUNLOCK(blocks_free);
+
+	DATA_BLOCKS(row, b_item);
+	memcpy(row, oldblocks, sizeof(*row));
+	row->diffacc = diffacc;
+	row->diffinv = diffinv;
+	row->shareacc = shareacc;
+	row->shareinv = shareinv;
+	row->elapsed = elapsed;
+	row->statsconfirmed[0] = BLOCKS_STATSCONFIRMED;
+	row->statsconfirmed[1] = '\0';
+	HISTORYDATEINIT(row, cd, by, code, inet);
+
+	upd = "update blocks set expirydate=$1 where blockhash=$2 and expirydate=$3";
+	par = 0;
+	params[par++] = tv_to_buf(cd, NULL, 0);
+	params[par++] = str_to_buf(row->blockhash, NULL, 0);
+	params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+	PARCHKVAL(par, 3, params);
+
+	if (conn == NULL) {
+		conn = dbconnect();
+		conned = true;
+	}
+
+	res = PQexec(conn, "Begin", CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Begin", rescode, conn);
+		goto unparam;
+	}
+	PQclear(res);
+
+	res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Update", rescode, conn);
+		res = PQexec(conn, "Rollback", CKPQ_WRITE);
+		goto unparam;
+	}
+
+	update_old = true;
+
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	par = 0;
+	params[par++] = str_to_buf(row->blockhash, NULL, 0);
+	params[par++] = tv_to_buf(cd, NULL, 0);
+	params[par++] = double_to_buf(row->diffacc, NULL, 0);
+	params[par++] = double_to_buf(row->diffinv, NULL, 0);
+	params[par++] = double_to_buf(row->shareacc, NULL, 0);
+	params[par++] = double_to_buf(row->shareinv, NULL, 0);
+	params[par++] = bigint_to_buf(row->elapsed, NULL, 0);
+	params[par++] = str_to_buf(row->statsconfirmed, NULL, 0);
+	HISTORYDATEPARAMS(params, par, row);
+	PARCHKVAL(par, 8 + HISTORYDATECOUNT, params); // 13 as per ins
+
+	ins = "insert into blocks "
+		"(height,blockhash,workinfoid,userid,workername,"
+		"clientid,enonce1,nonce2,nonce,reward,confirmed,"
+		"diffacc,diffinv,shareacc,shareinv,elapsed,"
+		"statsconfirmed"
+		HISTORYDATECONTROL ") select "
+		"height,blockhash,workinfoid,userid,workername,"
+		"clientid,enonce1,nonce2,nonce,reward,confirmed,"
+		"$3,$4,$5,$6,$7,$8,"
+		"$9,$10,$11,$12,$13 from blocks where "
+		"blockhash=$1 and expirydate=$2";
+
+	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Insert", rescode, conn);
+		res = PQexec(conn, "Rollback", CKPQ_WRITE);
+		goto unparam;
+	}
+
+	res = PQexec(conn, "Commit", CKPQ_WRITE);
+
+	ok = true;
+unparam:
+	PQclear(res);
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	if (conned)
+		PQfinish(conn);
+
+	K_WLOCK(blocks_free);
+	if (!ok)
+		k_add_head(blocks_free, b_item);
+	else {
+		if (update_old) {
+			blocks_root = remove_from_ktree(blocks_root, old_b_item, cmp_blocks, ctx);
+			copy_tv(&(oldblocks->expirydate), cd);
+			blocks_root = add_to_ktree(blocks_root, old_b_item, cmp_blocks);
+		}
+		blocks_root = add_to_ktree(blocks_root, b_item, cmp_blocks);
+		k_add_head(blocks_store, b_item);
+	}
+	K_WUNLOCK(blocks_free);
+
+	return ok;
 }
 
 static bool blocks_add(PGconn *conn, char *height, char *blockhash,
@@ -5340,7 +5694,7 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 	BLOCKS *row, *oldblocks;
 	USERS *users;
 	char *upd, *ins;
-	char *params[11 + HISTORYDATECOUNT];
+	char *params[17 + HISTORYDATECOUNT];
 	bool ok = false, update_old = false;
 	int par = 0;
 	char want = '?';
@@ -5357,18 +5711,18 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 	TXT_TO_INT("height", height, row->height);
 	STRNCPY(row->blockhash, blockhash);
 
-	HISTORYDATEINIT(row, cd, by, code, inet);
-
 	dsp_hash(blockhash, hash_dsp, sizeof(hash_dsp));
 
-	K_WLOCK(blocks_free);
+	K_RLOCK(blocks_free);
 	old_b_item = find_blocks(row->height, blockhash);
+	K_RUNLOCK(blocks_free);
 	DATA_BLOCKS_NULL(oldblocks, old_b_item);
 
 	switch (confirmed[0]) {
 		case BLOCKS_NEW:
 			// None should exist - so must be a duplicate
 			if (old_b_item) {
+				K_WLOCK(blocks_free);
 				k_add_head(blocks_free, b_item);
 				K_WUNLOCK(blocks_free);
 				if (!igndup) {
@@ -5382,7 +5736,6 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 				}
 				return true;
 			}
-			K_WUNLOCK(blocks_free);
 
 			K_RLOCK(users_free);
 			u_item = find_users(username);
@@ -5402,7 +5755,15 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			STRNCPY(row->nonce2, nonce2);
 			STRNCPY(row->nonce, nonce);
 			TXT_TO_BIGINT("reward", reward, row->reward);
+			// Specify them
+			row->diffacc = 0;
+			row->diffinv = 0;
+			row->shareacc = 0;
+			row->shareinv = 0;
+			row->elapsed = 0;
+			STRNCPY(row->statsconfirmed, BLOCKS_STATSPENDING_STR);
 
+			HISTORYDATEINIT(row, cd, by, code, inet);
 			HISTORYDATETRANSFER(trf_root, row);
 
 			par = 0;
@@ -5417,13 +5778,21 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			params[par++] = str_to_buf(row->nonce, NULL, 0);
 			params[par++] = bigint_to_buf(row->reward, NULL, 0);
 			params[par++] = str_to_buf(row->confirmed, NULL, 0);
+			params[par++] = double_to_buf(row->diffacc, NULL, 0);
+			params[par++] = double_to_buf(row->diffinv, NULL, 0);
+			params[par++] = double_to_buf(row->shareacc, NULL, 0);
+			params[par++] = double_to_buf(row->shareinv, NULL, 0);
+			params[par++] = bigint_to_buf(row->elapsed, NULL, 0);
+			params[par++] = str_to_buf(row->statsconfirmed, NULL, 0);
 			HISTORYDATEPARAMS(params, par, row);
 			PARCHK(par, params);
 
 			ins = "insert into blocks "
 				"(height,blockhash,workinfoid,userid,workername,"
-				"clientid,enonce1,nonce2,nonce,reward,confirmed"
-				HISTORYDATECONTROL ") values (" PQPARAM16 ")";
+				"clientid,enonce1,nonce2,nonce,reward,confirmed,"
+				"diffacc,diffinv,shareacc,shareinv,elapsed,"
+				"statsconfirmed"
+				HISTORYDATECONTROL ") values (" PQPARAM22 ")";
 
 			if (conn == NULL) {
 				conn = dbconnect();
@@ -5441,7 +5810,6 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 		case BLOCKS_42:
 			// These shouldn't be possible until startup completes
 			if (!startup_complete) {
-				K_WUNLOCK(blocks_free);
 				tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 				LOGERR("%s(): Status: %s invalid during startup. "
 					"Ignored: Block: %s/...%s/%s",
@@ -5453,7 +5821,6 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			want = BLOCKS_CONFIRM;
 		case BLOCKS_CONFIRM:
 			if (!old_b_item) {
-				K_WUNLOCK(blocks_free);
 				tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 				LOGERR("%s(): Can't %s a non-existent Block: %s/...%s/%s",
 					__func__, blocks_confirmed(confirmed),
@@ -5463,8 +5830,6 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			if (confirmed[0] == BLOCKS_CONFIRM)
 				want = BLOCKS_NEW;
 			if (oldblocks->confirmed[0] != want) {
-				k_add_head(blocks_free, b_item);
-				K_WUNLOCK(blocks_free);
 				// No mismatch messages during startup
 				if (startup_complete) {
 					tv_to_buf(cd, cd_buf, sizeof(cd_buf));
@@ -5477,7 +5842,6 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 				}
 				goto flail;
 			}
-			K_WUNLOCK(blocks_free);
 
 			upd = "update blocks set expirydate=$1 where blockhash=$2 and expirydate=$3";
 			par = 0;
@@ -5491,16 +5855,17 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 				conned = true;
 			}
 
-			STRNCPY(row->confirmed, confirmed);
 			// New is mostly a copy of the old
-			row->workinfoid = oldblocks->workinfoid;
-			STRNCPY(row->workername, oldblocks->workername);
-			row->clientid = oldblocks->clientid;
-			STRNCPY(row->enonce1, oldblocks->enonce1);
-			STRNCPY(row->nonce2, oldblocks->nonce2);
-			STRNCPY(row->nonce, oldblocks->nonce);
-			row->reward = oldblocks->reward;
+			memcpy(row, oldblocks, sizeof(*row));
+			STRNCPY(row->confirmed, confirmed);
+			if (confirmed[0] == BLOCKS_CONFIRM) {
+				row->diffacc = pool.diffacc;
+				row->diffinv = pool.diffinv;
+				row->shareacc = pool.shareacc;
+				row->shareinv = pool.shareinv;
+			}
 
+			HISTORYDATEINIT(row, cd, by, code, inet);
 			HISTORYDATETRANSFER(trf_root, row);
 
 			res = PQexec(conn, "Begin", CKPQ_WRITE);
@@ -5527,17 +5892,43 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			params[par++] = str_to_buf(row->blockhash, NULL, 0);
 			params[par++] = tv_to_buf(cd, NULL, 0);
 			params[par++] = str_to_buf(row->confirmed, NULL, 0);
-			HISTORYDATEPARAMS(params, par, row);
-			PARCHKVAL(par, 3 + HISTORYDATECOUNT, params); // 8 as per ins
 
-			ins = "insert into blocks "
-				"(height,blockhash,workinfoid,userid,workername,"
-				"clientid,enonce1,nonce2,nonce,reward,confirmed"
-				HISTORYDATECONTROL ") select "
-				"height,blockhash,workinfoid,userid,workername,"
-				"clientid,enonce1,nonce2,nonce,reward,"
-				"$3,$4,$5,$6,$7,$8 from blocks where "
-				"blockhash=$1 and expirydate=$2";
+			if (confirmed[0] == BLOCKS_CONFIRM) {
+				params[par++] = double_to_buf(row->diffacc, NULL, 0);
+				params[par++] = double_to_buf(row->diffinv, NULL, 0);
+				params[par++] = double_to_buf(row->shareacc, NULL, 0);
+				params[par++] = double_to_buf(row->shareinv, NULL, 0);
+				HISTORYDATEPARAMS(params, par, row);
+				PARCHKVAL(par, 7 + HISTORYDATECOUNT, params); // 12 as per ins
+
+				ins = "insert into blocks "
+					"(height,blockhash,workinfoid,userid,workername,"
+					"clientid,enonce1,nonce2,nonce,reward,confirmed,"
+					"diffacc,diffinv,shareacc,shareinv,elapsed,"
+					"statsconfirmed"
+					HISTORYDATECONTROL ") select "
+					"height,blockhash,workinfoid,userid,workername,"
+					"clientid,enonce1,nonce2,nonce,reward,"
+					"$3,$4,$5,$6,$7,elapsed,statsconfirmed,"
+					"$8,$9,$10,$11,$12 from blocks where "
+					"blockhash=$1 and expirydate=$2";
+			} else {
+				HISTORYDATEPARAMS(params, par, row);
+				PARCHKVAL(par, 3 + HISTORYDATECOUNT, params); // 8 as per ins
+
+				ins = "insert into blocks "
+					"(height,blockhash,workinfoid,userid,workername,"
+					"clientid,enonce1,nonce2,nonce,reward,confirmed,"
+					"diffacc,diffinv,shareacc,shareinv,elapsed,"
+					"statsconfirmed"
+					HISTORYDATECONTROL ") select "
+					"height,blockhash,workinfoid,userid,workername,"
+					"clientid,enonce1,nonce2,nonce,reward,"
+					"$3,diffacc,diffinv,shareacc,shareinv,elapsed,"
+					"statsconfirmed,"
+					"$4,$5,$6,$7,$8 from blocks where "
+					"blockhash=$1 and expirydate=$2";
+			}
 
 			res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
 			rescode = PQresultStatus(res);
@@ -5553,7 +5944,6 @@ static bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			res = PQexec(conn, "Commit", CKPQ_WRITE);
 			break;
 		default:
-			K_WUNLOCK(blocks_free);
 			LOGERR("%s(): %s.failed.invalid confirm='%s'",
 			       __func__, id, confirmed);
 			goto flail;
@@ -5592,7 +5982,8 @@ flail:
 		switch (confirmed[0]) {
 			case BLOCKS_NEW:
 				blk = true;
-				tmp[0] = '\0';
+				tv_to_buf(&(row->createdate), cd_buf, sizeof(cd_buf));
+				snprintf(tmp, sizeof(tmp), " UTC:%s", cd_buf);
 				break;
 			case BLOCKS_CONFIRM:
 				blk = true;
@@ -5609,8 +6000,8 @@ flail:
 							 100.0 * pool.diffacc / wdiff);
 					}
 				}
-				if (pool.diffacc >= 1000000.0) {
-					suffix_string(pool.diffacc, est, sizeof(est)-1, 1);
+				if (pool.diffacc >= 1000.0) {
+					suffix_string(pool.diffacc, est, sizeof(est)-1, 0);
 					strcat(est, " ");
 				}
 				tv_to_buf(&(row->createdate), cd_buf, sizeof(cd_buf));
@@ -5621,8 +6012,7 @@ flail:
 					 pool.diffacc, est, pct, cd_buf);
 				if (pool.workinfoid < row->workinfoid) {
 					pool.workinfoid = row->workinfoid;
-					pool.diffacc = pool.differr =
-					pool.best_sdiff = 0.0;
+					zero_on_new_block();
 				}
 				break;
 			case BLOCKS_ORPHAN:
@@ -5651,14 +6041,15 @@ static bool blocks_fill(PGconn *conn)
 	BLOCKS *row;
 	char *field;
 	char *sel;
-	int fields = 11;
+	int fields = 17;
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
 
 	sel = "select "
 		"height,blockhash,workinfoid,userid,workername,"
-		"clientid,enonce1,nonce2,nonce,reward,confirmed"
+		"clientid,enonce1,nonce2,nonce,reward,confirmed,"
+		"diffacc,diffinv,shareacc,shareinv,elapsed,statsconfirmed"
 		HISTORYDATECONTROL
 		" from blocks";
 	res = PQexec(conn, sel, CKPQ_READ);
@@ -5680,10 +6071,14 @@ static bool blocks_fill(PGconn *conn)
 	n = PQntuples(res);
 	LOGDEBUG("%s(): tree build count %d", __func__, n);
 	ok = true;
-	K_WLOCK(blocks_free);
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(blocks_free);
 		DATA_BLOCKS(row, item);
+
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
 
 		PQ_GET_FLD(res, i, "height", field, ok);
 		if (!ok)
@@ -5740,6 +6135,36 @@ static bool blocks_fill(PGconn *conn)
 			break;
 		TXT_TO_STR("confirmed", field, row->confirmed);
 
+		PQ_GET_FLD(res, i, "diffacc", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_DOUBLE("diffacc", field, row->diffacc);
+
+		PQ_GET_FLD(res, i, "diffinv", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_DOUBLE("diffinv", field, row->diffinv);
+
+		PQ_GET_FLD(res, i, "shareacc", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_DOUBLE("shareacc", field, row->shareacc);
+
+		PQ_GET_FLD(res, i, "shareinv", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_DOUBLE("shareinv", field, row->shareinv);
+
+		PQ_GET_FLD(res, i, "elapsed", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("elapsed", field, row->elapsed);
+
+		PQ_GET_FLD(res, i, "statsconfirmed", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("statsconfirmed", field, row->statsconfirmed);
+
 		HISTORYDATEFLDS(res, i, row, ok);
 		if (!ok)
 			break;
@@ -5756,7 +6181,6 @@ static bool blocks_fill(PGconn *conn)
 	if (!ok)
 		k_add_head(blocks_free, item);
 
-	K_WUNLOCK(blocks_free);
 	PQclear(res);
 
 	if (ok) {
@@ -5771,10 +6195,8 @@ void blocks_reload()
 {
 	PGconn *conn = dbconnect();
 
-	K_WLOCK(blocks_free);
 	blocks_root = free_ktree(blocks_root, NULL);
 	k_list_transfer_to_head(blocks_store, blocks_free);
-	K_WUNLOCK(blocks_free);
 
 	blocks_fill(conn);
 
@@ -5932,6 +6354,11 @@ static bool miningpayouts_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(miningpayouts_free);
 		DATA_MININGPAYOUTS(row, item);
+
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
 
 		PQ_GET_FLD(res, i, "miningpayoutid", field, ok);
 		if (!ok)
@@ -6092,7 +6519,7 @@ static char *auths_add(PGconn *conn, char *poolinstance, char *username,
 	K_WUNLOCK(auths_free);
 
 	// Update even if DB fails
-	workerstatus_update(row, NULL, NULL, NULL);
+	workerstatus_update(row, NULL, NULL);
 
 	if (conn == NULL) {
 		conn = dbconnect();
@@ -6195,6 +6622,11 @@ static bool auths_fill(PGconn *conn)
 		item = k_unlink_head(auths_free);
 		DATA_AUTHS(row, item);
 
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
+
 		PQ_GET_FLD(res, i, "authid", field, ok);
 		if (!ok)
 			break;
@@ -6236,7 +6668,7 @@ static bool auths_fill(PGconn *conn)
 
 		auths_root = add_to_ktree(auths_root, item, cmp_auths);
 		k_add_head(auths_store, item);
-		workerstatus_update(row, NULL, NULL, NULL);
+		workerstatus_update(row, NULL, NULL);
 
 		if (tv_newer(&(dbstatus.newest_createdate_auths), &(row->createdate)))
 			copy_tv(&(dbstatus.newest_createdate_auths), &(row->createdate));
@@ -6429,6 +6861,11 @@ static bool poolstats_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(poolstats_free);
 		DATA_POOLSTATS(row, item);
+
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
 
 		row->stored = true;
 
@@ -6639,7 +7076,7 @@ static bool userstats_add_db(PGconn *conn, USERSTATS *row)
 		conn = dbconnect();
 		conned = true;
 	}
-	
+
 	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
@@ -6735,7 +7172,7 @@ static bool userstats_add(char *poolinstance, char *elapsed, char *username,
 		}
 	}
 
-	workerstatus_update(NULL, NULL, row, NULL);
+	workerstatus_update(NULL, NULL, row);
 
 	/* group at full key: userid,createdate,poolinstance,workername
 	   i.e. ignore instance and group together down at workername */
@@ -6873,6 +7310,11 @@ static bool userstats_fill(PGconn *conn)
 		item = k_unlink_head(userstats_free);
 		DATA_USERSTATS(row, item);
 
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
+
 		// Not a DB field
 		row->poolinstance[0] = '\0';
 
@@ -6943,7 +7385,7 @@ static bool userstats_fill(PGconn *conn)
 							   cmp_userstats_workerstatus);
 		k_add_head(userstats_store, item);
 
-		workerstatus_update(NULL, NULL, row, NULL);
+		workerstatus_update(NULL, NULL, row);
 		if (userstats_starttimeband(row, &statsdate)) {
 			if (tv_newer(&(dbstatus.newest_starttimeband_userstats), &statsdate))
 				copy_tv(&(dbstatus.newest_starttimeband_userstats), &statsdate);
@@ -7400,6 +7842,11 @@ static bool setup_data()
 	if (!reload() || everyone_die)
 		return false;
 
+	set_block_share_counters();
+
+	if (everyone_die)
+		return false;
+
 	workerstatus_ready();
 
 	userstats_workerstatus_root = free_ktree(userstats_workerstatus_root, NULL);
@@ -7605,7 +8052,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 			}
 		} else {
 			if (strcasecmp(transfer_data(i_passwordhash),
-					users->passwordhash) == 0) {
+					users->passwordhash)) {
 				reason = "Incorrect password";
 				goto struckout;
 			}
@@ -7838,7 +8285,7 @@ static char *cmd_userstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 		i_eos = &userstats_eos;
 
 	eos = (strcasecmp(transfer_data(i_eos), TRUE_STR) == 0);
-		
+
 	ok = userstats_add(transfer_data(i_poolinstance),
 			   transfer_data(i_elapsed),
 			   transfer_data(i_username),
@@ -7865,7 +8312,7 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 			   __maybe_unused K_TREE *trf_root)
 {
 	K_TREE_CTX ctx[1];
-	K_ITEM *b_item;
+	K_ITEM *b_item, *w_item;
 	BLOCKS *blocks;
 	char reply[1024] = "";
 	char tmp[1024];
@@ -7924,6 +8371,44 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 				 blocks_confirmed(blocks->confirmed), FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 
+			double_to_buf(blocks->diffacc, reply, sizeof(reply));
+			snprintf(tmp, sizeof(tmp), "diffacc:%d=%s%c", rows, reply, FLDSEP);
+			APPEND_REALLOC(buf, off, len, tmp);
+
+			double_to_buf(blocks->diffinv, reply, sizeof(reply));
+			snprintf(tmp, sizeof(tmp), "diffinv:%d=%s%c", rows, reply, FLDSEP);
+			APPEND_REALLOC(buf, off, len, tmp);
+
+			double_to_buf(blocks->shareacc, reply, sizeof(reply));
+			snprintf(tmp, sizeof(tmp), "shareacc:%d=%s%c", rows, reply, FLDSEP);
+			APPEND_REALLOC(buf, off, len, tmp);
+
+			double_to_buf(blocks->shareinv, reply, sizeof(reply));
+			snprintf(tmp, sizeof(tmp), "shareinv:%d=%s%c", rows, reply, FLDSEP);
+			APPEND_REALLOC(buf, off, len, tmp);
+
+			bigint_to_buf(blocks->elapsed, reply, sizeof(reply));
+			snprintf(tmp, sizeof(tmp), "elapsed:%d=%s%c", rows, reply, FLDSEP);
+			APPEND_REALLOC(buf, off, len, tmp);
+
+			w_item = find_workinfo(blocks->workinfoid);
+			if (w_item) {
+					char wdiffbin[TXT_SML+1];
+					double wdiff;
+					WORKINFO *workinfo;
+					DATA_WORKINFO(workinfo, w_item);
+					hex2bin(wdiffbin, workinfo->bits, 4);
+					wdiff = diff_from_nbits(wdiffbin);
+					snprintf(tmp, sizeof(tmp),
+						 "netdiff:%d=%.1f%c",
+						 rows, wdiff, FLDSEP);
+					APPEND_REALLOC(buf, off, len, tmp);
+			} else {
+				snprintf(tmp, sizeof(tmp),
+					 "netdiff:%d=?%c", rows, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+			}
+
 			rows++;
 		}
 		b_item = prev_in_ktree(ctx);
@@ -7933,7 +8418,8 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 		 "rows=%d%cflds=%s%c",
 		 rows, FLDSEP,
 		 "height,blockhash,nonce,reward,workername,firstcreatedate,"
-		 "createdate,status", FLDSEP);
+		 "createdate,status,diffacc,diffinv,shareacc,shareinv,elapsed,"
+		 "netdiff", FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
 	snprintf(tmp, sizeof(tmp), "arn=%s%carp=%s", "Blocks", FLDSEP, "");
@@ -8251,18 +8737,25 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 				double w_hashrate5m, w_hashrate1hr;
 				int64_t w_elapsed;
 				tv_t w_lastshare;
-				double w_lastdiff;
+				double w_lastdiff, w_diffacc, w_diffinv;
+				double w_shareacc, w_shareinv;
 
 				w_hashrate5m = w_hashrate1hr = 0.0;
 				w_elapsed = -1;
 				w_lastshare.tv_sec = 0;
-				w_lastdiff = 0;
+				w_lastdiff = w_diffacc = w_diffinv =
+				w_shareacc = w_shareinv = 0;
 
-				ws_item = find_workerstatus(users->userid, workers->workername);
+				ws_item = find_workerstatus(users->userid, workers->workername,
+							    __FILE__, __func__, __LINE__);
 				if (ws_item) {
 					DATA_WORKERSTATUS(workerstatus, ws_item);
 					w_lastshare.tv_sec = workerstatus->last_share.tv_sec;
 					w_lastdiff = workerstatus->last_diff;
+					w_diffacc = workerstatus->diffacc;
+					w_diffinv = workerstatus->diffinv;
+					w_shareacc = workerstatus->shareacc;
+					w_shareinv = workerstatus->shareinv;
 				}
 
 				// find last stored userid record
@@ -8314,8 +8807,24 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 				snprintf(tmp, sizeof(tmp), "w_lastshare:%d=%s%c", rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
-				double_to_buf((int)(w_lastdiff), reply, sizeof(reply));
+				double_to_buf(w_lastdiff, reply, sizeof(reply));
 				snprintf(tmp, sizeof(tmp), "w_lastdiff:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_diffacc, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_diffacc:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_diffinv, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_diffinv:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_shareacc, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_shareacc:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_shareinv, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_shareinv:%d=%s%c", rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
 				userstats_workername_root = free_ktree(userstats_workername_root, NULL);
@@ -8330,8 +8839,10 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 	snprintf(tmp, sizeof(tmp),
 		 "rows=%d%cflds=%s%s%c",
 		 rows, FLDSEP,
-		 "workername,difficultydefault,idlenotificationenabled,idlenotificationtime",
-		 stats ? ",w_hashrate5m,w_hashrate1hr,w_elapsed,w_lastshare,w_lastdiff" : "",
+		 "workername,difficultydefault,idlenotificationenabled,"
+		 "idlenotificationtime",
+		 stats ? ",w_hashrate5m,w_hashrate1hr,w_elapsed,w_lastshare,"
+		 "w_lastdiff,w_diffacc,w_diffinv,w_shareacc,w_shareinv" : "",
 		 FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
@@ -9094,6 +9605,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 		tvs_to_buf(&last_bc, reply, sizeof(reply));
 		snprintf(tmp, sizeof(tmp), "lastbc=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
+		K_RLOCK(workinfo_free);
 		if (workinfo_current) {
 			WORKINFO *wic;
 			int32_t hi;
@@ -9106,6 +9618,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 			snprintf(tmp, sizeof(tmp), "lastheight=?%c", FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 		}
+		K_RUNLOCK(workinfo_free);
 	} else {
 		snprintf(tmp, sizeof(tmp), "lastbc=?%clastheight=?%c",
 					   FLDSEP, FLDSEP);
@@ -9147,7 +9660,15 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, tmp);
 
 	snprintf(tmp, sizeof(tmp), "blockerr=%.1f%c",
-				   pool.differr, FLDSEP);
+				   pool.diffinv, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+
+	snprintf(tmp, sizeof(tmp), "blockshareacc=%.1f%c",
+				   pool.shareacc, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+
+	snprintf(tmp, sizeof(tmp), "blockshareinv=%.1f%c",
+				   pool.shareinv, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
 	// TODO: assumes only one poolinstance (for now)
@@ -9418,9 +9939,11 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	looksharesummary.workername[0] = '\0';
 	INIT_SHARESUMMARY(&ss_look);
 	ss_look.data = (void *)(&looksharesummary);
+	K_RLOCK(sharesummary_free);
 	ss_item = find_before_in_ktree(sharesummary_workinfoid_root, &ss_look,
 					cmp_sharesummary_workinfoid, ctx);
 	if (!ss_item) {
+		K_RUNLOCK(sharesummary_free);
 		snprintf(reply, siz,
 			 "ERR.no shares found with or before "
 			 "workinfo %"PRId64,
@@ -9443,6 +9966,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 				if (allow_aged)
 					break;
 			default:
+				K_RUNLOCK(sharesummary_free);
 				snprintf(reply, siz,
 					 "ERR.sharesummary1 not ready in "
 					 "workinfo %"PRId64,
@@ -9470,6 +9994,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 				if (allow_aged)
 					break;
 			default:
+				K_RUNLOCK(sharesummary_free);
 				snprintf(reply, siz,
 					 "ERR.sharesummary2 not ready in "
 					 "workinfo %"PRId64,
@@ -9484,6 +10009,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		ss_item = prev_in_ktree(ctx);
 		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 	}
+	K_RUNLOCK(sharesummary_free);
 
 	if (total == 0.0) {
 		snprintf(reply, siz,
@@ -9541,18 +10067,28 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		u_item = find_userid(miningpayouts->userid);
 		K_RUNLOCK(users_free);
 		if (u_item) {
+			K_ITEM *pa_item;
+			PAYMENTADDRESSES *pa;
+			char *payaddress;
+
+			pa_item = find_paymentaddresses(miningpayouts->userid);
+			if (pa_item) {
+				DATA_PAYMENTADDRESSES(pa, pa_item);
+				payaddress = pa->payaddress;
+			} else
+				payaddress = "none";
+
 			DATA_USERS(users, u_item);
 			snprintf(tmp, sizeof(tmp),
-				 "user:%d=%s%c",
-				 rows,
-				 users->username,
-				 FLDSEP);
+				 "user:%d=%s%cpayaddress:%d=%s%c",
+				 rows, users->username, FLDSEP,
+				 rows, payaddress, FLDSEP);
+
 		} else {
 			snprintf(tmp, sizeof(tmp),
-				 "user:%d=%"PRId64"%c",
-				 rows,
-				 miningpayouts->userid,
-				 FLDSEP);
+				 "user:%d=%"PRId64"%cpayaddress:%d=none%c",
+				 rows, miningpayouts->userid, FLDSEP,
+				 rows, FLDSEP);
 		}
 		APPEND_REALLOC(buf, off, len, tmp);
 
@@ -9567,9 +10103,9 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		rows++;
 	}
 	snprintf(tmp, sizeof(tmp),
-		 "rows=%d%c,flds=%s%c",
+		 "rows=%d%cflds=%s%c",
 		 rows, FLDSEP,
-		 "user,diffacc_user", FLDSEP);
+		 "user,diffacc_user,payaddress", FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
 	snprintf(tmp, sizeof(tmp), "arn=%s%carp=%s%c",
@@ -10050,6 +10586,141 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 	return cmds[*which_cmds].cmd_val;
 }
 
+static void summarise_blocks()
+{
+	K_ITEM *b_item, *b_prev, *wi_item, ss_look, *ss_item;
+	K_TREE_CTX ctx[1], ss_ctx[1];
+	double diffacc, diffinv, shareacc, shareinv;
+	tv_t now, elapsed_start, elapsed_finish;
+	int64_t elapsed, wi_start, wi_finish;
+	BLOCKS *blocks, *prev_blocks;
+	WORKINFO *prev_workinfo;
+	SHARESUMMARY looksharesummary, *sharesummary;
+	int32_t hi, prev_hi;
+	bool ok;
+
+	setnow(&now);
+
+	K_RLOCK(blocks_free);
+	// Find the oldest, stats pending, not new, block
+	b_item = first_in_ktree(blocks_root, ctx);
+	while (b_item) {
+		DATA_BLOCKS(blocks, b_item);
+		if (CURRENT(&(blocks->expirydate)) &&
+		    blocks->statsconfirmed[0] == BLOCKS_STATSPENDING &&
+		    blocks->confirmed[0] != BLOCKS_NEW)
+			break;
+		b_item = next_in_ktree(ctx);
+	}
+	K_RUNLOCK(blocks_free);
+
+	// None
+	if (!b_item)
+		return;
+
+	wi_finish = blocks->workinfoid;
+	hi = 0;
+	K_RLOCK(workinfo_free);
+	if (workinfo_current) {
+		WORKINFO *wic;
+		DATA_WORKINFO(wic, workinfo_current);
+		hi = coinbase1height(wic->coinbase1);
+	}
+	K_RUNLOCK(workinfo_free);
+
+	// Wait at least for the (badly named) '2nd' confirm
+	if (hi == 0 || blocks->height >= (hi - 1))
+		return;
+
+	diffacc = diffinv = shareacc = shareinv = 0;
+	elapsed = 0;
+	K_RLOCK(blocks_free);
+	b_prev = find_prev_blocks(blocks->height);
+	K_RUNLOCK(blocks_free);
+	if (!b_prev) {
+		wi_start = 0;
+		elapsed_start.tv_sec = elapsed_start.tv_usec = 0L;
+		prev_hi = 0;
+	} else {
+		DATA_BLOCKS(prev_blocks, b_prev);
+		wi_start = prev_blocks->workinfoid;
+		wi_item = find_workinfo(wi_start);
+		if (!wi_item) {
+			// This will repeat until fixed ...
+			LOGERR("%s() block %d, but prev %d wid "
+				"%"PRId64" is missing",
+				__func__, blocks->height,
+				prev_blocks->height,
+				prev_blocks->workinfoid);
+			return;
+		}
+		DATA_WORKINFO(prev_workinfo, wi_item);
+		copy_tv(&elapsed_start, &(prev_workinfo->createdate));
+		prev_hi = prev_blocks->height;
+	}
+	elapsed_finish.tv_sec = elapsed_finish.tv_usec = 0L;
+
+	// Add up the sharesummaries, abort if any SUMMARY_NEW
+	looksharesummary.workinfoid = wi_finish;
+	looksharesummary.userid = MAXID;
+	looksharesummary.workername[0] = '\0';
+	INIT_SHARESUMMARY(&ss_look);
+	ss_look.data = (void *)(&looksharesummary);
+	K_RLOCK(sharesummary_free);
+	ss_item = find_before_in_ktree(sharesummary_workinfoid_root, &ss_look,
+					cmp_sharesummary_workinfoid, ss_ctx);
+
+	if (!ss_item) {
+		K_RUNLOCK(sharesummary_free);
+		// This will repeat each call here until fixed ...
+		LOGERR("%s() block %d, prev %d no sharesummaries "
+			"on or before %"PRId64,
+			__func__, blocks->height,
+			prev_hi, wi_finish);
+		return;
+	}
+	DATA_SHARESUMMARY(sharesummary, ss_item);
+	while (ss_item && sharesummary->workinfoid > wi_start) {
+		if (sharesummary->complete[0] == SUMMARY_NEW) {
+			// Not aged yet
+			K_RUNLOCK(sharesummary_free);
+			return;
+		}
+		if (elapsed_start.tv_sec == 0 ||
+		    !tv_newer(&elapsed_start, &(sharesummary->firstshare))) {
+			copy_tv(&elapsed_start, &(sharesummary->firstshare));
+		}
+		if (tv_newer(&elapsed_finish, &(sharesummary->lastshare)))
+			copy_tv(&elapsed_finish, &(sharesummary->lastshare));
+
+		diffacc += sharesummary->diffacc;
+		diffinv += sharesummary->diffsta + sharesummary->diffdup +
+			   sharesummary->diffhi + sharesummary-> diffrej;
+		shareacc += sharesummary->shareacc;
+		shareinv += sharesummary->sharesta + sharesummary->sharedup +
+			    sharesummary->sharehi + sharesummary-> sharerej;
+
+		ss_item = prev_in_ktree(ss_ctx);
+		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
+	}
+	K_RUNLOCK(sharesummary_free);
+
+	elapsed = (int64_t)(tvdiff(&elapsed_finish, &elapsed_start) + 0.5);
+	ok = blocks_stats(NULL, blocks->height, blocks->blockhash,
+			  diffacc, diffinv, shareacc, shareinv, elapsed,
+			  by_default, (char *)__func__, inet_default, &now);
+
+	if (ok) {
+		LOGWARNING("%s() block %d, stats confirmed "
+			   "%0.f/%.0f/%.0f/%.0f/%"PRId64,
+			   __func__, blocks->height,
+			   diffacc, diffinv, shareacc, shareinv, elapsed);
+	} else {
+		LOGERR("%s() block %d, failed to confirm stats",
+			__func__, blocks->height);
+	}
+}
+
 static void summarise_poolstats()
 {
 // TODO
@@ -10254,11 +10925,15 @@ static void *summariser(__maybe_unused void *arg)
 		cksleep_ms(42);
 
 	while (!everyone_die) {
-		sleep(13);
+		sleep(5);
+		if (!everyone_die)
+			summarise_blocks();
 
+		sleep(4);
 		if (!everyone_die)
 			summarise_poolstats();
 
+		sleep(4);
 		if (!everyone_die)
 			summarise_userstats();
 	}
@@ -11580,9 +12255,7 @@ static void confirm_summaries()
 	confirm_reload();
 }
 
-#define RELOADFILES "ckdb"
-
-static void check_restore_dir()
+static void check_restore_dir(char *name)
 {
 	struct stat statbuf;
 
@@ -11600,14 +12273,15 @@ static void check_restore_dir()
 	if (stat(restorefrom, &statbuf))
 		quit(1, "ERR: -r '%s' directory doesn't exist", restorefrom);
 
-	restorefrom = realloc(restorefrom, strlen(restorefrom)+sizeof(RELOADFILES));
+	restorefrom = realloc(restorefrom, strlen(restorefrom)+strlen(name)+1);
 	if (!restorefrom)
 		quithere(1, "OOM");
 
-	strcat(restorefrom, RELOADFILES);
+	strcat(restorefrom, name);
 }
 
 static struct option long_options[] = {
+	{ "dbprefix",		required_argument,	0,	'b' },
 	{ "config",		required_argument,	0,	'c' },
 	{ "dbname",		required_argument,	0,	'd' },
 	{ "help",		no_argument,		0,	'h' },
@@ -11732,8 +12406,6 @@ int main(int argc, char **argv)
 	else
 		dbcode = "";
 
-	check_restore_dir();
-
 	if (!db_name)
 		db_name = "ckdb";
 	if (!db_user)
@@ -11743,6 +12415,8 @@ int main(int argc, char **argv)
 	snprintf(buf, 15, "%s%s", ckp.name, dbcode);
 	prctl(PR_SET_NAME, buf, 0, 0, 0);
 	memset(buf, 0, 15);
+
+	check_restore_dir(ckp.name);
 
 	if (!ckp.config) {
 		ckp.config = strdup(ckp.name);

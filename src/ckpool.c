@@ -1214,8 +1214,10 @@ int main(int argc, char **argv)
 	ckp.donaddress = "1PKN98VN2z5gwSGZvGKS2bj8aADZBkyhkZ";
 	if (!ckp.btcaddress)
 		ckp.btcaddress = ckp.donaddress;
+	/* Default blockpoll is sanity check only when notifier is not used or
+	 * fails */
 	if (!ckp.blockpoll)
-		ckp.blockpoll = 50;
+		ckp.blockpoll = 5000;
 	if (!ckp.update_interval)
 		ckp.update_interval = 30;
 	if (!ckp.mindiff)

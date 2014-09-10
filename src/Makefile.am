@@ -7,7 +7,7 @@ lib_LTLIBRARIES = libckpool.la
 libckpool_la_SOURCES = libckpool.c libckpool.h sha2.c sha2.h
 libckpool_la_LIBADD = @PTHREAD_LIBS@ @MATH_LIBS@ @RT_LIBS@
 
-bin_PROGRAMS = ckpool ckpmsg
+bin_PROGRAMS = ckpool ckpmsg notifier
 ckpool_SOURCES = ckpool.c ckpool.h generator.c generator.h bitcoin.c bitcoin.h \
 		 stratifier.c stratifier.h connector.c connector.h uthash.h \
 		 utlist.h
@@ -15,6 +15,9 @@ ckpool_LDADD = libckpool.la @JANSSON_LIBS@
 
 ckpmsg_SOURCES = ckpmsg.c
 ckpmsg_LDADD = libckpool.la @JANSSON_LIBS@
+
+notifier_SOURCES = notifier.c
+notifier_LDADD = libckpool.la @JANSSON_LIBS@
 
 if WANT_CKDB
 bin_PROGRAMS += ckdb

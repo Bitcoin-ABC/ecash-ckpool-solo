@@ -240,9 +240,8 @@ CREATE TABLE workmarkers ( -- range of workinfo for share accounting
     createcode character varying(128) DEFAULT ''::character varying NOT NULL,
     createinet character varying(128) DEFAULT ''::character varying NOT NULL,
     expirydate timestamp with time zone DEFAULT '6666-06-06 06:06:06+00',
-    PRIMARY KEY (workinfoidstart)
+    PRIMARY KEY (markerid)
 );
-CREATE UNIQUE INDEX workmarkersid ON workmarkers USING btree (markerid);
 
 
 CREATE TABLE markersummary ( -- sum of sharesummary for a workinfo range
@@ -276,8 +275,6 @@ CREATE TABLE markersummary ( -- sum of sharesummary for a workinfo range
 );
 
 
--- shares will be a flat file only
--- so this needs all info from shares
 CREATE TABLE blocks (
     height integer not NULL,
     blockhash character varying(256) NOT NULL,
@@ -291,10 +288,11 @@ CREATE TABLE blocks (
     reward bigint NOT NULL, -- satoshis
     confirmed char DEFAULT '' NOT NULL,
     diffacc float DEFAULT 0 NOT NULL,
-    differr float DEFAULT 0 NOT NULL,
-    sharecount bigint DEFAULT 0 NOT NULL,
-    errorcount bigint DEFAULT 0 NOT NULL,
+    diffinv float DEFAULT 0 NOT NULL,
+    shareacc float DEFAULT 0 NOT NULL,
+    shareinv float DEFAULT 0 NOT NULL,
     elapsed bigint DEFAULT 0 NOT NULL,
+    statsconfirmed char DEFAULT 'N' NOT NULL,
     createdate timestamp with time zone NOT NULL,
     createby character varying(64) DEFAULT ''::character varying NOT NULL,
     createcode character varying(128) DEFAULT ''::character varying NOT NULL,
@@ -306,7 +304,6 @@ CREATE TABLE blocks (
 
 -- calculation for the given block - orphans will be here also (not deleted later)
 -- rules for orphans/next block will be pool dependent
--- normally pay due would be related to sum of one height + for all blockhash
 CREATE TABLE miningpayouts (
     miningpayoutid bigint NOT NULL, -- unique per record
     userid bigint NOT NULL,
@@ -397,4 +394,4 @@ CREATE TABLE version (
     PRIMARY KEY (vlock)
 );
 
-insert into version (vlock,version) values (1,'0.8');
+insert into version (vlock,version) values (1,'0.9');

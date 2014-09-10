@@ -707,7 +707,7 @@ char *_recv_unix_msg(int sockd, const char *file, const char *func, const int li
 	uint32_t msglen;
 	int ret;
 
-	ret = wait_read_select(sockd, 5);
+	ret = wait_read_select(sockd, 30);
 	if (unlikely(ret < 1)) {
 		LOGERR("Select1 failed in recv_unix_msg");
 		goto out;

@@ -1423,7 +1423,7 @@ static user_instance_t *authorise_user(ckpool_t *ckp, const char *workername)
 	}
 	ck_uilock(&instance_lock);
 
-	if (new) {
+	if (new && !ckp->proxy) {
 		/* Is this a btc address based username? */
 		if (len > 26 && len < 35) {
 			instance->btcaddress = test_address(ckp, username);

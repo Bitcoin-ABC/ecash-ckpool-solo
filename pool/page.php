@@ -86,7 +86,12 @@ function pghead($script_marker, $name)
 
  $head = "<!DOCTYPE html>\n";
 
- $head .= "<html><head><title>$page_title$name</title><meta content='text/html; charset=iso-8859-1' http-equiv='Content-Type'>";
+ $head .= "<html><head><title>$page_title$name</title>";
+ $head .= "<meta content='text/html; charset=iso-8859-1' http-equiv='Content-Type'>";
+
+ $head .= "<script type='text/javascript'>\n";
+ $head .= "function jst(){document.getElementById('jst').style.visibility='hidden';}\n";
+ $head .= "window.onpaint=jst();\n</script>\n";
 
  $head .= "<style type='text/css'>
 form {display: inline-block;}
@@ -124,6 +129,10 @@ h1 {margin-top: 20px; float:middle; font-size: 20px;}
 .dls {text-align: left; padding: 2px 8px; text-decoration:line-through; font-weight:lighter; }
 .drs {text-align: right; padding: 2px 8px; text-decoration:line-through; font-weight:lighter; }
 .dcs {text-align: center; padding: 2px 8px; text-decoration:line-through; font-weight:lighter; }
+.st0 {font-weight:bold; }
+.st1 {color:red; font-weight:bold; }
+.st2 {color:green; font-weight:bold; }
+.st3 {color:blue; font-weight:bold; }
 </style>\n";
 
  $head .= '<meta name="robots" content="noindex">';
@@ -274,7 +283,6 @@ function pgtop($dotop, $user, $douser)
 	}
  }
 
- addscript("function jst(){document.getElementById('jst').style.visibility='hidden';}");
  $top = "<div class=jst id=jst>&nbsp;Javascript isn't enabled.";
  $top .= " You need to enable javascript to use";
  $top .= " the $site_title web site.</div>";

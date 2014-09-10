@@ -90,6 +90,8 @@ Block: <input type=text name=blk size=10 value=''>
 	$pg .= '<td class=dr>%</td>';
 	$pg .= '<td class=dr>Base BTC</td>';
 	$pg .= '<td class=dr>Avg Hashrate</td>';
+	$pg .= '<td class=dr>BTC -1.5%</td>';
+	$pg .= '<td class=dr>Address</td>';
 	$pg .= "</tr>\n";
 
 	$diffacc_total = $ans['diffacc_total'];
@@ -98,12 +100,18 @@ Block: <input type=text name=blk size=10 value=''>
 	$reward = $ans['block_reward'] / pow(10,8);
 	$elapsed = $ans['pplns_elapsed'];
 	$count = $ans['rows'];
+	$tot_btc = 0;
+	$tot_pay = 0;
 	for ($i = 0; $i < $count; $i++)
 	{
 		$diffacc_user = $ans['diffacc_user:'.$i];
 		$diffacc_percent = number_format(100.0 * $diffacc_user / $diffacc_total, 2).'%';
-		$diffacc_btc = number_format($reward * $diffacc_user / $diffacc_total, 8);
+		$base_btc = $reward * $diffacc_user / $diffacc_total;
+		$diffacc_btc = number_format($base_btc, 8);
 		$avg_hash = number_format($diffacc_user / $elapsed * pow(2,32), 0);
+		$pay_btc = $base_btc * 0.985;
+		$dsp_btc = number_format($pay_btc, 8);
+		$payaddress = $ans['payaddress:'.$i];
 
 		if (($i % 2) == 0)
 			$row = 'even';
@@ -116,8 +124,26 @@ Block: <input type=text name=blk size=10 value=''>
 		$pg .= "<td class=dr>$diffacc_percent</td>";
 		$pg .= "<td class=dr>$diffacc_btc</td>";
 		$pg .= "<td class=dr>$avg_hash</td>";
+		$pg .= "<td class=dr>$dsp_btc</td>";
+		$pg .= "<td class=dr>$payaddress</td>";
 		$pg .= "</tr>\n";
+
+		$tot_btc += $base_btc;
+		$tot_pay += $pay_btc;
 	}
+	if (($i % 2) == 0)
+		$row = 'even';
+	else
+		$row = 'odd';
+
+	$pg .= "<tr class=$row>";
+	$pg .= '<td class=dl colspan=3></td>';
+	$pg .= "<td class=dr>".number_format($tot_btc,8)."</td>";
+	$pg .= '<td class=dr></td>';
+	$pg .= '<td class=dr>'.number_format($tot_pay,8).'</td>';
+	$pg .= '<td class=dr></td>';
+	$pg .= "</tr>\n";
+
 	$pg .= "</table>\n";
  }
 
