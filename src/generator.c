@@ -534,8 +534,8 @@ out:
 
 static bool subscribe_stratum(connsock_t *cs, proxy_instance_t *proxi)
 {
-	json_t *req;
 	bool ret = false;
+	json_t *req;
 
 retry:
 	/* Attempt to reconnect if the pool supports resuming */
@@ -589,6 +589,10 @@ retry:
 	goto retry;
 
 out:
+	/* Only keep any downstream connections if we're successfully resuming
+	 * to the existing stratum sessionid */
+	if (!ret || !proxi->sessionid)
+		send_proc(proxi->ckp->stratifier, "dropall");
 	return ret;
 }
 
