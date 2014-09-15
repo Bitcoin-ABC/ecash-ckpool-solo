@@ -1216,6 +1216,7 @@ int main(int argc, char **argv)
 		ckp.btcdurl = ckzalloc(sizeof(char *));
 		ckp.btcdauth = ckzalloc(sizeof(char *));
 		ckp.btcdpass = ckzalloc(sizeof(char *));
+		ckp.btcdnotify = ckzalloc(sizeof(bool));
 	}
 	if (ckp.btcds) {
 		for (i = 0; i < ckp.btcds; i++) {
