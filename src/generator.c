@@ -122,6 +122,62 @@ struct proxy_instance {
 
 typedef struct proxy_instance proxy_instance_t;
 
+static ckmsgq_t *srvchk;	// Server check message queue
+
+static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
+{
+	char *userpass = NULL;
+	bool ret = false;
+	connsock_t *cs;
+	gbtbase_t *gbt;
+
+	cs = &si->cs;
+	if (!extract_sockaddr(si->url, &cs->url, &cs->port)) {
+		LOGWARNING("Failed to extract address from %s", si->url);
+		return ret;
+	}
+	userpass = strdup(si->auth);
+	realloc_strcat(&userpass, ":");
+	realloc_strcat(&userpass, si->pass);
+	cs->auth = http_base64(userpass);
+	dealloc(userpass);
+	if (!cs->auth) {
+		LOGWARNING("Failed to create base64 auth from %s", userpass);
+		return ret;
+	}
+
+	cs->fd = connect_socket(cs->url, cs->port);
+	if (cs->fd < 0) {
+		if (!pinging)
+			LOGWARNING("Failed to connect socket to %s:%s !", cs->url, cs->port);
+		return ret;
+	}
+
+	/* Test we can connect, authorise and get a block template */
+	gbt = ckzalloc(sizeof(gbtbase_t));
+	si->data = gbt;
+	if (!gen_gbtbase(cs, gbt)) {
+		if (!pinging) {
+			LOGINFO("Failed to get test block template from %s:%s!",
+				cs->url, cs->port);
+		}
+		goto out_close;
+	}
+	clear_gbtbase(gbt);
+	if (!validate_address(cs, ckp->btcaddress)) {
+		LOGWARNING("Invalid btcaddress: %s !", ckp->btcaddress);
+		goto out_close;
+	}
+	ret = true;
+out_close:
+	if (!ret)
+		close(cs->fd);
+	else
+		keep_sockalive(cs->fd);
+	return ret;
+}
+
+/* Find the highest priority server alive and return it */
 static server_instance_t *live_server(ckpool_t *ckp)
 {
 	server_instance_t *alive = NULL;
@@ -134,49 +190,12 @@ retry:
 		goto out;
 
 	for (i = 0; i < ckp->btcds; i++) {
-		server_instance_t *si;
-		char *userpass = NULL;
-		gbtbase_t *gbt;
+		server_instance_t *si = ckp->servers[i];
 
-		si = ckp->servers[i];
-		cs = &si->cs;
-		if (!extract_sockaddr(si->url, &cs->url, &cs->port)) {
-			LOGWARNING("Failed to extract address from %s", si->url);
-			continue;
+		if (server_alive(ckp, si, false)) {
+			alive = si;
+			break;
 		}
-		userpass = strdup(si->auth);
-		realloc_strcat(&userpass, ":");
-		realloc_strcat(&userpass, si->pass);
-		cs->auth = http_base64(userpass);
-		dealloc(userpass);
-		if (!cs->auth) {
-			LOGWARNING("Failed to create base64 auth from %s", userpass);
-			continue;
-		}
-
-		cs->fd = connect_socket(cs->url, cs->port);
-		if (cs->fd < 0) {
-			LOGWARNING("Failed to connect socket to %s:%s !", cs->url, cs->port);
-			continue;
-		}
-
-		keep_sockalive(cs->fd);
-
-		/* Test we can connect, authorise and get a block template */
-		gbt = ckzalloc(sizeof(gbtbase_t));
-		si->data = gbt;
-		if (!gen_gbtbase(cs, gbt)) {
-			LOGINFO("Failed to get test block template from %s:%s!",
-				cs->url, cs->port);
-			continue;
-		}
-		clear_gbtbase(gbt);
-		if (!validate_address(cs, ckp->btcaddress)) {
-			LOGWARNING("Invalid btcaddress: %s !", ckp->btcaddress);
-			continue;
-		}
-		alive = si;
-		break;
 	}
 	if (!alive) {
 		LOGWARNING("CRITICAL: No bitcoinds active!");
@@ -235,6 +254,8 @@ reconnect:
 	}
 
 retry:
+	ckmsgq_add(srvchk, si);
+
 	do {
 		selret = wait_read_select(us->sockd, 5);
 		if (!selret && !ping_main(ckp)) {
@@ -282,10 +303,12 @@ retry:
 			clear_gbtbase(gbt);
 		}
 	} else if (cmdmatch(buf, "getbest")) {
-		if (!get_bestblockhash(cs, hash)) {
+		if (si->notify)
+			send_unix_msg(sockd, "notify");
+		else if (!get_bestblockhash(cs, hash)) {
 			LOGINFO("No best block hash support from %s:%s",
 				cs->url, cs->port);
-			send_unix_msg(sockd, "Failed");
+			send_unix_msg(sockd, "failed");
 		} else {
 			if (unlikely(!started)) {
 				started = true;
@@ -294,15 +317,17 @@ retry:
 			send_unix_msg(sockd, hash);
 		}
 	} else if (cmdmatch(buf, "getlast")) {
-		int height = get_blockcount(cs);
+		int height;
 
-		if (height == -1) {
-			send_unix_msg(sockd,  "Failed");
+		if (si->notify)
+			send_unix_msg(sockd, "notify");
+		else if ((height = get_blockcount(cs)) == -1) {
+			send_unix_msg(sockd,  "failed");
 			goto reconnect;
 		} else {
 			LOGDEBUG("Height: %d", height);
 			if (!get_blockhash(cs, height, hash)) {
-				send_unix_msg(sockd, "Failed");
+				send_unix_msg(sockd, "failed");
 				goto reconnect;
 			} else {
 				if (unlikely(!started)) {
@@ -323,6 +348,8 @@ retry:
 			send_unix_msg(sockd, "true");
 		else
 			send_unix_msg(sockd, "false");
+	} else if (cmdmatch(buf, "fallback")) {
+		goto reconnect;
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else if (cmdmatch(buf, "ping")) {
@@ -1253,6 +1280,46 @@ static void passthrough_add_send(proxy_instance_t *proxi, const char *msg)
 	ckmsgq_add(proxi->passsends, pm);
 }
 
+static bool proxy_alive(ckpool_t *ckp, server_instance_t *si, proxy_instance_t *proxi,
+			connsock_t *cs, bool pinging)
+{
+	if (!extract_sockaddr(si->url, &cs->url, &cs->port)) {
+		LOGWARNING("Failed to extract address from %s", si->url);
+		return false;
+	}
+	if (!connect_proxy(cs)) {
+		if (!pinging) {
+			LOGINFO("Failed to connect to %s:%s in proxy_mode!",
+				cs->url, cs->port);
+		}
+		return false;
+	}
+	if (ckp->passthrough) {
+		if (!passthrough_stratum(cs, proxi)) {
+			LOGWARNING("Failed initial passthrough to %s:%s !",
+				   cs->url, cs->port);
+			return false;
+		}
+		return true;
+	}
+	/* Test we can connect, authorise and get stratum information */
+	if (!subscribe_stratum(cs, proxi)) {
+		if (!pinging) {
+			LOGINFO("Failed initial subscribe to %s:%s !",
+				cs->url, cs->port);
+		}
+		return false;
+	}
+	if (!auth_stratum(cs, proxi)) {
+		if (!pinging) {
+			LOGWARNING("Failed initial authorise to %s:%s with %s:%s !",
+				   cs->url, cs->port, si->auth, si->pass);
+		}
+		return false;
+	}
+	return true;
+}
+
 /* Cycle through the available proxies and find the first alive one */
 static proxy_instance_t *live_proxy(ckpool_t *ckp)
 {
@@ -1272,37 +1339,10 @@ retry:
 		si = ckp->servers[i];
 		proxi = si->data;
 		cs = proxi->cs;
-		if (!extract_sockaddr(si->url, &cs->url, &cs->port)) {
-			LOGWARNING("Failed to extract address from %s", si->url);
-			continue;
-		}
-		if (!connect_proxy(cs)) {
-			LOGINFO("Failed to connect to %s:%s in proxy_mode!",
-				cs->url, cs->port);
-			continue;
-		}
-		if (ckp->passthrough) {
-			if (!passthrough_stratum(cs, proxi)) {
-				LOGWARNING("Failed initial passthrough to %s:%s !",
-					   cs->url, cs->port);
-				continue;
-			}
+		if (proxy_alive(ckp, si, proxi, cs, false)) {
 			alive = proxi;
 			break;
 		}
-		/* Test we can connect, authorise and get stratum information */
-		if (!subscribe_stratum(cs, proxi)) {
-			LOGINFO("Failed initial subscribe to %s:%s !",
-				cs->url, cs->port);
-			continue;
-		}
-		if (!auth_stratum(cs, proxi)) {
-			LOGWARNING("Failed initial authorise to %s:%s with %s:%s !",
-				   cs->url, cs->port, si->auth, si->pass);
-			continue;
-		}
-		alive = proxi;
-		break;
 	}
 	if (!alive) {
 		send_proc(ckp->stratifier, "dropall");
@@ -1430,6 +1470,8 @@ retry:
 				LOGWARNING("Block rejected locally.");
 		} else
 			LOGNOTICE("No backup btcd to send block to ourselves");
+	} else if (cmdmatch(buf, "fallback")) {
+		goto reconnect;
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else if (cmdmatch(buf, "ping")) {
@@ -1467,6 +1509,7 @@ static int server_mode(ckpool_t *ckp, proc_instance_t *pi)
 		si->url = ckp->btcdurl[i];
 		si->auth = ckp->btcdauth[i];
 		si->pass = ckp->btcdpass[i];
+		si->notify = ckp->btcdnotify[i];
 	}
 
 	ret = gen_loop(pi);
@@ -1582,12 +1625,59 @@ static int proxy_mode(ckpool_t *ckp, proc_instance_t *pi)
 	return ret;
 }
 
+/* Tell the watchdog what the current server instance is and decide if we
+ * should check to see if the higher priority servers are alive and fallback */
+static void server_watchdog(ckpool_t *ckp, server_instance_t *cursi)
+{
+	static time_t last_t = 0;
+	bool alive = false;
+	time_t now_t;
+	int i, srvs;
+
+	/* Rate limit to checking only once every 5 seconds */
+	now_t = time(NULL);
+	if (now_t <= last_t + 5)
+		return;
+
+	last_t = now_t;
+
+	/* Is this the highest priority server already? */
+	if (cursi == ckp->servers[0])
+		return;
+
+	if (ckp->proxy)
+		srvs = ckp->proxies;
+	else
+		srvs = ckp->btcds;
+	for (i = 0; i < srvs; i++) {
+		server_instance_t *si = ckp->servers[i];
+
+		/* Have we reached the current server? */
+		if (si == cursi)
+			return;
+
+		if (ckp->proxy) {
+			proxy_instance_t *proxi = si->data;
+			connsock_t *cs = proxi->cs;
+
+			alive = proxy_alive(ckp, si, proxi, cs, true);
+		} else
+			alive = server_alive(ckp, si, true);
+		if (alive)
+			break;
+	}
+	if (alive)
+		send_proc(ckp->generator, "fallback");
+}
+
 int generator(proc_instance_t *pi)
 {
 	ckpool_t *ckp = pi->ckp;
 	int ret;
 
 	LOGWARNING("%s generator starting", ckp->name);
+
+	srvchk = create_ckmsgq(ckp, "srvchk", &server_watchdog);
 
 	if (ckp->proxy)
 		ret = proxy_mode(ckp, pi);

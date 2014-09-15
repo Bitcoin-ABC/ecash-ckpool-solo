@@ -65,34 +65,26 @@ function repDecode($rep)
  return $ans;
 }
 #
-function msgEncode($cmd, $id, $fields)
+function msgEncode($cmd, $id, $fields, $user)
 {
  global $send_sep, $fld_sep, $val_sep;
 
  $t = time() % 10000;
- $msg = $cmd . $send_sep . $id.$t;
- $first = true;
+ $msg = $cmd . $send_sep . $id.$t . $send_sep;
  foreach ($fields as $name => $value)
- {
-	if ($first === true)
-	{
-		$msg .= $send_sep;
-		$first = false;
-	}
-	else
-		$msg .= $fld_sep;
-
-	$msg .= $name . $val_sep . $value;
- }
+	$msg .= $name . $val_sep . $value . $fld_sep;
+ $msg .= 'createcode' . $val_sep . 'php' . $fld_sep;
+ $msg .= 'createby' . $val_sep . $user . $fld_sep;
+ $msg .= 'createinet' . $val_sep . $_SERVER['REMOTE_ADDR'];
  return $msg;
 }
 #
 function getStats($user)
 {
  if ($user === null)
-	$msg = msgEncode('homepage', 'home', array());
+	$msg = msgEncode('homepage', 'home', array(), $user);
  else
-	$msg = msgEncode('homepage', 'home', array('username'=>$user));
+	$msg = msgEncode('homepage', 'home', array('username'=>$user), $user);
  return $msg;
 }
 #
@@ -120,7 +112,7 @@ function checkPass($user, $pass)
 {
  $passhash = myhash($pass);
  $flds = array('username' => $user, 'passwordhash' => $passhash);
- $msg = msgEncode('chkpass', 'log', $flds);
+ $msg = msgEncode('chkpass', 'log', $flds, $user);
  $rep = sendsockreply('checkPass', $msg);
  if (!$rep)
 	dbdown();
@@ -132,7 +124,7 @@ function setPass($user, $oldpass, $newpass)
  $oldhash = myhash($oldpass);
  $newhash = myhash($newpass);
  $flds = array('username' => $user, 'oldhash' => $oldhash, 'newhash' => $newhash);
- $msg = msgEncode('newpass', 'log', $flds);
+ $msg = msgEncode('newpass', 'log', $flds, $user);
  $rep = sendsockreply('setPass', $msg);
  if (!$rep)
 	dbdown();
@@ -143,7 +135,7 @@ function userReg($user, $email, $pass)
 {
  $passhash = myhash($pass);
  $flds = array('username' => $user, 'emailaddress' => $email, 'passwordhash' => $passhash);
- $msg = msgEncode('adduser', 'reg', $flds);
+ $msg = msgEncode('adduser', 'reg', $flds, $user);
  $rep = sendsockreply('userReg', $msg);
  if (!$rep)
 	dbdown();
@@ -159,17 +151,17 @@ function userSettings($user, $email = null, $addr = null, $pass = null)
 	$flds['address'] = $addr;
  if ($pass != null)
 	$flds['passwordhash'] = myhash($pass);
- $msg = msgEncode('usersettings', 'userset', $flds);
+ $msg = msgEncode('usersettings', 'userset', $flds, $user);
  $rep = sendsockreply('userSettings', $msg);
  if (!$rep)
 	dbdown();
  return repDecode($rep);
 }
 #
-function getAllUsers()
+function getAllUsers($user)
 {
  $flds = array();
- $msg = msgEncode('allusers', 'all', $flds);
+ $msg = msgEncode('allusers', 'all', $flds, $user);
  $rep = sendsockreply('getAllUsers', $msg);
  if (!$rep)
 	dbdown();
@@ -181,7 +173,7 @@ function getWorkers($user)
  if ($user == false)
 	showIndex();
  $flds = array('username' => $user, 'stats' => 'Y');
- $msg = msgEncode('workers', 'work', $flds);
+ $msg = msgEncode('workers', 'work', $flds, $user);
  $rep = sendsockreply('getWorkers', $msg);
  if (!$rep)
 	dbdown();
@@ -193,7 +185,7 @@ function getPayments($user)
  if ($user == false)
 	showIndex();
  $flds = array('username' => $user);
- $msg = msgEncode('payments', 'pay', $flds);
+ $msg = msgEncode('payments', 'pay', $flds, $user);
  $rep = sendsockreply('getPayments', $msg);
  if (!$rep)
 	dbdown();
@@ -205,7 +197,7 @@ function getBlocks($user)
  if ($user == false)
 	showIndex();
  $flds = array();
- $msg = msgEncode('blocklist', 'blk', $flds);
+ $msg = msgEncode('blocklist', 'blk', $flds, $user);
  $rep = sendsockreply('getBlocks', $msg);
  if (!$rep)
 	dbdown();

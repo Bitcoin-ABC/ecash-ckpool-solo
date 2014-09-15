@@ -15,6 +15,7 @@ select 'shareerrors' as "shareerrors",count(*) from shareerrors;
 select 'shares' as "shares",count(*) from shares;
 select 'sharesummary' as "sharesummary",count(*) from sharesummary;
 select 'users' as "users",count(*) from users;
+select 'useratts' as "useratts",count(*) from useratts;
 select 'userstats' as "userstats",count(*) from userstats;
 select 'version' as "version",count(*) from version;
 select 'workers' as "workers",count(*) from workers;

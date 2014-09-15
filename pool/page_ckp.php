@@ -18,7 +18,7 @@ function dockp($data, $user)
 {
  $pg = '<h1>CKPool</h1>';
 
- $msg = msgEncode('stats', 'stats', array());
+ $msg = msgEncode('stats', 'stats', array(), $user);
  $rep = sendsockreply('stats', $msg);
  if ($rep == false)
 	$ans = array();

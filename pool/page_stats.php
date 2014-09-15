@@ -12,7 +12,7 @@ function dostats($data, $user)
 {
  $pg = '<h1>Pool Stats</h1>';
 
- $ans = getAllUsers();
+ $ans = getAllUsers($user);
 
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= "<tr class=title>";

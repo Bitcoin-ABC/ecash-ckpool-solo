@@ -30,7 +30,8 @@ Block: <input type=text name=blk size=10 value=''>
  }
  else
  {
-	$msg = msgEncode('pplns', 'pplns', array('height' => $blk, 'allow_aged' => 'Y'));
+	$flds = array('height' => $blk, 'allow_aged' => 'Y');
+	$msg = msgEncode('pplns', 'pplns', $flds, $user);
 	$rep = sendsockreply('pplns', $msg);
 	if ($rep == false)
 		$ans = array();

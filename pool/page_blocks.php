@@ -16,7 +16,7 @@ function pctcolour($pct)
 	if ($grn > 255)
 		$grn = 255;
 
-	if ($grn > 100)
+	if ($grn > 190)
 		$fg = '#00f';
 	else
 		$fg = '#fff';

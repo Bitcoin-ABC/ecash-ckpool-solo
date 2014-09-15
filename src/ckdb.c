@@ -25,7 +25,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <stdint.h>
 #include <regex.h>
+#include <sha2.h>
 #ifdef HAVE_LIBPQ_FE_H
 #include <libpq-fe.h>
 #elif defined (HAVE_POSTGRESQL_LIBPQ_FE_H)
@@ -46,8 +48,8 @@
  */
 
 #define DB_VLOCK "1"
-#define DB_VERSION "0.9"
-#define CKDB_VERSION DB_VERSION"-0.276"
+#define DB_VERSION "0.9.2"
+#define CKDB_VERSION DB_VERSION"-0.302"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -798,6 +800,8 @@ enum cmd_values {
 	CMD_WORKERS,
 	CMD_ALLUSERS,
 	CMD_HOMEPAGE,
+	CMD_GETATTS,
+	CMD_SETATTS,
 	CMD_DSP,
 	CMD_STATS,
 	CMD_PPLNS,
@@ -838,8 +842,6 @@ typedef struct logqueue {
 
 static K_LIST *logqueue_free;
 static K_STORE *logqueue_store;
-static pthread_mutex_t wq_waitlock;
-static pthread_cond_t wq_waitcond;
 
 // WORKQUEUE
 typedef struct workqueue {
@@ -865,6 +867,8 @@ typedef struct workqueue {
 
 static K_LIST *workqueue_free;
 static K_STORE *workqueue_store;
+static pthread_mutex_t wq_waitlock;
+static pthread_cond_t wq_waitcond;
 
 // TRANSFER
 #define NAME_SIZE 63
@@ -908,8 +912,8 @@ static char *_transfer_data(K_ITEM *item, WHERE_FFL_ARGS)
 	}
 	mvalue = transfer->mvalue;
 	if (!mvalue) {
-		/* N.B. name and svalue will terminate even if they are corrupt
-		 * since mvalue is NULL */
+		/* N.B. name and svalue strings will have \0 termination
+		 * even if they are both corrupt, since mvalue is NULL */
 		quitfrom(1, file, func, line,
 			 "Transfer '%s' '%s' has NULL mvalue",
 			 transfer->name, transfer->svalue);
@@ -950,10 +954,13 @@ static tv_t missing_secuser_max = { 1408860000L, 0L };
 typedef struct users {
 	int64_t userid;
 	char username[TXT_BIG+1];
+	// Anything in 'status' disables the account
+	char status[TXT_BIG+1];
 	char emailaddress[TXT_BIG+1];
 	tv_t joineddate;
 	char passwordhash[TXT_BIG+1];
 	char secondaryuserid[TXT_SML+1];
+	char salt[TXT_BIG+1];
 	HISTORYDATECONTROLFIELDS;
 } USERS;
 
@@ -963,29 +970,39 @@ typedef struct users {
 #define DATA_USERS(_var, _item) DATA_GENERIC(_var, _item, users, true)
 #define DATA_USERS_NULL(_var, _item) DATA_GENERIC(_var, _item, users, false)
 
+#define SHA256SIZHEX	64
+#define SHA256SIZBIN	32
+#define SALTSIZHEX	32
+#define SALTSIZBIN	16
+
 static K_TREE *users_root;
 static K_TREE *userid_root;
 static K_LIST *users_free;
 static K_STORE *users_store;
 
-/* TODO: for account settings - but do we want manual/auto payouts?
-// USERACCOUNTS
-typedef struct useraccounts {
+// USERATTS
+typedef struct useratts {
 	int64_t userid;
-	int64_t payoutlimit;
-	char autopayout[TXT_FLG+1];
+	char attname[TXT_SML+1];
+	char status[TXT_BIG+1];
+	char attstr[TXT_BIG+1];
+	char attstr2[TXT_BIG+1];
+	int64_t attnum;
+	int64_t attnum2;
+	tv_t attdate;
+	tv_t attdate2;
 	HISTORYDATECONTROLFIELDS;
-} USERACCOUNTS;
+} USERATTS;
 
-#define ALLOC_USERACCOUNTS 1024
-#define LIMIT_USERACCOUNTS 0
-#define INIT_USERACCOUNTS(_item) INIT_GENERIC(_item, useraccounts)
-#define DATA_USERACCOUNTS(_var, _item) DATA_GENERIC(_var, _item, useraccounts, true)
+#define ALLOC_USERATTS 1024
+#define LIMIT_USERATTS 0
+#define INIT_USERATTS(_item) INIT_GENERIC(_item, useratts)
+#define DATA_USERATTS(_var, _item) DATA_GENERIC(_var, _item, useratts, true)
+#define DATA_USERATTS_NULL(_var, _item) DATA_GENERIC(_var, _item, useratts, false)
 
-static K_TREE *useraccounts_root;
-static K_LIST *useraccounts_free;
-static K_STORE *useraccounts_store;
-*/
+static K_TREE *useratts_root;
+static K_LIST *useratts_free;
+static K_STORE *useratts_store;
 
 // WORKERS
 typedef struct workers {
@@ -1383,6 +1400,7 @@ static K_STORE *auths_store;
 
 // POOLSTATS poolstats.id.json={...}
 // Store every > 9.5m?
+// TODO: redo like userstats, but every 10min
 #define STATS_PER (9.5*60.0)
 
 typedef struct poolstats {
@@ -2202,8 +2220,8 @@ static PGconn *dbconnect()
 
 	snprintf(conninfo, sizeof(conninfo),
 		 "host=127.0.0.1 dbname=%s user=%s%s%s",
-		 db_name,
-		 db_user, db_pass ? " password=" : "",
+		 db_name, db_user,
+		 db_pass ? " password=" : "",
 		 db_pass ? db_pass : "");
 
 	conn = PQconnectdb(conninfo);
@@ -2646,6 +2664,98 @@ static K_ITEM *find_userid(int64_t userid)
 	return find_in_ktree(userid_root, &look, cmp_userid, ctx);
 }
 
+// TODO: endian?
+static void make_salt(USERS *users)
+{
+	long int r1, r2, r3, r4;
+
+	r1 = random();
+	r2 = random();
+	r3 = random();
+	r4 = random();
+
+	__bin2hex(users->salt, (void *)(&r1), 4);
+	__bin2hex(users->salt+8, (void *)(&r2), 4);
+	__bin2hex(users->salt+16, (void *)(&r3), 4);
+	__bin2hex(users->salt+24, (void *)(&r4), 4);
+}
+
+static void password_hash(char *username, char *passwordhash, char *salt, char *result, size_t siz)
+{
+	char tohash[TXT_BIG+1];
+	char buf[TXT_BIG+1];
+	size_t len, tot;
+	char why[1024];
+
+	if (siz < SHA256SIZHEX+1) {
+		snprintf(why, sizeof(why),
+			 "target result too small (%d/%d)",
+			 (int)siz, SHA256SIZHEX+1);
+		goto hashfail;
+	}
+
+	if (sizeof(buf) < SHA256SIZBIN) {
+		snprintf(why, sizeof(why),
+			 "temporary target buf too small (%d/%d)",
+			 (int)sizeof(buf), SHA256SIZBIN);
+		goto hashfail;
+	}
+
+	tot = len = strlen(passwordhash) / 2;
+	if (len != SHA256SIZBIN) {
+		snprintf(why, sizeof(why),
+			 "passwordhash wrong size (%d/%d)",
+			 (int)len, SHA256SIZBIN);
+		goto hashfail;
+	}
+	if (len > sizeof(tohash)) {
+		snprintf(why, sizeof(why),
+			 "temporary tohash too small (%d/%d)",
+			 (int)sizeof(tohash), (int)len);
+		goto hashfail;
+	}
+
+	hex2bin(tohash, passwordhash, len);
+
+	len = strlen(salt) / 2;
+	if (len != SALTSIZBIN) {
+		snprintf(why, sizeof(why),
+			 "salt wrong size (%d/%d)",
+			 (int)len, SALTSIZBIN);
+		goto hashfail;
+	}
+	if ((tot + len) > sizeof(tohash)) {
+		snprintf(why, sizeof(why),
+			 "passwordhash+salt too big (%d/%d)",
+			 (int)(tot + len), (int)sizeof(tohash));
+		goto hashfail;
+	}
+
+	hex2bin(tohash+tot, salt, len);
+	tot += len;
+
+	sha256((const unsigned char *)tohash, (unsigned int)tot, (unsigned char *)buf);
+
+	__bin2hex(result, (void *)buf, SHA256SIZBIN);
+
+	return;
+hashfail:
+	LOGERR("%s() Failed to hash '%s' password: %s",
+		__func__, username, why);
+	result[0] = '\0';
+}
+
+static bool check_hash(USERS *users, char *passwordhash)
+{
+	char hex[SHA256SIZHEX+1];
+
+	if (*(users->salt)) {
+		password_hash(users->username, passwordhash, users->salt, hex, sizeof(hex));
+		return (strcasecmp(hex, users->passwordhash) == 0);
+	} else
+		return (strcasecmp(passwordhash, users->passwordhash) == 0);
+}
+
 static bool users_pass_email(PGconn *conn, K_ITEM *u_item, char *oldhash,
 			     char *newhash, char *email, char *by, char *code,
 			     char *inet, tv_t *cd, K_TREE *trf_root)
@@ -2659,7 +2769,7 @@ static bool users_pass_email(PGconn *conn, K_ITEM *u_item, char *oldhash,
 	USERS *row, *users;
 	char *upd, *ins;
 	bool ok = false;
-	char *params[4 + HISTORYDATECOUNT];
+	char *params[5 + HISTORYDATECOUNT];
 	bool hash;
 	int par;
 
@@ -2671,7 +2781,8 @@ static bool users_pass_email(PGconn *conn, K_ITEM *u_item, char *oldhash,
 		hash = false;
 
 	DATA_USERS(users, u_item);
-	if (hash && strcasecmp(oldhash, users->passwordhash))
+	// i.e. if oldhash == EMPTY, just overwrite with new
+	if (hash && oldhash != EMPTY && !check_hash(users, oldhash))
 		return false;
 
 	K_WLOCK(users_free);
@@ -2681,10 +2792,14 @@ static bool users_pass_email(PGconn *conn, K_ITEM *u_item, char *oldhash,
 	DATA_USERS(row, item);
 	memcpy(row, users, sizeof(*row));
 	// Update one, leave the other
-	if (hash)
-		STRNCPY(row->passwordhash, newhash);
-	else
+	if (hash) {
+		// New salt each password change
+		make_salt(row);
+		password_hash(row->username, newhash, row->salt,
+			      row->passwordhash, sizeof(row->passwordhash));
+	} else
 		STRNCPY(row->emailaddress, email);
+
 	HISTORYDATEINIT(row, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, row);
 
@@ -2725,15 +2840,18 @@ static bool users_pass_email(PGconn *conn, K_ITEM *u_item, char *oldhash,
 	// Copy them both in - one will be new and one will be old
 	params[par++] = str_to_buf(row->emailaddress, NULL, 0);
 	params[par++] = str_to_buf(row->passwordhash, NULL, 0);
+	// New salt for each password change (or recopy old)
+	params[par++] = str_to_buf(row->salt, NULL, 0);
 	HISTORYDATEPARAMS(params, par, row);
-	PARCHKVAL(par, 4 + HISTORYDATECOUNT, params); // 9 as per ins
+	PARCHKVAL(par, 5 + HISTORYDATECOUNT, params); // 10 as per ins
 
 	ins = "insert into users "
-		"(userid,username,emailaddress,joineddate,passwordhash,"
-		"secondaryuserid"
+		"(userid,username,status,emailaddress,joineddate,"
+		"passwordhash,secondaryuserid,salt"
 		HISTORYDATECONTROL ") select "
-		"userid,username,$3,joineddate,$4,secondaryuserid,"
-		"$5,$6,$7,$8,$9 from users where "
+		"userid,username,status,$3,joineddate,"
+		"$4,secondaryuserid,$5,"
+		"$6,$7,$8,$9,$10 from users where "
 		"userid=$1 and expirydate=$2";
 
 	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
@@ -2788,7 +2906,7 @@ static K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 	uint64_t hash;
 	__maybe_unused uint64_t tmp;
 	bool ok = false;
-	char *params[6 + HISTORYDATECOUNT];
+	char *params[8 + HISTORYDATECOUNT];
 	int par;
 
 	LOGDEBUG("%s(): add", __func__);
@@ -2799,7 +2917,7 @@ static K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 
 	DATA_USERS(row, item);
 
-	row->userid = nextid(conn, "userid", (int64_t)(666 + (rand() % 334)),
+	row->userid = nextid(conn, "userid", (int64_t)(666 + (random() % 334)),
 				cd, by, code, inet);
 	if (row->userid == 0)
 		goto unitem;
@@ -2807,12 +2925,15 @@ static K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 	// TODO: pre-check the username exists? (to save finding out via a DB error)
 
 	STRNCPY(row->username, username);
+	row->status[0] = '\0';
 	STRNCPY(row->emailaddress, emailaddress);
 	STRNCPY(row->passwordhash, passwordhash);
 
 	snprintf(tohash, sizeof(tohash), "%s&#%s", username, emailaddress);
 	HASH_BER(tohash, strlen(tohash), 1, hash, tmp);
 	__bin2hex(row->secondaryuserid, (void *)(&hash), sizeof(hash));
+
+	make_salt(row);
 
 	HISTORYDATEINIT(row, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, row);
@@ -2824,17 +2945,19 @@ static K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 	par = 0;
 	params[par++] = bigint_to_buf(row->userid, NULL, 0);
 	params[par++] = str_to_buf(row->username, NULL, 0);
+	params[par++] = str_to_buf(row->status, NULL, 0);
 	params[par++] = str_to_buf(row->emailaddress, NULL, 0);
 	params[par++] = tv_to_buf(&(row->joineddate), NULL, 0);
 	params[par++] = str_to_buf(row->passwordhash, NULL, 0);
 	params[par++] = str_to_buf(row->secondaryuserid, NULL, 0);
+	params[par++] = str_to_buf(row->salt, NULL, 0);
 	HISTORYDATEPARAMS(params, par, row);
 	PARCHK(par, params);
 
 	ins = "insert into users "
-		"(userid,username,emailaddress,joineddate,passwordhash,"
-		"secondaryuserid"
-		HISTORYDATECONTROL ") values (" PQPARAM11 ")";
+		"(userid,username,status,emailaddress,joineddate,passwordhash,"
+		"secondaryuserid,salt"
+		HISTORYDATECONTROL ") values (" PQPARAM13 ")";
 
 	if (!conn) {
 		conn = dbconnect();
@@ -2881,14 +3004,14 @@ static bool users_fill(PGconn *conn)
 	USERS *row;
 	char *field;
 	char *sel;
-	int fields = 6;
+	int fields = 8;
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
 
 	sel = "select "
-		"userid,username,emailaddress,joineddate,passwordhash,"
-		"secondaryuserid"
+		"userid,username,status,emailaddress,joineddate,"
+		"passwordhash,secondaryuserid,salt"
 		HISTORYDATECONTROL
 		" from users";
 	res = PQexec(conn, sel, CKPQ_READ);
@@ -2930,6 +3053,11 @@ static bool users_fill(PGconn *conn)
 			break;
 		TXT_TO_STR("username", field, row->username);
 
+		PQ_GET_FLD(res, i, "status", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("status", field, row->status);
+
 		PQ_GET_FLD(res, i, "emailaddress", field, ok);
 		if (!ok)
 			break;
@@ -2949,6 +3077,11 @@ static bool users_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_STR("secondaryuserid", field, row->secondaryuserid);
+
+		PQ_GET_FLD(res, i, "salt", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("salt", field, row->salt);
 
 		HISTORYDATEFLDS(res, i, row, ok);
 		if (!ok)
@@ -2983,6 +3116,357 @@ void users_reload()
 	K_WUNLOCK(users_free);
 
 	users_fill(conn);
+
+	PQfinish(conn);
+}
+
+// default tree order by userid asc,attname asc,expirydate desc
+static cmp_t cmp_useratts(K_ITEM *a, K_ITEM *b)
+{
+	USERATTS *ua, *ub;
+	DATA_USERATTS(ua, a);
+	DATA_USERATTS(ub, b);
+	cmp_t c = CMP_BIGINT(ua->userid, ub->userid);
+	if (c == 0) {
+		c = CMP_STR(ua->attname, ub->attname);
+		if (c == 0)
+			c = CMP_TV(ub->expirydate, ua->expirydate);
+	}
+	return c;
+}
+
+// Must be R or W locked before call
+static K_ITEM *find_useratts(int64_t userid, char *attname)
+{
+	USERATTS useratts;
+	K_TREE_CTX ctx[1];
+	K_ITEM look;
+
+	useratts.userid = userid;
+	STRNCPY(useratts.attname, attname);
+	useratts.expirydate.tv_sec = default_expiry.tv_sec;
+	useratts.expirydate.tv_usec = default_expiry.tv_usec;
+
+	INIT_USERATTS(&look);
+	look.data = (void *)(&useratts);
+	return find_in_ktree(useratts_root, &look, cmp_useratts, ctx);
+}
+
+static bool useratts_item_add(PGconn *conn, K_ITEM *ua_item, tv_t *cd, bool begun)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	K_TREE_CTX ctx[1];
+	PGresult *res;
+	K_ITEM *old_item;
+	USERATTS *old_useratts, *useratts;
+	char *upd, *ins;
+	bool ok = false;
+	char *params[9 + HISTORYDATECOUNT];
+	int n, par = 0;
+
+	LOGDEBUG("%s(): add", __func__);
+
+	DATA_USERATTS(useratts, ua_item);
+
+	K_RLOCK(useratts_free);
+	old_item = find_useratts(useratts->userid, useratts->attname);
+	K_RUNLOCK(useratts_free);
+	DATA_USERATTS_NULL(old_useratts, old_item);
+
+	/* N.B. the values of the old ua_item record, if it exists,
+	 * are completely ignored i.e. you must provide all values required */
+
+	if (!conn) {
+		conn = dbconnect();
+		conned = true;
+	}
+
+	if (!begun) {
+		// Beginning of a write txn
+		res = PQexec(conn, "Begin", CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Begin", rescode, conn);
+			goto unparam;
+		}
+		PQclear(res);
+	}
+
+	if (old_item) {
+		upd = "update useratts set expirydate=$1 where userid=$2 and "
+			"attname=$3 and expirydate=$4";
+		par = 0;
+		params[par++] = tv_to_buf(cd, NULL, 0);
+		params[par++] = bigint_to_buf(old_useratts->userid, NULL, 0);
+		params[par++] = str_to_buf(old_useratts->attname, NULL, 0);
+		params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+		PARCHKVAL(par, 4, params);
+
+		res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Update", rescode, conn);
+			goto unparam;
+		}
+
+		for (n = 0; n < par; n++)
+			free(params[n]);
+	}
+
+	par = 0;
+	params[par++] = bigint_to_buf(useratts->userid, NULL, 0);
+	params[par++] = str_to_buf(useratts->attname, NULL, 0);
+	params[par++] = str_to_buf(useratts->status, NULL, 0);
+	params[par++] = str_to_buf(useratts->attstr, NULL, 0);
+	params[par++] = str_to_buf(useratts->attstr2, NULL, 0);
+	params[par++] = bigint_to_buf(useratts->attnum, NULL, 0);
+	params[par++] = bigint_to_buf(useratts->attnum2, NULL, 0);
+	params[par++] = tv_to_buf(&(useratts->attdate), NULL, 0);
+	params[par++] = tv_to_buf(&(useratts->attdate2), NULL, 0);
+	HISTORYDATEPARAMS(params, par, useratts);
+	PARCHK(par, params);
+
+	ins = "insert into useratts "
+		"(userid,attname,status,attstr,attstr2,attnum,attnum2,"
+		"attdate,attdate2"
+		HISTORYDATECONTROL ") values (" PQPARAM14 ")";
+
+	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	if (!begun) {
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Insert", rescode, conn);
+			res = PQexec(conn, "Rollback", CKPQ_WRITE);
+			goto unparam;
+		}
+
+		res = PQexec(conn, "Commit", CKPQ_WRITE);
+		ok = true;
+	} else {
+		if (PGOK(rescode))
+			ok = true;
+	}
+unparam:
+	PQclear(res);
+	if (conned)
+		PQfinish(conn);
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	K_WLOCK(useratts_free);
+	if (ok) {
+		if (old_item) {
+			useratts_root = remove_from_ktree(useratts_root, old_item, cmp_useratts, ctx);
+			copy_tv(&(old_useratts->expirydate), cd);
+			useratts_root = add_to_ktree(useratts_root, old_item, cmp_useratts);
+		}
+		useratts_root = add_to_ktree(useratts_root, ua_item, cmp_useratts);
+		k_add_head(useratts_store, ua_item);
+	}
+	K_WUNLOCK(useratts_free);
+
+	return ok;
+}
+
+static __maybe_unused K_ITEM *useratts_add(PGconn *conn, char *username, char *attname,
+				char *status, char *attstr, char *attstr2,
+				char *attnum, char *attnum2,  char *attdate,
+				char *attdate2, char *by, char *code,
+				char *inet, tv_t *cd, K_TREE *trf_root,
+				bool begun)
+{
+	K_ITEM *item, *u_item;
+	USERATTS *row;
+	USERS *users;
+	bool ok = false;
+
+	LOGDEBUG("%s(): add", __func__);
+
+	K_WLOCK(useratts_free);
+	item = k_unlink_head(useratts_free);
+	K_WUNLOCK(useratts_free);
+	DATA_USERATTS(row, item);
+
+	K_RLOCK(users_free);
+	u_item = find_users(username);
+	K_RUNLOCK(users_free);
+	if (!u_item)
+		goto unitem;
+	DATA_USERS(users, u_item);
+
+	row->userid = users->userid;
+	STRNCPY(row->attname, attname);
+	if (status == NULL)
+		row->status[0] = '\0';
+	else
+		STRNCPY(row->status, status);
+	if (attstr == NULL)
+		row->attstr[0] = '\0';
+	else
+		STRNCPY(row->attstr, attstr);
+	if (attstr2 == NULL)
+		row->attstr2[0] = '\0';
+	else
+		STRNCPY(row->attstr2, attstr2);
+	if (attnum == NULL || attnum[0] == '\0')
+		row->attnum = 0;
+	else
+		TXT_TO_BIGINT("attnum", attnum, row->attnum);
+	if (attnum2 == NULL || attnum2[0] == '\0')
+		row->attnum2 = 0;
+	else
+		TXT_TO_BIGINT("attnum2", attnum2, row->attnum2);
+	if (attdate == NULL || attdate[0] == '\0')
+		row->attdate.tv_sec = row->attdate.tv_usec = 0L;
+	else
+		TXT_TO_TV("attdate", attdate, row->attdate);
+	if (attdate2 == NULL || attdate2[0] == '\0')
+		row->attdate2.tv_sec = row->attdate2.tv_usec = 0L;
+	else
+		TXT_TO_TV("attdate2", attdate2, row->attdate2);
+
+	HISTORYDATEINIT(row, cd, by, code, inet);
+	HISTORYDATETRANSFER(trf_root, row);
+
+	ok = useratts_item_add(conn, item, cd, begun);
+unitem:
+	K_WLOCK(useratts_free);
+	if (!ok)
+		k_add_head(useratts_free, item);
+	K_WUNLOCK(useratts_free);
+
+	if (ok)
+		return item;
+	else
+		return NULL;
+}
+
+static bool useratts_fill(PGconn *conn)
+{
+	ExecStatusType rescode;
+	PGresult *res;
+	K_ITEM *item;
+	int n, i;
+	USERATTS *row;
+	char *field;
+	char *sel;
+	int fields = 9;
+	bool ok;
+
+	LOGDEBUG("%s(): select", __func__);
+
+	sel = "select "
+		"userid,attname,status,attstr,attstr2,attnum,attnum2"
+		",attdate,attdate2"
+		HISTORYDATECONTROL
+		" from useratts";
+	res = PQexec(conn, sel, CKPQ_READ);
+	rescode = PQresultStatus(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Select", rescode, conn);
+		PQclear(res);
+		return false;
+	}
+
+	n = PQnfields(res);
+	if (n != (fields + HISTORYDATECOUNT)) {
+		LOGERR("%s(): Invalid field count - should be %d, but is %d",
+			__func__, fields + HISTORYDATECOUNT, n);
+		PQclear(res);
+		return false;
+	}
+
+	n = PQntuples(res);
+	LOGDEBUG("%s(): tree build count %d", __func__, n);
+	ok = true;
+	K_WLOCK(useratts_free);
+	for (i = 0; i < n; i++) {
+		item = k_unlink_head(useratts_free);
+		DATA_USERATTS(row, item);
+
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
+
+		PQ_GET_FLD(res, i, "userid", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("userid", field, row->userid);
+
+		PQ_GET_FLD(res, i, "attname", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("attname", field, row->attname);
+
+		PQ_GET_FLD(res, i, "status", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("status", field, row->status);
+
+		PQ_GET_FLD(res, i, "attstr", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("attstr", field, row->attstr);
+
+		PQ_GET_FLD(res, i, "attstr2", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("attstr2", field, row->attstr2);
+
+		PQ_GET_FLD(res, i, "attnum", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("attnum", field, row->attnum);
+
+		PQ_GET_FLD(res, i, "attnum2", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("attnum2", field, row->attnum2);
+
+		PQ_GET_FLD(res, i, "attdate", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_TV("attdate", field, row->attdate);
+
+		PQ_GET_FLD(res, i, "attdate2", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_TV("attdate2", field, row->attdate2);
+
+		HISTORYDATEFLDS(res, i, row, ok);
+		if (!ok)
+			break;
+
+		useratts_root = add_to_ktree(useratts_root, item, cmp_useratts);
+		k_add_head(useratts_store, item);
+	}
+	if (!ok)
+		k_add_head(useratts_free, item);
+
+	K_WUNLOCK(useratts_free);
+	PQclear(res);
+
+	if (ok) {
+		LOGDEBUG("%s(): built", __func__);
+		LOGWARNING("%s(): loaded %d useratts records", __func__, n);
+	}
+
+	return ok;
+}
+
+void useratts_reload()
+{
+	PGconn *conn = dbconnect();
+
+	K_WLOCK(useratts_free);
+	useratts_root = free_ktree(useratts_root, NULL);
+	k_list_transfer_to_head(useratts_store, useratts_free);
+	K_WUNLOCK(useratts_free);
+
+	useratts_fill(conn);
 
 	PQfinish(conn);
 }
@@ -3585,7 +4069,7 @@ unitem:
 	if (!ok)
 		k_add_head(paymentaddresses_free, item);
 	else {
-		// Remove old (unneeded) records
+		// Remove from ram, old (unneeded) records
 		pa.userid = userid;
 		pa.expirydate.tv_sec = 0L;
 		pa.payaddress[0] = '\0';
@@ -7542,6 +8026,8 @@ static bool getdata2()
 	if (!(ok = sharesummary_fill(conn)) || everyone_die)
 		goto sukamudai;
 	if (!confirm_sharesummary) {
+		if (!(ok = useratts_fill(conn)) || everyone_die)
+			goto sukamudai;
 		if (!(ok = poolstats_fill(conn)) || everyone_die)
 			goto sukamudai;
 		ok = userstats_fill(conn);
@@ -7733,6 +8219,11 @@ static void alloc_storage()
 	users_root = new_ktree();
 	userid_root = new_ktree();
 
+	useratts_free = k_new_list("Useratts", sizeof(USERATTS),
+					ALLOC_USERATTS, LIMIT_USERATTS, true);
+	useratts_store = k_new_store(useratts_free);
+	useratts_root = new_ktree();
+
 	workers_free = k_new_list("Workers", sizeof(WORKERS),
 					ALLOC_WORKERS, LIMIT_WORKERS, true);
 	workers_store = k_new_store(workers_free);
@@ -7916,6 +8407,7 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
 	bool ok = false;
+	char *oldhash;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -7923,9 +8415,11 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 	if (!i_username)
 		return strdup(reply);
 
-	i_oldhash = require_name(trf_root, "oldhash", 64, (char *)hashpatt, reply, siz);
-	if (!i_oldhash)
-		return strdup(reply);
+	i_oldhash = optional_name(trf_root, "oldhash", 64, (char *)hashpatt);
+	if (i_oldhash)
+		oldhash = transfer_data(i_oldhash);
+	else
+		oldhash = EMPTY;
 
 	i_newhash = require_name(trf_root, "newhash", 64, (char *)hashpatt, reply, siz);
 	if (!i_newhash)
@@ -7937,7 +8431,7 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	if (u_item) {
 		ok = users_pass_email(NULL, u_item,
-					    transfer_data(i_oldhash),
+					    oldhash,
 					    transfer_data(i_newhash),
 					    NULL,
 					    by, code, inet, now, trf_root);
@@ -7980,10 +8474,7 @@ static char *cmd_chkpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 		ok = false;
 	else {
 		DATA_USERS(users, u_item);
-		if (strcasecmp(transfer_data(i_passwordhash), users->passwordhash) == 0)
-			ok = true;
-		else
-			ok = false;
+		ok = check_hash(users, transfer_data(i_passwordhash));
 	}
 
 	if (!ok) {
@@ -8051,8 +8542,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 				APPEND_REALLOC(answer, off, len, tmp);
 			}
 		} else {
-			if (strcasecmp(transfer_data(i_passwordhash),
-					users->passwordhash)) {
+			if (!check_hash(users, transfer_data(i_passwordhash))) {
 				reason = "Incorrect password";
 				goto struckout;
 			}
@@ -8103,7 +8593,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 struckout:
 	if (reason) {
 		snprintf(reply, siz, "ERR.%s", reason);
-		LOGERR("%s.%s", id, reply);
+		LOGERR("%s.%s.%s", cmd, id, reply);
 		return strdup(reply);
 	}
 	snprintf(reply, siz, "ok.%s", answer);
@@ -9771,6 +10261,304 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	return buf;
 }
 
+static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
+			 tv_t *now, __maybe_unused char *by,
+			 __maybe_unused char *code, __maybe_unused char *inet,
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+{
+	K_ITEM *i_username, *i_attlist, *u_item, *ua_item;
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	char tmp[1024];
+	USERATTS *useratts;
+	USERS *users;
+	char *reason = NULL;
+	char *answer = NULL;
+	char *ptr, *comma, *dot;
+	size_t len, off;
+	bool first;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	i_username = require_name(trf_root, "username", 3, (char *)userpatt, reply, siz);
+	if (!i_username) {
+		reason = "Missing username";
+		goto nuts;
+	}
+
+	K_RLOCK(users_free);
+	u_item = find_users(transfer_data(i_username));
+	K_RUNLOCK(users_free);
+
+	if (!u_item) {
+		reason = "Unknown user";
+		goto nuts;
+	} else {
+		DATA_USERS(users, u_item);
+		i_attlist = require_name(trf_root, "attlist", 1, NULL, reply, siz);
+		if (!i_attlist) {
+			reason = "Missing attlist";
+			goto nuts;
+		}
+
+		APPEND_REALLOC_INIT(answer, off, len);
+		ptr = strdup(transfer_data(i_attlist));
+		first = true;
+		while (ptr && *ptr) {
+			comma = strchr(ptr, ',');
+			if (comma)
+				*(comma++) = '\0';
+			dot = strchr(ptr, '.');
+			if (!dot) {
+				free(answer);
+				reason = "Missing element";
+				goto nuts;
+			}
+			*(dot++) = '\0';
+			K_RLOCK(useratts_free);
+			ua_item = find_useratts(users->userid, ptr);
+			K_RUNLOCK(useratts_free);
+			/* web code must check the existance of the attname
+			 * in the reply since it will be missing if it doesn't
+			 * exist in the DB */
+			if (ua_item) {
+				char num_buf[BIGINT_BUFSIZ];
+				char ctv_buf[CDATE_BUFSIZ];
+				char *ans;
+				DATA_USERATTS(useratts, ua_item);
+				if (strcmp(dot, "str") == 0) {
+					ans = useratts->attstr;
+				} else if (strcmp(dot, "str2") == 0) {
+					ans = useratts->attstr2;
+				} else if (strcmp(dot, "num") == 0) {
+					bigint_to_buf(useratts->attnum,
+						      num_buf,
+						      sizeof(num_buf));
+					ans = num_buf;
+				} else if (strcmp(dot, "num2") == 0) {
+					bigint_to_buf(useratts->attnum2,
+						      num_buf,
+						      sizeof(num_buf));
+					ans = num_buf;
+				} else if (strcmp(dot, "date") == 0) {
+					ctv_to_buf(&(useratts->attdate),
+						   ctv_buf,
+						   sizeof(num_buf));
+					ans = ctv_buf;
+				} else if (strcmp(dot, "dateexp") == 0) {
+					// Y/N if date is before now (not expired)
+					if (tv_newer(&(useratts->attdate), now))
+						ans = TRUE_STR;
+					else
+						ans = FALSE_STR;
+				} else if (strcmp(dot, "date2") == 0) {
+					ctv_to_buf(&(useratts->attdate2),
+						   ctv_buf,
+						   sizeof(num_buf));
+					ans = ctv_buf;
+				} else if (strcmp(dot, "date2exp") == 0) {
+					// Y/N if date2 is before now (not expired)
+					if (tv_newer(&(useratts->attdate2), now))
+						ans = TRUE_STR;
+					else
+						ans = FALSE_STR;
+				} else {
+					free(answer);
+					reason = "Unknown element";
+					goto nuts;
+				}
+				snprintf(tmp, sizeof(tmp), "%s%s.%s=%s",
+					 first ? EMPTY : FLDSEPSTR,
+					 ptr, dot, ans);
+				APPEND_REALLOC(answer, off, len, tmp);
+				first = false;
+			}
+			ptr = comma;
+		}
+	}
+nuts:
+	if (reason) {
+		snprintf(reply, siz, "ERR.%s", reason);
+		LOGERR("%s.%s.%s", cmd, id, reply);
+		return strdup(reply);
+	}
+	snprintf(reply, siz, "ok.%s", answer);
+	LOGDEBUG("%s.%s", id, answer);
+	free(answer);
+	return strdup(reply);
+}
+
+static void att_to_date(tv_t *date, char *data, tv_t *now)
+{
+	int add;
+
+	if (strncasecmp(data, "now+", 4) == 0) {
+		add = atoi(data+4);
+		copy_tv(date, now);
+		date->tv_sec += add;
+	} else if (strcasecmp(data, "now") == 0) {
+		copy_tv(date, now);
+	} else {
+		txt_to_ctv("date", data, date, sizeof(*date));
+	}
+}
+
+static char *cmd_setatts(PGconn *conn, char *cmd, char *id,
+			 tv_t *now, char *by, char *code, char *inet,
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+{
+	ExecStatusType rescode;
+	PGresult *res;
+	bool conned = false;
+	K_ITEM *i_username, *t_item, *u_item, *ua_item = NULL;
+	K_TREE_CTX ctx[1];
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	TRANSFER *transfer;
+	USERATTS *useratts;
+	USERS *users;
+	char attname[sizeof(useratts->attname)*2];
+	char *reason = NULL;
+	char *dot, *data;
+	bool begun = false;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	i_username = require_name(trf_root, "username", 3, (char *)userpatt, reply, siz);
+	if (!i_username) {
+		reason = "Missing user";
+		goto bats;
+	}
+
+	K_RLOCK(users_free);
+	u_item = find_users(transfer_data(i_username));
+	K_RUNLOCK(users_free);
+
+	if (!u_item) {
+		reason = "Unknown user";
+		goto bats;
+	} else {
+		DATA_USERS(users, u_item);
+		/* format is: ua_attname.element=value
+		 *  i.e. eash starts with the constant "ua_"
+		 * transfer will sort them so that any of the same attname
+		 *  will be next to each other
+		 *  thus can combine multiple elements for the same attname
+		 *  into one single useratts record (as is mandatory) */
+		t_item = first_in_ktree(trf_root, ctx);
+		while (t_item) {
+			DATA_TRANSFER(transfer, t_item);
+			if (strncmp(transfer->name, "ua_", 3) == 0) {
+				data = transfer_data(t_item);
+				STRNCPY(attname, transfer->name + 3);
+				dot = strchr(attname, '.');
+				if (!dot) {
+					reason = "Missing element";
+					goto bats;
+				}
+				*(dot++) = '\0';
+				// If we already had a different one, save it to the DB
+				if (ua_item && strcmp(useratts->attname, attname) != 0) {
+					if (conn == NULL) {
+						conn = dbconnect();
+						conned = true;
+					}
+					if (!begun) {
+						// Beginning of a write txn
+						res = PQexec(conn, "Begin", CKPQ_WRITE);
+						rescode = PQresultStatus(res);
+						PQclear(res);
+						if (!PGOK(rescode)) {
+							PGLOGERR("Begin", rescode, conn);
+							reason = "DBERR";
+							goto bats;
+						}
+						begun = true;
+					}
+					if (useratts_item_add(conn, ua_item, now, begun))
+						ua_item = NULL;
+					else {
+						res = PQexec(conn, "Rollback", CKPQ_WRITE);
+						PQclear(res);
+						reason = "DBERR";
+						goto bats;
+					}
+				}
+				if (!ua_item) {
+					K_RLOCK(useratts_free);
+					ua_item = k_unlink_head(useratts_free);
+					K_RUNLOCK(useratts_free);
+					DATA_USERATTS(useratts, ua_item);
+					bzero(useratts, sizeof(*useratts));
+					useratts->userid = users->userid;
+					STRNCPY(useratts->attname, attname);
+					HISTORYDATEINIT(useratts, now, by, code, inet);
+					HISTORYDATETRANSFER(trf_root, useratts);
+				}
+				if (strcmp(dot, "str") == 0) {
+					STRNCPY(useratts->attstr, data);
+				} else if (strcmp(dot, "str2") == 0) {
+					STRNCPY(useratts->attstr2, data);
+				} else if (strcmp(dot, "num") == 0) {
+					TXT_TO_BIGINT("num", data, useratts->attnum);
+				} else if (strcmp(dot, "num2") == 0) {
+					TXT_TO_BIGINT("num2", data, useratts->attnum2);
+				} else if (strcmp(dot, "date") == 0) {
+					att_to_date(&(useratts->attdate), data, now);
+				} else if (strcmp(dot, "date2") == 0) {
+					att_to_date(&(useratts->attdate2), data, now);
+				} else {
+					reason = "Unknown element";
+					goto bats;
+				}
+			}
+			t_item = next_in_ktree(ctx);
+		}
+		if (ua_item) {
+			if (conn == NULL) {
+				conn = dbconnect();
+				conned = true;
+			}
+			if (!begun) {
+				// Beginning of a write txn
+				res = PQexec(conn, "Begin", CKPQ_WRITE);
+				rescode = PQresultStatus(res);
+				PQclear(res);
+				if (!PGOK(rescode)) {
+					PGLOGERR("Begin", rescode, conn);
+					reason = "DBERR";
+					goto bats;
+				}
+				begun = true;
+			}
+			if (!useratts_item_add(conn, ua_item, now, begun)) {
+				res = PQexec(conn, "Rollback", CKPQ_WRITE);
+				PQclear(res);
+				reason = "DBERR";
+				goto bats;
+			}
+			res = PQexec(conn, "Commit", CKPQ_WRITE);
+			PQclear(res);
+		}
+	}
+bats:
+	if (conned)
+		PQfinish(conn);
+	if (reason) {
+		if (ua_item) {
+			K_WLOCK(useratts_free);
+			k_add_head(useratts_free, ua_item);
+			K_WUNLOCK(useratts_free);
+		}
+		snprintf(reply, siz, "ERR.%s", reason);
+		LOGERR("%s.%s.%s", cmd, id, reply);
+		return strdup(reply);
+	}
+	snprintf(reply, siz, "ok.set");
+	LOGDEBUG("%s.%s", id, reply);
+	return strdup(reply);
+}
+
 // order by userid asc
 static cmp_t cmp_mu(K_ITEM *a, K_ITEM *b)
 {
@@ -10263,7 +11051,7 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	return buf;
 }
 
-// TODO: limit access
+// TODO: limit access by having seperate sockets for each
 #define ACCESS_POOL	"p"
 #define ACCESS_SYSTEM	"s"
 #define ACCESS_WEB	"w"
@@ -10353,6 +11141,8 @@ static struct CMDS {
 	{ CMD_WORKERS,	"workers",	false,	false,	cmd_workers,	ACCESS_WEB },
 	{ CMD_ALLUSERS,	"allusers",	false,	false,	cmd_allusers,	ACCESS_WEB },
 	{ CMD_HOMEPAGE,	"homepage",	false,	false,	cmd_homepage,	ACCESS_WEB },
+	{ CMD_GETATTS,	"getatts",	false,	false,	cmd_getatts,	ACCESS_WEB },
+	{ CMD_SETATTS,	"setatts",	false,	false,	cmd_setatts,	ACCESS_WEB },
 	{ CMD_DSP,	"dsp",		false,	false,	cmd_dsp,	ACCESS_SYSTEM },
 	{ CMD_STATS,	"stats",	true,	false,	cmd_stats,	ACCESS_SYSTEM },
 	{ CMD_PPLNS,	"pplns",	false,	false,	cmd_pplns,	ACCESS_SYSTEM },
@@ -11021,6 +11811,7 @@ static void *socketer(__maybe_unused void *arg)
 	char *last_newpass = NULL, *reply_newpass = NULL;
 	char *last_userset = NULL, *reply_userset = NULL;
 	char *last_newid = NULL, *reply_newid = NULL;
+	char *last_setatts = NULL, *reply_setatts = NULL;
 	char *last_web = NULL, *reply_web = NULL;
 	char *reply_last, duptype[CMD_SIZ+1];
 	enum cmd_values cmdnum;
@@ -11082,10 +11873,12 @@ static void *socketer(__maybe_unused void *arg)
 			 *	 message is sent within the same second and thus
 			 *	 will effectively reduce the processing load for
 			 *	 sequential duplicates
-			 *	 adduser duplicates are handled by the DB code
-			 *  auth, chkpass, adduser, newpass, newid -
-			 *   remember individual last message and reply and repeat
-			 *   the reply without reprocessing the message
+			 *   As per the 'if' list below,
+			 *    remember individual last messages and replies and
+			 *    repeat the reply without reprocessing the message
+			 *   The rest are remembered in the same buffer 'web'
+			 *    so a duplicate will not be seen if another 'web'
+			 *    command arrived between two duplicate commands
 			 */
 			dup = false;
 			// These are ordered approximately most likely first
@@ -11105,7 +11898,13 @@ static void *socketer(__maybe_unused void *arg)
 				reply_last = reply_newid;
 				dup = true;
 			} else if (last_addrauth && strcmp(last_addrauth, buf) == 0) {
-				reply_last = reply_auth;
+				reply_last = reply_addrauth;
+				dup = true;
+			} else if (last_userset && strcmp(last_userset, buf) == 0) {
+				reply_last = reply_userset;
+				dup = true;
+			} else if (last_setatts && strcmp(last_setatts, buf) == 0) {
+				reply_last = reply_setatts;
 				dup = true;
 			} else if (last_web && strcmp(last_web, buf) == 0) {
 				reply_last = reply_web;
@@ -11193,6 +11992,8 @@ static void *socketer(__maybe_unused void *arg)
 					case CMD_ADDUSER:
 					case CMD_NEWPASS:
 					case CMD_USERSET:
+					case CMD_GETATTS:
+					case CMD_SETATTS:
 					case CMD_BLOCKLIST:
 					case CMD_NEWID:
 					case CMD_STATS:
@@ -11229,6 +12030,10 @@ static void *socketer(__maybe_unused void *arg)
 							case CMD_NEWID:
 								STORELASTREPLY(newid);
 								break;
+							case CMD_SETATTS:
+								STORELASTREPLY(setatts);
+								break;
+							// The rest
 							default:
 								free(rep);
 						}
@@ -11423,6 +12228,8 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_WORKERS:
 			case CMD_ALLUSERS:
 			case CMD_HOMEPAGE:
+			case CMD_GETATTS:
+			case CMD_SETATTS:
 			case CMD_DSP:
 			case CMD_STATS:
 			case CMD_PPLNS:
@@ -12458,7 +13265,7 @@ int main(int argc, char **argv)
 				ckp.logdir, ckp.name, dbcode);
 
 	setnow(&now);
-	srand((unsigned int)(now.tv_usec * 4096 + now.tv_sec % 4096));
+	srandom((unsigned int)(now.tv_usec * 4096 + now.tv_sec % 4096));
 
 	ckp.main.ckp = &ckp;
 	ckp.main.processname = strdup("main");

@@ -133,6 +133,7 @@ h1 {margin-top: 20px; float:middle; font-size: 20px;}
 .st1 {color:red; font-weight:bold; }
 .st2 {color:green; font-weight:bold; }
 .st3 {color:blue; font-weight:bold; }
+.ft {color:blue; font-size:7px; }
 </style>\n";
 
  $head .= '<meta name="robots" content="noindex">';
@@ -431,7 +432,7 @@ function pgfoot()
  $now = date('Y');
  if ($now != '2014')
 	$foot .= "-$now";
- $foot .= '</div>';
+ $foot .= ' <span class=ft>Z/s</span></div>';
  $foot .= "</body></html>\n";
 
  return $foot;
@@ -439,7 +440,7 @@ function pgfoot()
 #
 function gopage($data, $pagefun, $page, $menu, $name, $user, $ispage = true, $dotop = true, $douser = true)
 {
- global $dbg;
+ global $dbg, $stt;
  global $page_scripts;
 
  $dbg_marker = '[@dbg@]';
@@ -473,11 +474,17 @@ function gopage($data, $pagefun, $page, $menu, $name, $user, $ispage = true, $do
  $all = $head;
  $all .= trm_force($body);
  $all .= trm($pg);
- $all .= trm_force($foot);
+
+ if (isset($_SERVER["REQUEST_TIME_FLOAT"]))
+	$elapsed = microtime(true) - $_SERVER["REQUEST_TIME_FLOAT"];
+ else
+	$elapsed = microtime(true) - $stt;
+
+ $foot = trm_force(str_replace('Z/', number_format($elapsed, 4), $foot));
 
  usleep(100000);
 
- echo $all;
+ echo $all.$foot;
 
  exit(0);
 }

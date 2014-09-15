@@ -71,6 +71,7 @@ struct server_instance {
 	char *url;
 	char *auth;
 	char *pass;
+	bool notify;
 	connsock_t cs;
 
 	void *data; // Private data
@@ -146,6 +147,7 @@ struct ckpool_instance {
 	char **btcdurl;
 	char **btcdauth;
 	char **btcdpass;
+	bool *btcdnotify;
 	int blockpoll; // How frequently in ms to poll bitcoind for block updates
 
 	/* Difficulty settings */

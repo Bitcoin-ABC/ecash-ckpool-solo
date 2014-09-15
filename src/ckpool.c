@@ -888,6 +888,21 @@ static void json_get_int(int *store, json_t *val, const char *res)
 	*store = json_integer_value(entry);
 }
 
+static void json_get_bool(bool *store, json_t *val, const char *res)
+{
+	json_t *entry = json_object_get(val, res);
+
+	if (!entry) {
+		LOGDEBUG("Json did not find entry %s", res);
+		return;
+	}
+	if (!json_is_boolean(entry)) {
+		LOGWARNING("Json entry %s is not a boolean", res);
+		return;
+	}
+	*store = json_is_true(entry);
+}
+
 static void parse_btcds(ckpool_t *ckp, json_t *arr_val, int arr_size)
 {
 	json_t *val;
@@ -897,11 +912,13 @@ static void parse_btcds(ckpool_t *ckp, json_t *arr_val, int arr_size)
 	ckp->btcdurl = ckzalloc(sizeof(char *) * arr_size);
 	ckp->btcdauth = ckzalloc(sizeof(char *) * arr_size);
 	ckp->btcdpass = ckzalloc(sizeof(char *) * arr_size);
+	ckp->btcdnotify = ckzalloc(sizeof(bool *) * arr_size);
 	for (i = 0; i < arr_size; i++) {
 		val = json_array_get(arr_val, i);
 		json_get_string(&ckp->btcdurl[i], val, "url");
 		json_get_string(&ckp->btcdauth[i], val, "auth");
 		json_get_string(&ckp->btcdpass[i], val, "pass");
+		json_get_bool(&ckp->btcdnotify[i], val, "notify");
 	}
 }
 
@@ -1214,10 +1231,8 @@ int main(int argc, char **argv)
 	ckp.donaddress = "1PKN98VN2z5gwSGZvGKS2bj8aADZBkyhkZ";
 	if (!ckp.btcaddress)
 		ckp.btcaddress = ckp.donaddress;
-	/* Default blockpoll is sanity check only when notifier is not used or
-	 * fails */
 	if (!ckp.blockpoll)
-		ckp.blockpoll = 5000;
+		ckp.blockpoll = 100;
 	if (!ckp.update_interval)
 		ckp.update_interval = 30;
 	if (!ckp.mindiff)

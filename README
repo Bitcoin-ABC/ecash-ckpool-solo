@@ -219,7 +219,9 @@ The options recognised are as follows:
 
 
 "btcd" : This is an array of bitcoind(s) with the options url, auth  and pass
-which match the configured bitcoind. This is mandatory in pool mode.
+which match the configured bitcoind. This is mandatory in pool mode. The
+optional boolean field notify tells ckpool this btcd is using the notifier
+and does not need to be polled for block changes.
 
 "proxy" : This is an array in the same format as btcd above but is used in
 proxy and passthrough mode to set the upstream pool and is mandatory.
@@ -230,8 +232,9 @@ proxy and passthrough mode to set the upstream pool and is mandatory.
 blocks.
 
 "blockpoll" : This is the frequency in milliseconds for how often to check for
-new network blocks and is 5000 by default. It is intended to be a backup only
-for when the notifier is not set up or a sanity check for it.
+new network blocks and is 100 by default. It is intended to be a backup only
+for when the notifier is not set up and only polls if the "notify" field is
+not set on a btcd.
 
 "update_interval" : This is the frequency that stratum updates are sent out to
 miners and is set to 30 seconds by default to help perpetuate transactions for

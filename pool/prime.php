@@ -1,5 +1,8 @@
 <?php
 #
+global $stt;
+$stt = microtime();
+#
 include_once('param.php');
 include_once('base.php');
 #
@@ -18,16 +21,21 @@ function process($p, $user)
 		'Stats' => 'stats',
 		'Blocks' => 'blocks'
 	),
+	'Admin' => NULL,
 	'gap' => NULL,
 	'Help' => array(
 		'Help' => 'help',
 		'Payouts' => 'payout'
 	)
  );
- if ($user == 'Kano' || $user == 'ckolivas' || $user == 'aphorise')
-	$menu['Help']['ckp'] = 'ckp';
  if ($user == 'Kano' || $user == 'ckolivas' || $user == 'wvr2' || $user == 'aphorise')
-	$menu['Pool']['PPLNS'] = 'pplns';
+ {
+	$menu['Admin']['ckp'] = 'ckp';
+	$menu['Admin']['PPLNS'] = 'pplns';
+	$menu['Admin']['AllWork'] = 'allwork';
+ }
+ else
+	unset($menu['Admin']);
  $page = '';
  $n = '';
  foreach ($menu as $item => $options)
