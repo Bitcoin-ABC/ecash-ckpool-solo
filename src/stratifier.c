@@ -2214,7 +2214,7 @@ static json_t *__user_notify(user_instance_t *user_instance, bool clean)
 
 	HASH_FIND_I64(user_instance->userwbs, &id, userwb);
 	if (unlikely(!userwb)) {
-		LOGWARNING("Failed to find userwb in __user_notify!");
+		LOGINFO("Failed to find userwb in __user_notify!");
 		return NULL;
 	}
 
