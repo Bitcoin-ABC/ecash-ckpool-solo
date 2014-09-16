@@ -15,7 +15,7 @@ SET search_path = public, pg_catalog;
 CREATE TABLE users (
     userid bigint NOT NULL,
     username character varying(256) NOT NULL,
-    status character varying(256) DEFAULT ''::character varying NOT NULL;
+    status character varying(256) DEFAULT ''::character varying NOT NULL,
     emailaddress character varying(256) NOT NULL,
     joineddate timestamp with time zone NOT NULL,
     passwordhash character varying(256) NOT NULL,
@@ -34,7 +34,7 @@ CREATE UNIQUE INDEX usersusername ON users USING btree (username, expirydate);
 CREATE TABLE useratts (
     userid bigint NOT NULL,
     attname character varying(64) NOT NULL,
-    status character varying(256) DEFAULT ''::character varying NOT NULL;
+    status character varying(256) DEFAULT ''::character varying NOT NULL,
     attstr character varying(256) DEFAULT ''::character varying NOT NULL,
     attstr2 character varying(256) DEFAULT ''::character varying NOT NULL,
     attnum bigint DEFAULT 0 NOT NULL,

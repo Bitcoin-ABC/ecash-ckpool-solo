@@ -816,8 +816,7 @@ static bool update_subscribe(ckpool_t *ckp)
 	free(buf);
 
 	ck_wlock(&workbase_lock);
-	if (!proxy_base.diff)
-		proxy_base.diff = 1;
+	proxy_base.diff = ckp->startdiff;
 	/* Length is checked by generator */
 	strcpy(proxy_base.enonce1, json_string_value(json_object_get(val, "enonce1")));
 	proxy_base.enonce1constlen = strlen(proxy_base.enonce1) / 2;

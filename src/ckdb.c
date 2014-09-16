@@ -49,7 +49,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.2"
-#define CKDB_VERSION DB_VERSION"-0.302"
+#define CKDB_VERSION DB_VERSION"-0.303"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -802,6 +802,7 @@ enum cmd_values {
 	CMD_HOMEPAGE,
 	CMD_GETATTS,
 	CMD_SETATTS,
+	CMD_EXPATTS,
 	CMD_DSP,
 	CMD_STATS,
 	CMD_PPLNS,
@@ -3341,6 +3342,74 @@ unitem:
 		return item;
 	else
 		return NULL;
+}
+
+static bool useratts_item_expire(PGconn *conn, K_ITEM *ua_item, tv_t *cd)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	K_TREE_CTX ctx[1];
+	PGresult *res;
+	K_ITEM *item;
+	USERATTS *useratts;
+	char *upd;
+	bool ok = false;
+	char *params[4 + HISTORYDATECOUNT];
+	int n, par = 0;
+
+	LOGDEBUG("%s(): add", __func__);
+
+	DATA_USERATTS(useratts, ua_item);
+
+	/* This is pointless if ua_item is part of the tree, however,
+	 * it allows for if ua_item isn't already part of the tree */
+	K_RLOCK(useratts_free);
+	item = find_useratts(useratts->userid, useratts->attname);
+	K_RUNLOCK(useratts_free);
+
+	if (item) {
+		DATA_USERATTS(useratts, item);
+
+		if (!conn) {
+			conn = dbconnect();
+			conned = true;
+		}
+
+		upd = "update useratts set expirydate=$1 where userid=$2 and "
+			"attname=$3 and expirydate=$4";
+		par = 0;
+		params[par++] = tv_to_buf(cd, NULL, 0);
+		params[par++] = bigint_to_buf(useratts->userid, NULL, 0);
+		params[par++] = str_to_buf(useratts->attname, NULL, 0);
+		params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+		PARCHKVAL(par, 4, params);
+
+		res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Update", rescode, conn);
+			goto unparam;
+		}
+	}
+	ok = true;
+unparam:
+	if (par) {
+		PQclear(res);
+		if (conned)
+			PQfinish(conn);
+		for (n = 0; n < par; n++)
+			free(params[n]);
+	}
+
+	K_WLOCK(useratts_free);
+	if (ok && item) {
+		useratts_root = remove_from_ktree(useratts_root, item, cmp_useratts, ctx);
+		copy_tv(&(useratts->expirydate), cd);
+		useratts_root = add_to_ktree(useratts_root, item, cmp_useratts);
+	}
+	K_WUNLOCK(useratts_free);
+
+	return ok;
 }
 
 static bool useratts_fill(PGconn *conn)
@@ -10261,6 +10330,15 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	return buf;
 }
 
+/* Return the list of useratts for the given username=value
+ * Format is attlist=attname.element,attname.element,...
+ * Replies will be attname.element=value
+ * The 2 date fields, date and date2, have a secondary element name
+ *  dateexp and date2exp
+ *  This will return Y or N depending upon if the date has expired as:
+ *   attname.dateexp=N (or Y) and attname.date2exp=N (or Y)
+ *  Expired means the date is <= now
+ */
 static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 			 tv_t *now, __maybe_unused char *by,
 			 __maybe_unused char *code, __maybe_unused char *inet,
@@ -10274,7 +10352,7 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USERS *users;
 	char *reason = NULL;
 	char *answer = NULL;
-	char *ptr, *comma, *dot;
+	char *attlist = NULL, *ptr, *comma, *dot;
 	size_t len, off;
 	bool first;
 
@@ -10302,7 +10380,7 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 		}
 
 		APPEND_REALLOC_INIT(answer, off, len);
-		ptr = strdup(transfer_data(i_attlist));
+		attlist = ptr = strdup(transfer_data(i_attlist));
 		first = true;
 		while (ptr && *ptr) {
 			comma = strchr(ptr, ',');
@@ -10310,7 +10388,6 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 				*(comma++) = '\0';
 			dot = strchr(ptr, '.');
 			if (!dot) {
-				free(answer);
 				reason = "Missing element";
 				goto nuts;
 			}
@@ -10346,7 +10423,7 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 						   sizeof(num_buf));
 					ans = ctv_buf;
 				} else if (strcmp(dot, "dateexp") == 0) {
-					// Y/N if date is before now (not expired)
+					// Y/N if date is <= now (expired)
 					if (tv_newer(&(useratts->attdate), now))
 						ans = TRUE_STR;
 					else
@@ -10357,13 +10434,12 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 						   sizeof(num_buf));
 					ans = ctv_buf;
 				} else if (strcmp(dot, "date2exp") == 0) {
-					// Y/N if date2 is before now (not expired)
+					// Y/N if date2 is <= now (expired)
 					if (tv_newer(&(useratts->attdate2), now))
 						ans = TRUE_STR;
 					else
 						ans = FALSE_STR;
 				} else {
-					free(answer);
 					reason = "Unknown element";
 					goto nuts;
 				}
@@ -10377,7 +10453,12 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 		}
 	}
 nuts:
+	if (attlist)
+		free(attlist);
+
 	if (reason) {
+		if (answer)
+			free(answer);
 		snprintf(reply, siz, "ERR.%s", reason);
 		LOGERR("%s.%s.%s", cmd, id, reply);
 		return strdup(reply);
@@ -10403,6 +10484,21 @@ static void att_to_date(tv_t *date, char *data, tv_t *now)
 	}
 }
 
+/* Store useratts in the DB for the given username=value
+ * Format is 1 or more: ua_attname.element=value
+ *  i.e. each starts with the constant "ua_"
+ * attname cannot contain Tab . or =
+ * element is per the coded list below, which also cannot contain Tab . or =
+ * Any matching useratts attnames found currently in the DB are expired
+ * Transfer will sort them so that any of the same attname
+ *  will be next to each other
+ *  thus will combine multiple elements for the same attname
+ *  into one single useratts record (as is mandatory)
+ * The 2 date fields date and date2 require either epoch values sec,usec
+ *  (usec is optional and defaults to 0) or one of: now or now+NNN
+ *  now is the current epoch value and now+NNN is the epoch + NNN seconds
+ *  See att_to_date() above
+ *  */
 static char *cmd_setatts(PGconn *conn, char *cmd, char *id,
 			 tv_t *now, char *by, char *code, char *inet,
 			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
@@ -10421,6 +10517,7 @@ static char *cmd_setatts(PGconn *conn, char *cmd, char *id,
 	char *reason = NULL;
 	char *dot, *data;
 	bool begun = false;
+	int set = 0, db = 0;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -10439,12 +10536,6 @@ static char *cmd_setatts(PGconn *conn, char *cmd, char *id,
 		goto bats;
 	} else {
 		DATA_USERS(users, u_item);
-		/* format is: ua_attname.element=value
-		 *  i.e. eash starts with the constant "ua_"
-		 * transfer will sort them so that any of the same attname
-		 *  will be next to each other
-		 *  thus can combine multiple elements for the same attname
-		 *  into one single useratts record (as is mandatory) */
 		t_item = first_in_ktree(trf_root, ctx);
 		while (t_item) {
 			DATA_TRANSFER(transfer, t_item);
@@ -10475,9 +10566,10 @@ static char *cmd_setatts(PGconn *conn, char *cmd, char *id,
 						}
 						begun = true;
 					}
-					if (useratts_item_add(conn, ua_item, now, begun))
+					if (useratts_item_add(conn, ua_item, now, begun)) {
 						ua_item = NULL;
-					else {
+						db++;
+					} else {
 						res = PQexec(conn, "Rollback", CKPQ_WRITE);
 						PQclear(res);
 						reason = "DBERR";
@@ -10495,18 +10587,25 @@ static char *cmd_setatts(PGconn *conn, char *cmd, char *id,
 					HISTORYDATEINIT(useratts, now, by, code, inet);
 					HISTORYDATETRANSFER(trf_root, useratts);
 				}
+				// List of valid element names for storage
 				if (strcmp(dot, "str") == 0) {
 					STRNCPY(useratts->attstr, data);
+					set++;
 				} else if (strcmp(dot, "str2") == 0) {
 					STRNCPY(useratts->attstr2, data);
+					set++;
 				} else if (strcmp(dot, "num") == 0) {
 					TXT_TO_BIGINT("num", data, useratts->attnum);
+					set++;
 				} else if (strcmp(dot, "num2") == 0) {
 					TXT_TO_BIGINT("num2", data, useratts->attnum2);
+					set++;
 				} else if (strcmp(dot, "date") == 0) {
 					att_to_date(&(useratts->attdate), data, now);
+					set++;
 				} else if (strcmp(dot, "date2") == 0) {
 					att_to_date(&(useratts->attdate2), data, now);
+					set++;
 				} else {
 					reason = "Unknown element";
 					goto bats;
@@ -10537,6 +10636,7 @@ static char *cmd_setatts(PGconn *conn, char *cmd, char *id,
 				reason = "DBERR";
 				goto bats;
 			}
+			db++;
 			res = PQexec(conn, "Commit", CKPQ_WRITE);
 			PQclear(res);
 		}
@@ -10554,8 +10654,91 @@ bats:
 		LOGERR("%s.%s.%s", cmd, id, reply);
 		return strdup(reply);
 	}
-	snprintf(reply, siz, "ok.set");
+	snprintf(reply, siz, "ok.set %d,%d", db, set);
 	LOGDEBUG("%s.%s", id, reply);
+	return strdup(reply);
+}
+
+/* Expire the list of useratts for the given username=value
+ * Format is attlist=attname,attname,...
+ * Each matching DB attname record will have it's expirydate set to now
+ *  thus an attempt to access it with getatts will not find it and
+ *  return nothing for that attname
+ */
+static char *cmd_expatts(__maybe_unused PGconn *conn, char *cmd, char *id,
+			 tv_t *now, __maybe_unused char *by,
+			 __maybe_unused char *code, __maybe_unused char *inet,
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+{
+	K_ITEM *i_username, *i_attlist, *u_item, *ua_item;
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	USERATTS *useratts;
+	USERS *users;
+	char *reason = NULL;
+	char *attlist, *ptr, *comma;
+	int db = 0, mis = 0;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	i_username = require_name(trf_root, "username", 3, (char *)userpatt, reply, siz);
+	if (!i_username) {
+		reason = "Missing username";
+		goto rats;
+	}
+
+	K_RLOCK(users_free);
+	u_item = find_users(transfer_data(i_username));
+	K_RUNLOCK(users_free);
+
+	if (!u_item) {
+		reason = "Unknown user";
+		goto rats;
+	} else {
+		DATA_USERS(users, u_item);
+		i_attlist = require_name(trf_root, "attlist", 1, NULL, reply, siz);
+		if (!i_attlist) {
+			reason = "Missing attlist";
+			goto rats;
+		}
+
+		attlist = ptr = strdup(transfer_data(i_attlist));
+		while (ptr && *ptr) {
+			comma = strchr(ptr, ',');
+			if (comma)
+				*(comma++) = '\0';
+			K_RLOCK(useratts_free);
+			ua_item = find_useratts(users->userid, ptr);
+			K_RUNLOCK(useratts_free);
+			if (!ua_item)
+				mis++;
+			else {
+				DATA_USERATTS(useratts, ua_item);
+				HISTORYDATEINIT(useratts, now, by, code, inet);
+				HISTORYDATETRANSFER(trf_root, useratts);
+				/* Since we are expiring records, don't bother
+				 *  with combining them all into a single
+				 *  transaction and don't abort on error
+				 * Thus if an error is returned, retry would be
+				 *  necessary, but some may also have been
+				 *  expired successfully */
+				if (!useratts_item_expire(conn, ua_item, now))
+					reason = "DBERR";
+				else
+					db++;
+			}
+			ptr = comma;
+		}
+		free(attlist);
+	}
+rats:
+	if (reason) {
+		snprintf(reply, siz, "ERR.%s", reason);
+		LOGERR("%s.%s.%s", cmd, id, reply);
+		return strdup(reply);
+	}
+	snprintf(reply, siz, "ok.exp %d,%d", db, mis);
+	LOGDEBUG("%s.%s.%s", cmd, id, reply);
 	return strdup(reply);
 }
 
@@ -11143,6 +11326,7 @@ static struct CMDS {
 	{ CMD_HOMEPAGE,	"homepage",	false,	false,	cmd_homepage,	ACCESS_WEB },
 	{ CMD_GETATTS,	"getatts",	false,	false,	cmd_getatts,	ACCESS_WEB },
 	{ CMD_SETATTS,	"setatts",	false,	false,	cmd_setatts,	ACCESS_WEB },
+	{ CMD_EXPATTS,	"expatts",	false,	false,	cmd_expatts,	ACCESS_WEB },
 	{ CMD_DSP,	"dsp",		false,	false,	cmd_dsp,	ACCESS_SYSTEM },
 	{ CMD_STATS,	"stats",	true,	false,	cmd_stats,	ACCESS_SYSTEM },
 	{ CMD_PPLNS,	"pplns",	false,	false,	cmd_pplns,	ACCESS_SYSTEM },
@@ -11994,6 +12178,7 @@ static void *socketer(__maybe_unused void *arg)
 					case CMD_USERSET:
 					case CMD_GETATTS:
 					case CMD_SETATTS:
+					case CMD_EXPATTS:
 					case CMD_BLOCKLIST:
 					case CMD_NEWID:
 					case CMD_STATS:
@@ -12230,6 +12415,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_HOMEPAGE:
 			case CMD_GETATTS:
 			case CMD_SETATTS:
+			case CMD_EXPATTS:
 			case CMD_DSP:
 			case CMD_STATS:
 			case CMD_PPLNS:
