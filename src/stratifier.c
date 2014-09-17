@@ -630,6 +630,7 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 		hex2bin(bin, lasthash, 32);
 		swap_256(swap, bin);
 		__bin2hex(lastswaphash, swap, 32);
+		LOGNOTICE("Block hash changed to %s", lastswaphash);
 		blockchange_id = wb->id;
 	}
 	if (*new_block && ckp->logshares) {
@@ -1284,10 +1285,9 @@ static void *blockupdate(void *arg)
 		buf = send_recv_generator(ckp, request, GEN_LAX);
 		if (buf && cmdmatch(buf, "notify"))
 			cksleep_ms(5000);
-		else if (buf && strcmp(buf, lastswaphash) && !cmdmatch(buf, "failed")) {
-			LOGNOTICE("Block hash changed to %s", buf);
+		else if (buf && strcmp(buf, lastswaphash) && !cmdmatch(buf, "failed"))
 			update_base(ckp, GEN_PRIORITY);
-		} else
+		else
 			cksleep_ms(ckp->blockpoll);
 	}
 	return NULL;
