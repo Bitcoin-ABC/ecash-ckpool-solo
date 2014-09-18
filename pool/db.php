@@ -65,6 +65,12 @@ function repDecode($rep)
  return $ans;
 }
 #
+# Convenience function
+function zeip()
+{
+ return $_SERVER['REMOTE_ADDR'];
+}
+#
 function msgEncode($cmd, $id, $fields, $user)
 {
  global $send_sep, $fld_sep, $val_sep;
@@ -75,7 +81,7 @@ function msgEncode($cmd, $id, $fields, $user)
 	$msg .= $name . $val_sep . $value . $fld_sep;
  $msg .= 'createcode' . $val_sep . 'php' . $fld_sep;
  $msg .= 'createby' . $val_sep . $user . $fld_sep;
- $msg .= 'createinet' . $val_sep . $_SERVER['REMOTE_ADDR'];
+ $msg .= 'createinet' . $val_sep . zeip();
  return $msg;
 }
 #
@@ -112,7 +118,7 @@ function checkPass($user, $pass)
 {
  $passhash = myhash($pass);
  $flds = array('username' => $user, 'passwordhash' => $passhash);
- $msg = msgEncode('chkpass', 'log', $flds, $user);
+ $msg = msgEncode('chkpass', 'chkpass', $flds, $user);
  $rep = sendsockreply('checkPass', $msg);
  if (!$rep)
 	dbdown();
@@ -124,8 +130,19 @@ function setPass($user, $oldpass, $newpass)
  $oldhash = myhash($oldpass);
  $newhash = myhash($newpass);
  $flds = array('username' => $user, 'oldhash' => $oldhash, 'newhash' => $newhash);
- $msg = msgEncode('newpass', 'log', $flds, $user);
+ $msg = msgEncode('newpass', 'newpass', $flds, $user);
  $rep = sendsockreply('setPass', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
+function resetPass($user, $newpass)
+{
+ $newhash = myhash($newpass);
+ $flds = array('username' => $user, 'newhash' => $newhash);
+ $msg = msgEncode('newpass', 'newpass', $flds, $user);
+ $rep = sendsockreply('resetPass', $msg);
  if (!$rep)
 	dbdown();
  return repDecode($rep);
@@ -199,6 +216,80 @@ function getBlocks($user)
  $flds = array();
  $msg = msgEncode('blocklist', 'blk', $flds, $user);
  $rep = sendsockreply('getBlocks', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
+# e.g. $atts = array('ua_Reset.str' => 'FortyTwo',
+#			'ua_Reset.date' => 'now+3600')
+#			'ua_Tanuki.str' => 'Meme',
+#			'ua_Tanuki.date' => 'now');
+function setAtts($user, $atts)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array_merge(array('username' => $user), $atts);
+ $msg = msgEncode('setatts', 'setatts', $flds, $user);
+ $rep = sendsockreply('setAtts', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
+# e.g. $attlist = 'Reset.str,Reset.dateexp,Tanuki.str,Tanuki.date'
+function getAtts($user, $attlist)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array('username' => $user, 'attlist' => $attlist);
+ $msg = msgEncode('getatts', 'getatts', $flds, $user);
+ $rep = sendsockreply('getAtts', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
+# e.g. $attlist = 'Reset,Tanuki'
+# effectively makes the useratts disappear (i.e. expired)
+function expAtts($user, $attlist)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array('username' => $user, 'attlist' => $attlist);
+ $msg = msgEncode('expatts', 'expatts', $flds, $user);
+ $rep = sendsockreply('expAtts', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
+# e.g. $opts = array('oc_BlockAmountHalf.value' => '25',
+#			'oc_BlockAmountHalf.height' => '210000',
+#			'oc_BlockAmountHalf.date' => '2012-11-28 15:25:01+00',
+#			'oc_BlockAmountQuarter.value' => '12.5',
+#			'oc_BlockAmountQuarter.height' => '420000');
+# *.value is always required
+function setOpts($user, $opts)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array_merge(array('username' => $user), $opts);
+ $msg = msgEncode('setopts', 'setopts', $flds, $user);
+ $rep = sendsockreply('setOpts', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
+# e.g. $optlist = 'KWebURL,BlockAmountQuarter'
+function getOpts($user, $optlist)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array('username' => $user, 'optlist' => $optlist);
+ $msg = msgEncode('getopts', 'getopts', $flds, $user);
+ $rep = sendsockreply('getOpts', $msg);
  if (!$rep)
 	dbdown();
  return repDecode($rep);

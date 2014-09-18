@@ -415,4 +415,4 @@ CREATE TABLE version (
     PRIMARY KEY (vlock)
 );
 
-insert into version (vlock,version) values (1,'0.9');
+insert into version (vlock,version) values (1,'0.9.2');

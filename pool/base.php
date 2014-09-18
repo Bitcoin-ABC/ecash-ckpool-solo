@@ -65,6 +65,12 @@ function emailStr($str)
  return preg_replace(array($all,$beg,$fin), '', $str);
 }
 #
+function passrequires()
+{
+ return "Passwords require 6 or more characters, including<br>" .
+	"at least one of each uppercase, lowercase and a digit, but not Tab";
+}
+#
 function safepass($pass)
 {
  if (strlen($pass) < 6)
@@ -171,7 +177,17 @@ function dbd($data, $user)
 #
 function dbdown()
 {
- gopage(NULL, 'dbd', 'dbd', NULL, '', '', true, false, false);
+ gopage(NULL, 'dbd', 'dbd', def_menu(), '', '', true, false, false);
+}
+#
+function syse($data, $user)
+{
+ return "<span class=err><br>System error</span>";
+}
+#
+function syserror()
+{
+ gopage(NULL, 'syse', 'syse', def_menu(), '', '', true, false, false);
 }
 #
 function f404($data)
@@ -181,7 +197,7 @@ function f404($data)
 #
 function do404()
 {
- gopage(NULL, 'f404', 'f404', NULL, '', '', true, false, false);
+ gopage(NULL, 'f404', 'f404', def_menu(), '', '', true, false, false);
 }
 #
 function showPage($page, $menu, $name, $user)
@@ -200,7 +216,7 @@ function showPage($page, $menu, $name, $user)
 #
 function showIndex()
 {
- showPage('index', NULL, '', false);
+ showPage('index', def_menu(), '', false);
 }
 #
 function offline()
@@ -250,7 +266,8 @@ function logout()
 function requestRegister()
 {
  $reg = getparam('Register', false);
- if ($reg !== NULL)
+ $reg2 = getparam('Reset', false);
+ if ($reg !== NULL || $reg2 !== NULL)
  {
 	logout();
 	return true;

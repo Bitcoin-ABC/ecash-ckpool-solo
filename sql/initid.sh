@@ -2,25 +2,10 @@
 #
 fldsep="`echo -e '\x09'`"
 #
-dsp()
-{
- cut -c4-
-# echo
-}
-process()
-{
- # <256
- len=${#1}
- oct="`printf '%03o' "$len"`"
- code="`printf "\\\\$oct"`"
- all="$code$zero$zero$zero$1"
- printf "$code\\0\\0\\000$1" | nc -U -w 1 /opt/ckdb/listener | dsp
-}
-#
 addid()
 {
  msg="newid.$1.idname=$1${fldsep}idvalue=$2"
- process "$msg"
+ echo "$msg"
 }
 #
 # Default to yyyymmddXXXXXX

@@ -327,8 +327,7 @@ function pgtop($dotop, $user, $douser)
 </tr></table></td><td>
 <table cellpadding=0 cellspacing=0 border=0><tr>
 <td>&nbsp;<input type=submit name=Login value=Login></td></tr><tr>
-<td>&nbsp;&nbsp;
-<input type=submit name=Register value=Register></td></tr></table>
+<td>&nbsp;&nbsp;<input type=submit name=Register value='Register/Reset'></td></tr></table>
 </td></tr></table></form>";
 		}
 		else
@@ -355,10 +354,6 @@ function pgtop($dotop, $user, $douser)
 #
 function pgmenu($menus)
 {
- if ($menus == NULL)
-	$menus = array('Home'=>array('Home'=>''));
-//	$menus = array('Home'=>array('Home'=>''),'gap'=>NULL,'Help'=>array('Help'=>'help'));
-
  $ret = "\n<table cellpadding=0 cellspacing=0 border=0 width=100% id=n42>";
  $ret .= '<tr><td width=100%>';
  $ret .= '<table cellpadding=0 cellspacing=0 border=0 width=100%>';
