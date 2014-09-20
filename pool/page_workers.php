@@ -42,37 +42,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 			$ld = '&nbsp;';
 		$pg .= "<td class=dr>$ld</td>";
 
-		if ($lst < 60)
-			$lstdes = $lst.'s';
-		else
-		{
-			$lst = round($lst/60);
-			if ($lst < 60)
-				$lstdes = $lst.'min';
-			else
-			{
-				$lst = round($lst/60);
-				if ($lst < 24)
-				{
-					$lstdes = $lst.'hr';
-					if ($lst != 1)
-						$lstdes .= 's';
-				}
-				else
-				{
-					$lst = round($lst/24);
-					if ($lst < 9999)
-					{
-						$lstdes = $lst.'day';
-						if ($lst != 1)
-							$lstdes .= 's';
-					}
-					else
-						$lstdes = 'never';
-				}
-			}
-		}
-		$pg .= "<td class=dr>$lstdes</td>";
+		$pg .= '<td class=dr>'.howlongago($lst).'</td>';
 
 		$shareacc = number_format($ans['w_shareacc:'.$i], 0);
 		$totshare += $ans['w_shareacc:'.$i];

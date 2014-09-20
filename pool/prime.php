@@ -14,11 +14,6 @@ function process($p, $user, $menu)
 	$menu['Admin']['PPLNS'] = 'pplns';
 	$menu['Admin']['AllWork'] = 'allwork';
  }
- else
- {
-	if (isset($menu['Admin']))
-		unset($menu['Admin']);
- }
  $page = '';
  $n = '';
  foreach ($menu as $item => $options)

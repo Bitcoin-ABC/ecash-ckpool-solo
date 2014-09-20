@@ -18,6 +18,41 @@ function adddbg($str)
  }
 }
 #
+function howlongago($sec)
+{
+ if ($sec < 60)
+	$des = $sec.'s';
+ else
+ {
+	$sec = round($sec/60);
+	if ($sec < 60)
+		$des = $sec.'min';
+	else
+	{
+		$sec = round($sec/60);
+		if ($sec < 24)
+		{
+			$des = $sec.'hr';
+			if ($sec != 1)
+				$des .= 's';
+		}
+		else
+		{
+			$sec = round($sec/24);
+			if ($sec < 9999)
+			{
+				$des = $sec.'day';
+				if ($sec != 1)
+					$des .= 's';
+			}
+			else
+				$des = 'never';
+		}
+	}
+ }
+ return $des;
+}
+#
 function btcfmt($amt)
 {
  $amt /= 100000000;
@@ -240,7 +275,7 @@ function validUserPass($user, $pass)
 {
  $rep = checkPass($user, $pass);
  if ($rep != null)
-	 $ans = repDecode($rep);
+	$ans = repDecode($rep);
  usleep(100000); // Max 10x per second
  if ($rep != null && $ans['STATUS'] == 'ok')
  {

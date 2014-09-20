@@ -306,10 +306,10 @@ function pgtop($dotop, $user, $douser)
 	$top .= "<td class=topdat>&nbsp;$nlb</td></tr></table>";
 	$top .= '</td><td>';
 	$top .= '<table cellpadding=1 cellspacing=0 border=0 width=100%>';
-	$top .= '<tr><td class=topdes>Users:</td>';
-	$top .= '<td class=topdat>'.$info['users'].'</td></tr>';
-	$top .= '<tr><td class=topdes>Workers:</td>';
-	$top .= '<td class=topdat>'.$info['workers'].'</td></tr></table>';
+	$top .= '<tr><td class=topdes>Users:&nbsp;</td>';
+	$top .= '<td class=topdat>&nbsp;'.$info['users'].'</td></tr>';
+	$top .= '<tr><td class=topdes>Workers:&nbsp;</td>';
+	$top .= '<td class=topdat>&nbsp;'.$info['workers'].'</td></tr></table>';
 	$top .= '</td><td>';
 
 	if ($douser === true)
@@ -361,6 +361,9 @@ function pgmenu($menus)
  $side = '';
  foreach ($menus as $menu => $submenus)
  {
+  if ($menu == 'Admin' && $submenus == null)
+	continue;
+
   if ($menu == 'gap')
   {
 	$side = 'r';

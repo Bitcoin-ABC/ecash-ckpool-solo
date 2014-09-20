@@ -623,8 +623,14 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 	len = strlen(ckp->logdir) + 8 + 1 + 16 + 1;
 	wb->logdir = ckalloc(len);
 
+	/* In proxy mode, the wb->id is received in the notify update and
+	 * we set workbase_id from it. In server mode the stratifier is
+	 * setting the workbase_id */
 	ck_wlock(&workbase_lock);
-	wb->id = workbase_id++;
+	if (!ckp->proxy)
+		wb->id = workbase_id++;
+	else
+		workbase_id = wb->id;
 	if (strncmp(wb->prevhash, lasthash, 64)) {
 		char bin[32], swap[32];
 
@@ -2998,7 +3004,8 @@ int stratifier(proc_instance_t *pi)
 
 	/* Set the initial id to time as high bits so as to not send the same
 	 * id on restarts */
-	blockchange_id = workbase_id = ((int64_t)time(NULL)) << 32;
+	if (!ckp->proxy)
+		blockchange_id = workbase_id = ((int64_t)time(NULL)) << 32;
 
 	dealloc(buf);
 

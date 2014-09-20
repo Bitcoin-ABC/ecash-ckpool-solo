@@ -49,7 +49,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.2"
-#define CKDB_VERSION DB_VERSION"-0.320"
+#define CKDB_VERSION DB_VERSION"-0.325"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -233,6 +233,9 @@ typedef struct loadstatus {
 } LOADSTATUS;
 static LOADSTATUS dbstatus;
 
+// So cmd_getopts works on a new empty pool
+#define START_POOL_HEIGHT 2
+
 // Share stats since last block
 typedef struct poolstatus {
 	int64_t workinfoid; // Last block
@@ -243,7 +246,7 @@ typedef struct poolstatus {
 	double shareinv; // Non-acc
 	double best_sdiff; // TODO (maybe)
 } POOLSTATUS;
-static POOLSTATUS pool;
+static POOLSTATUS pool = { 0, START_POOL_HEIGHT, 0, 0, 0, 0, 0 };
 /* TODO: when we know about orphans, the count reset to zero
  * will need to be undone - i.e. recalculate this data from
  * the memory tables - maybe ... */
@@ -1156,7 +1159,12 @@ typedef struct optioncontrol {
 #define DATA_OPTIONCONTROL_NULL(_var, _item) DATA_GENERIC(_var, _item, optioncontrol, false)
 
 // Value it must default to (to work properly)
-#define OPTIONCONTROL_HEIGHT	1
+#define OPTIONCONTROL_HEIGHT 1
+
+// Test it here rather than obscuring the #define elsewhere
+#if ((OPTIONCONTROL_HEIGHT+1) != START_POOL_HEIGHT)
+#error "START_POOL_HEIGHT must = (OPTIONCONTROL_HEIGHT+1)"
+#endif
 
 static K_TREE *optioncontrol_root;
 static K_LIST *optioncontrol_free;
@@ -1557,8 +1565,16 @@ typedef struct workerstatus {
 	// Below gets reset on each block
 	double diffacc;
 	double diffinv; // Non-acc
+	double diffsta;
+	double diffdup;
+	double diffhi;
+	double diffrej;
 	double shareacc;
 	double shareinv; // Non-acc
+	double sharesta;
+	double sharedup;
+	double sharehi;
+	double sharerej;
 } WORKERSTATUS;
 
 #define ALLOC_WORKERSTATUS 1000
@@ -2453,7 +2469,11 @@ static void zero_on_new_block()
 	while (ws_item) {
 		DATA_WORKERSTATUS(workerstatus, ws_item);
 		workerstatus->diffacc = workerstatus->diffinv =
-		workerstatus->shareacc = workerstatus->shareinv = 0.0;
+		workerstatus->diffsta = workerstatus->diffdup =
+		workerstatus->diffhi = workerstatus->diffrej =
+		workerstatus->shareacc = workerstatus->shareinv =
+		workerstatus->sharesta = workerstatus->sharedup =
+		workerstatus->sharehi = workerstatus->sharerej = 0.0;
 		ws_item = next_in_ktree(ctx);
 	}
 	K_WUNLOCK(workerstatus_free);
@@ -2522,9 +2542,17 @@ static void set_block_share_counters()
 		workerstatus->diffacc += sharesummary->diffacc;
 		workerstatus->diffinv += sharesummary->diffsta + sharesummary->diffdup +
 					 sharesummary->diffhi + sharesummary->diffrej;
+		workerstatus->diffsta += sharesummary->diffsta;
+		workerstatus->diffdup += sharesummary->diffdup;
+		workerstatus->diffhi += sharesummary->diffhi;
+		workerstatus->diffrej += sharesummary->diffrej;
 		workerstatus->shareacc += sharesummary->shareacc;
 		workerstatus->shareinv += sharesummary->sharesta + sharesummary->sharedup +
 					  sharesummary->sharehi + sharesummary->sharerej;
+		workerstatus->sharesta += sharesummary->sharesta;
+		workerstatus->sharedup += sharesummary->sharedup;
+		workerstatus->sharehi += sharesummary->sharehi;
+		workerstatus->sharerej += sharesummary->sharerej;
 
 		ss_item = prev_in_ktree(ctx);
 	}
@@ -2628,12 +2656,35 @@ static void _workerstatus_update(AUTHS *auths, SHARES *shares,
 				copy_tv(&(row->last_share), &(shares->createdate));
 				row->last_diff = shares->diff;
 			}
-			if (shares->errn == SE_NONE) {
-				row->diffacc += shares->diff;
-				row->shareacc++;
-			} else {
-				row->diffinv += shares->diff;
-				row->shareinv++;
+			switch (shares->errn) {
+				case SE_NONE:
+					row->diffacc += shares->diff;
+					row->shareacc++;
+					break;
+				case SE_STALE:
+					row->diffinv += shares->diff;
+					row->shareinv++;
+					row->diffsta += shares->diff;
+					row->sharesta++;
+					break;
+				case SE_DUPE:
+					row->diffinv += shares->diff;
+					row->shareinv++;
+					row->diffdup += shares->diff;
+					row->sharedup++;
+					break;
+				case SE_HIGH_DIFF:
+					row->diffinv += shares->diff;
+					row->shareinv++;
+					row->diffhi += shares->diff;
+					row->sharehi++;
+					break;
+				default:
+					row->diffinv += shares->diff;
+					row->shareinv++;
+					row->diffrej += shares->diff;
+					row->sharerej++;
+					break;
 			}
 		}
 	}
@@ -9715,13 +9766,21 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 				int64_t w_elapsed;
 				tv_t w_lastshare;
 				double w_lastdiff, w_diffacc, w_diffinv;
+				double w_diffsta, w_diffdup;
+				double w_diffhi, w_diffrej;
 				double w_shareacc, w_shareinv;
+				double w_sharesta, w_sharedup;
+				double w_sharehi, w_sharerej;
 
 				w_hashrate5m = w_hashrate1hr = 0.0;
 				w_elapsed = -1;
 				w_lastshare.tv_sec = 0;
 				w_lastdiff = w_diffacc = w_diffinv =
-				w_shareacc = w_shareinv = 0;
+				w_diffsta = w_diffdup =
+				w_diffhi = w_diffrej =
+				w_shareacc = w_shareinv =
+				w_sharesta = w_sharedup =
+				w_sharehi = w_sharerej = 0;
 
 				ws_item = find_workerstatus(users->userid, workers->workername,
 							    __FILE__, __func__, __LINE__);
@@ -9731,8 +9790,16 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 					w_lastdiff = workerstatus->last_diff;
 					w_diffacc = workerstatus->diffacc;
 					w_diffinv = workerstatus->diffinv;
+					w_diffsta = workerstatus->diffsta;
+					w_diffdup = workerstatus->diffdup;
+					w_diffhi  = workerstatus->diffhi;
+					w_diffrej = workerstatus->diffrej;
 					w_shareacc = workerstatus->shareacc;
 					w_shareinv = workerstatus->shareinv;
+					w_sharesta = workerstatus->sharesta;
+					w_sharedup = workerstatus->sharedup;
+					w_sharehi = workerstatus->sharehi;
+					w_sharerej = workerstatus->sharerej;
 				}
 
 				// find last stored userid record
@@ -9796,12 +9863,44 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 				snprintf(tmp, sizeof(tmp), "w_diffinv:%d=%s%c", rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
+				double_to_buf(w_diffsta, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_diffsta:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_diffdup, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_diffdup:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_diffhi, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_diffhi:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_diffrej, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_diffrej:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
 				double_to_buf(w_shareacc, reply, sizeof(reply));
 				snprintf(tmp, sizeof(tmp), "w_shareacc:%d=%s%c", rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
 				double_to_buf(w_shareinv, reply, sizeof(reply));
 				snprintf(tmp, sizeof(tmp), "w_shareinv:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_sharesta, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_sharesta:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_sharedup, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_sharedup:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_sharehi, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_sharehi:%d=%s%c", rows, reply, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+
+				double_to_buf(w_sharerej, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "w_sharerej:%d=%s%c", rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
 				userstats_workername_root = free_ktree(userstats_workername_root, NULL);
@@ -9819,7 +9918,10 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 		 "workername,difficultydefault,idlenotificationenabled,"
 		 "idlenotificationtime",
 		 stats ? ",w_hashrate5m,w_hashrate1hr,w_elapsed,w_lastshare,"
-		 "w_lastdiff,w_diffacc,w_diffinv,w_shareacc,w_shareinv" : "",
+		 "w_lastdiff,w_diffacc,w_diffinv,"
+		 "w_diffsta,w_diffdup,w_diffhi,w_diffrej,"
+		 "w_shareacc,w_shareinv,"
+		 "w_sharesta,w_sharedup,w_sharehi,w_sharerej" : "",
 		 FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
@@ -11853,15 +11955,18 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	rows++;
 
 	USEINFO(users, 1, 2);
+	USEINFO(useratts, 1, 1);
 	USEINFO(workers, 1, 1);
 	USEINFO(paymentaddresses, 1, 1);
 	USEINFO(payments, 1, 1);
 	USEINFO(idcontrol, 1, 0);
+	USEINFO(optioncontrol, 1, 1);
 	USEINFO(workinfo, 1, 1);
 	USEINFO(shares, 1, 1);
 	USEINFO(shareerrors, 1, 1);
 	USEINFO(sharesummary, 1, 2);
 	USEINFO(blocks, 1, 1);
+	USEINFO(miningpayouts, 1, 1);
 	USEINFO(auths, 1, 1);
 	USEINFO(poolstats, 1, 1);
 	USEINFO(userstats, 4, 2);

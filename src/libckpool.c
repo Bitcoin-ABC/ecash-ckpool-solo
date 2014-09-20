@@ -353,6 +353,12 @@ bool extract_sockaddr(char *url, char **sockaddr_url, char **sockaddr_port)
 	} else
 		url_len = strlen(url_begin);
 
+	/* Get rid of the [] */
+	if (ipv6_begin && ipv6_end && ipv6_end > ipv6_begin){
+		url_len -= 2;
+		url_begin++;
+	}
+	
 	if (url_len < 1) {
 		LOGWARNING("Null length URL passed to extract_sockaddr");
 		return false;
