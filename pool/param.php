@@ -1,5 +1,13 @@
 <?php
 #
+function nutem($str)
+{
+ if (($str === null) or trim($str) == '')
+	return true;
+ else
+	return false;
+}
+#
 function nuem($str)
 {
  if (($str === null) or $str == '')

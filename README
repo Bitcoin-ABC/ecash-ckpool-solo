@@ -1,6 +1,6 @@
 CKPOOL + CKDB + libckpool by Con Kolivas and Andrew Smith.
 
-Ultra low overhead massively scaleable multi-process, multi-threaded modular
+Ultra low overhead massively scalable multi-process, multi-threaded modular
 bitcoin mining pool, proxy, passthrough, library and database interface in c
 for Linux.
 
@@ -219,9 +219,10 @@ The options recognised are as follows:
 
 
 "btcd" : This is an array of bitcoind(s) with the options url, auth  and pass
-which match the configured bitcoind. This is mandatory in pool mode. The
-optional boolean field notify tells ckpool this btcd is using the notifier
-and does not need to be polled for block changes.
+which match the configured bitcoind. The optional boolean field notify tells
+ckpool this btcd is using the notifier and does not need to be polled for block
+changes. If no btcd is specified, ckpool will look for one on localhost:8332
+with the username "user" and password "pass".
 
 "proxy" : This is an array in the same format as btcd above but is used in
 proxy and passthrough mode to set the upstream pool and is mandatory.

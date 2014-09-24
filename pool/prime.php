@@ -34,7 +34,8 @@ function process($p, $user, $menu)
 function def_menu()
 {
  $dmenu = array('Home'  => array('Home' => ''),
-		'gap'  => NULL,
+		'gap' => array( # options not shown
+				'API' => 'api'),
 		'Help' => array('Help' => 'help',
 				'Payouts' => 'payout'));
  return $dmenu;
@@ -50,14 +51,17 @@ function check()
 	'Account' => array(
 		'Workers' => 'workers',
 		'Payments' => 'payments',
-		'Settings' => 'settings'
+		'Settings' => 'settings',
+		'User Settings' => 'userset'
 	),
 	'Pool' => array(
 		'Stats' => 'stats',
 		'Blocks' => 'blocks'
 	),
 	'Admin' => NULL,
-	'gap' => NULL,
+	'gap' => array( # options not shown
+			'API' => 'api'
+	),
 	'Help' => array(
 		'Help' => 'help',
 		'Payouts' => 'payout'

@@ -530,6 +530,7 @@ retry:
 		LOGWARNING("Failed to get message in connector_loop");
 		goto retry;
 	}
+	LOGDEBUG("Connector received message: %s", buf);
 	if (cmdmatch(buf, "ping")) {
 		LOGDEBUG("Connector received ping request");
 		send_unix_msg(sockd, "pong");
@@ -550,7 +551,6 @@ retry:
 		goto retry;
 	}
 
-	LOGDEBUG("Connector received message: %s", buf);
 	if (cmdmatch(buf, "shutdown"))
 		goto out;
 	if (cmdmatch(buf, "dropclient")) {

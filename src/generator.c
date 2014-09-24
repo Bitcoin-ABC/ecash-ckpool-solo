@@ -30,6 +30,7 @@ struct notify_instance {
 	char *jobid;
 	char *coinbase1;
 	char *coinbase2;
+	int coinb1len;
 	int merkles;
 	char merklehash[16][68];
 	char nbit[12];
@@ -411,9 +412,11 @@ static json_t *json_result(json_t *val)
 	json_t *res_val = NULL, *err_val;
 
 	res_val = json_object_get(val, "result");
+	/* (null) is a valid result while no value is an error, so mask out
+	 * (null) and only handle lack of result */
 	if (json_is_null(res_val))
 		res_val = NULL;
-	if (!res_val) {
+	else if (!res_val) {
 		char *ss;
 
 		err_val = json_object_get(val, "error");
@@ -428,9 +431,17 @@ static json_t *json_result(json_t *val)
 	return res_val;
 }
 
+/* Return the error value if one exists */
+static json_t *json_errval(json_t *val)
+{
+	json_t *err_val = json_object_get(val, "error");
+
+	return err_val;
+}
+
 /* Parse a string and return the json value it contains, if any, and the
  * result in res_val. Return NULL if no result key is found. */
-static json_t *json_msg_result(char *msg, json_t **res_val)
+static json_t *json_msg_result(char *msg, json_t **res_val, json_t **err_val)
 {
 	json_error_t err;
 	json_t *val;
@@ -442,11 +453,7 @@ static json_t *json_msg_result(char *msg, json_t **res_val)
 		goto out;
 	}
 	*res_val = json_result(val);
-	if (!*res_val) {
-		LOGWARNING("No json result found");
-		json_decref(val);
-		val = NULL;
-	}
+	*err_val = json_errval(val);
 
 out:
 	return val;
@@ -491,8 +498,9 @@ static bool parse_subscribe(connsock_t *cs, proxy_instance_t *proxi)
 		goto out;
 	}
 	LOGDEBUG("parse_subscribe received %s", cs->buf);
-	val = json_msg_result(cs->buf, &res_val);
-	if (!val) {
+	/* Ignore err_val here stored in &tmp */
+	val = json_msg_result(cs->buf, &res_val, &tmp);
+	if (!val || !res_val) {
 		LOGWARNING("Failed to get a json result in parse_subscribe, got: %s", cs->buf);
 		goto out;
 	}
@@ -526,10 +534,6 @@ static bool parse_subscribe(connsock_t *cs, proxy_instance_t *proxi)
 		goto out;
 	}
 	string = json_string_value(tmp);
-	if (strlen(string) < 1) {
-		LOGWARNING("Invalid string length for enonce1 in parse_subscribe");
-		goto out;
-	}
 	old = proxi->enonce1;
 	proxi->enonce1 = strdup(string);
 	free(old);
@@ -632,7 +636,7 @@ out:
 
 static bool passthrough_stratum(connsock_t *cs, proxy_instance_t *proxi)
 {
-	json_t *req, *val = NULL, *res_val;
+	json_t *req, *val = NULL, *res_val, *err_val;
 	bool ret = false;
 
 	JSON_CPACK(req, "{s:s,s:[s]}",
@@ -648,8 +652,10 @@ static bool passthrough_stratum(connsock_t *cs, proxy_instance_t *proxi)
 		LOGWARNING("Failed to receive line in passthrough_stratum");
 		goto out;
 	}
-	val = json_msg_result(cs->buf, &res_val);
-	if (!val) {
+	/* Ignore err_val here since we should always get a result from an
+	 * upstream passthrough server */
+	val = json_msg_result(cs->buf, &res_val, &err_val);
+	if (!val || !res_val) {
 		LOGWARNING("Failed to get a json result in passthrough_stratum, got: %s",
 			   cs->buf);
 		goto out;
@@ -706,6 +712,7 @@ static bool parse_notify(proxy_instance_t *proxi, json_t *val)
 	LOGDEBUG("Job ID %s", job_id);
 	ni->coinbase1 = coinbase1;
 	LOGDEBUG("Coinbase1 %s", coinbase1);
+	ni->coinb1len = strlen(coinbase1) / 2;
 	ni->coinbase2 = coinbase2;
 	LOGDEBUG("Coinbase2 %s", coinbase2);
 	memcpy(ni->prevhash, prev_hash, 65);
@@ -916,7 +923,7 @@ out:
 
 static bool auth_stratum(connsock_t *cs, proxy_instance_t *proxi)
 {
-	json_t *val = NULL, *res_val, *req;
+	json_t *val = NULL, *res_val, *req, *err_val;
 	bool ret;
 
 	JSON_CPACK(req, "{s:i,s:s,s:[s,s]}",
@@ -945,16 +952,25 @@ static bool auth_stratum(connsock_t *cs, proxy_instance_t *proxi)
 		ret = parse_method(proxi, cs->buf);
 	} while (ret);
 
-	val = json_msg_result(cs->buf, &res_val);
+	val = json_msg_result(cs->buf, &res_val, &err_val);
 	if (!val) {
 		LOGWARNING("Failed to get a json result in auth_stratum, got: %s", cs->buf);
 		goto out;
 	}
 
-	ret = json_is_true(res_val);
-	if (!ret) {
-		LOGWARNING("Failed to authorise in auth_stratum");
+	if (err_val && !json_is_null(err_val)) {
+		LOGWARNING("Failed to authorise in auth_stratum due to err_val, got: %s", cs->buf);
 		goto out;
+	}
+	if (res_val) {
+		ret = json_is_true(res_val);
+		if (!ret) {
+			LOGWARNING("Failed to authorise in auth_stratum");
+			goto out;
+		}
+	} else {
+		/* No result and no error but successful val means auth success */
+		ret = true;
 	}
 	LOGINFO("Auth success in auth_stratum");
 out:
@@ -991,8 +1007,8 @@ static void send_notify(proxy_instance_t *proxi, int sockd)
 	for (i = 0; i < ni->merkles; i++)
 		json_array_append_new(merkle_arr, json_string(&ni->merklehash[i][0]));
 	/* Use our own jobid instead of the server's one for easy lookup */
-	JSON_CPACK(json_msg, "{sisssssssosssssssb}",
-			     "jobid", ni->id, "prevhash", ni->prevhash,
+	JSON_CPACK(json_msg, "{si,ss,si,ss,ss,so,ss,ss,ss,sb}",
+			     "jobid", ni->id, "prevhash", ni->prevhash, "coinb1len", ni->coinb1len,
 			     "coinbase1", ni->coinbase1, "coinbase2", ni->coinbase2,
 			     "merklehash", merkle_arr, "bbversion", ni->bbversion,
 			     "nbit", ni->nbit, "ntime", ni->ntime,

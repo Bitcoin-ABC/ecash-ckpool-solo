@@ -113,8 +113,8 @@ struct workbase {
 	json_t *merkle_array;
 
 	/* Template variables, lengths are binary lengths! */
-	char coinb1[256]; // coinbase1
-	uchar coinb1bin[128];
+	char *coinb1; // coinbase1
+	uchar *coinb1bin;
 	int coinb1len; // length of above
 
 	char enonce1const[32]; // extranonce1 section that is constant
@@ -157,6 +157,8 @@ static struct {
 
 	int nonce2len;
 	int enonce2varlen;
+
+	bool subscribed;
 } proxy_base;
 
 static int64_t workbase_id;
@@ -322,6 +324,10 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	int len, ofs = 0;
 	ts_t now;
 
+	/* Set fixed length coinb1 arrays to be more than enough */
+	wb->coinb1 = ckzalloc(256);
+	wb->coinb1bin = ckzalloc(128);
+
 	/* Strings in wb should have been zero memset prior. Generate binary
 	 * templates first, then convert to hex */
 	memcpy(wb->coinb1bin, scriptsig_header_bin, 41);
@@ -457,6 +463,8 @@ static void clear_workbase(ckpool_t *ckp, workbase_t *wb)
 	free(wb->txn_data);
 	free(wb->txn_hashes);
 	free(wb->logdir);
+	free(wb->coinb1bin);
+	free(wb->coinb1);
 	free(wb->coinb2bin);
 	free(wb->coinb2);
 	json_decref(wb->merkle_array);
@@ -826,13 +834,14 @@ static bool update_subscribe(ckpool_t *ckp)
 	free(buf);
 
 	ck_wlock(&workbase_lock);
+	proxy_base.subscribed = true;
 	proxy_base.diff = ckp->startdiff;
 	/* Length is checked by generator */
 	strcpy(proxy_base.enonce1, json_string_value(json_object_get(val, "enonce1")));
 	proxy_base.enonce1constlen = strlen(proxy_base.enonce1) / 2;
 	hex2bin(proxy_base.enonce1bin, proxy_base.enonce1, proxy_base.enonce1constlen);
 	proxy_base.nonce2len = json_integer_value(json_object_get(val, "nonce2len"));
-	if (proxy_base.nonce2len > 5)
+	if (proxy_base.nonce2len > 7)
 		proxy_base.enonce1varlen = 4;
 	else
 		proxy_base.enonce1varlen = 2;
@@ -844,6 +853,8 @@ static bool update_subscribe(ckpool_t *ckp)
 
 	return true;
 }
+
+static void update_diff(ckpool_t *ckp);
 
 static void update_notify(ckpool_t *ckp)
 {
@@ -860,6 +871,11 @@ static void update_notify(ckpool_t *ckp)
 		return;
 	}
 
+	if (unlikely(!proxy_base.subscribed)) {
+		LOGINFO("No valid proxy subscription to update notify yet");
+		return;
+	}
+
 	LOGDEBUG("Update notify: %s", buf);
 	wb = ckzalloc(sizeof(workbase_t));
 	val = json_loads(buf, 0, NULL);
@@ -869,8 +885,10 @@ static void update_notify(ckpool_t *ckp)
 
 	json_int64cpy(&wb->id, val, "jobid");
 	json_strcpy(wb->prevhash, val, "prevhash");
+	json_intcpy(&wb->coinb1len, val, "coinb1len");
+	wb->coinb1bin = ckalloc(wb->coinb1len);
+	wb->coinb1 = ckalloc(wb->coinb1len * 2 + 1);
 	json_strcpy(wb->coinb1, val, "coinbase1");
-	wb->coinb1len = strlen(wb->coinb1) / 2;
 	hex2bin(wb->coinb1bin, wb->coinb1, wb->coinb1len);
 	wb->height = get_sernumber(wb->coinb1bin + 42);
 	json_strdup(&wb->coinb2, val, "coinbase2");
@@ -900,6 +918,9 @@ static void update_notify(ckpool_t *ckp)
 	hex2bin(wb->headerbin, header, 112);
 	wb->txn_hashes = ckzalloc(1);
 
+	/* Check diff on each notify */
+	update_diff(ckp);
+
 	ck_rlock(&workbase_lock);
 	strcpy(wb->enonce1const, proxy_base.enonce1);
 	wb->enonce1constlen = proxy_base.enonce1constlen;
@@ -923,6 +944,11 @@ static void update_diff(ckpool_t *ckp)
 	json_t *val;
 	char *buf;
 
+	if (unlikely(!current_workbase)) {
+		LOGINFO("No current workbase to update diff yet");
+		return;
+	}
+
 	buf = send_recv_proc(ckp->generator, "getdiff");
 	if (unlikely(!buf)) {
 		LOGWARNING("Failed to get diff from generator in update_diff");
@@ -935,6 +961,11 @@ static void update_diff(ckpool_t *ckp)
 	json_dblcpy(&diff, val, "diff");
 	json_decref(val);
 
+	/* We only really care about integer diffs so clamp the lower limit to
+	 * 1 or it will round down to zero. */
+	if (unlikely(diff < 1))
+		diff = 1;
+
 	ck_wlock(&workbase_lock);
 	old_diff = proxy_base.diff;
 	current_workbase->diff = proxy_base.diff = diff;
@@ -943,7 +974,7 @@ static void update_diff(ckpool_t *ckp)
 	if (old_diff < diff)
 		return;
 
-	/* If the diff has dropped, iterated over all the clients and check
+	/* If the diff has dropped, iterate over all the clients and check
 	 * they're at or below the new diff, and update it if not. */
 	ck_rlock(&instance_lock);
 	for (client = stratum_instances; client != NULL; client = client->hh.next) {
@@ -2060,7 +2091,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	if (id < blockchange_id) {
 		err = SE_STALE;
 		json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
-		goto out_unlock;
+		goto out_submit;
 	}
 	if ((int)strlen(nonce2) < len) {
 		err = SE_INVALID_NONCE2;
@@ -2074,13 +2105,11 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		goto out_unlock;
 	}
 	invalid = false;
+out_submit:
 	if (wb->proxy && sdiff >= wdiff)
 		submit = true;
 out_unlock:
 	ck_runlock(&workbase_lock);
-
-	if (submit)
-		submit_share(client, id, nonce2, ntime, nonce, json_integer_value(json_object_get(json_msg, "id")));
 
 	/* Accept the lower of new and old diffs until the next update */
 	if (id < client->diff_change_job_id && client->old_diff < client->diff)
@@ -2099,15 +2128,25 @@ out_unlock:
 				json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
 				LOGINFO("Rejected client %d dupe diff %.1f/%.0f/%s: %s",
 					client->id, sdiff, diff, wdiffsuffix, hexhash);
+				submit = false;
 			}
 		} else {
 			err = SE_HIGH_DIFF;
 			LOGINFO("Rejected client %d high diff %.1f/%.0f/%s: %s",
 				client->id, sdiff, diff, wdiffsuffix, hexhash);
 			json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
+			submit = false;
 		}
 	}  else
 		LOGINFO("Rejected client %d invalid share", client->id);
+
+	/* Submit share to upstream pool in proxy mode. We submit valid and
+	 * stale shares and filter out the rest. */
+	if (submit) {
+		LOGINFO("Submitting share upstream: %s", hexhash);
+		submit_share(client, id, nonce2, ntime, nonce, json_integer_value(json_object_get(json_msg, "id")));
+	}
+
 	add_submit(ckp, client, diff, result);
 
 	/* Now write to the pool's sharelog. */

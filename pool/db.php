@@ -71,6 +71,19 @@ function zeip()
  return $_SERVER['REMOTE_ADDR'];
 }
 #
+function fldEncode($flds, $name, $first)
+{
+ global $fld_sep, $val_sep;
+ if ($first)
+	$rep = '';
+ else
+	$rep = $fld_sep;
+ $rep .= $name . $val_sep;
+ if (isset($flds[$name]))
+	$rep .= $flds[$name];
+ return $rep;
+}
+#
 function msgEncode($cmd, $id, $fields, $user)
 {
  global $send_sep, $fld_sep, $val_sep;

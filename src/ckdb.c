@@ -49,7 +49,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.2"
-#define CKDB_VERSION DB_VERSION"-0.325"
+#define CKDB_VERSION DB_VERSION"-0.330"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -3033,8 +3033,13 @@ static K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 	__bin2hex(row->secondaryuserid, (void *)(&hash), sizeof(hash));
 
 	make_salt(row);
-	password_hash(row->username, passwordhash, row->salt,
-		      row->passwordhash, sizeof(row->passwordhash));
+	if (passwordhash == EMPTY) {
+		// Make it impossible to login for a BTC Address username
+		row->passwordhash[0] = '\0';
+	} else {
+		password_hash(row->username, passwordhash, row->salt,
+			      row->passwordhash, sizeof(row->passwordhash));
+	}
 
 	HISTORYDATEINIT(row, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, row);
