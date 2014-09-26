@@ -1149,7 +1149,7 @@ static void *proxy_recv(void *arg)
 		}
 		mutex_unlock(&proxi->share_lock);
 
-		/* If we don't get an update within 2 minutes the upstream pool
+		/* If we don't get an update within 10 minutes the upstream pool
 		 * has likely stopped responding. */
 		do {
 			if (cs->fd == -1) {
@@ -1157,7 +1157,7 @@ static void *proxy_recv(void *arg)
 				break;
 			}
 			ret = read_socket_line(cs, 5);
-		} while (ret == 0 && ++retries < 24);
+		} while (ret == 0 && ++retries < 120);
 
 		if (ret < 1) {
 			/* Send ourselves a reconnect message */

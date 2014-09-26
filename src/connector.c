@@ -455,9 +455,10 @@ static void send_client(conn_instance_t *ci, int64_t id, char *buf)
 	ck_runlock(&ci->lock);
 
 	if (unlikely(fd == -1)) {
-		if (client)
+		if (client) {
 			LOGINFO("Client id %ld disconnected", id);
-		else
+			invalidate_client(ci->pi->ckp, ci, client);
+		} else
 			LOGINFO("Connector failed to find client id %ld to send to", id);
 		free(buf);
 		return;

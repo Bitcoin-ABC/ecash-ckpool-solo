@@ -274,6 +274,8 @@ retry:
 		} else
 			LOGWARNING("Failed to send_procmsg to connector");
 	} else if (cmdmatch(buf, "restart")) {
+		LOGWARNING("Listener received restart message, attempting handover");
+		send_unix_msg(sockd, "restarting");
 		if (!fork()) {
 			if (!ckp->handover) {
 				ckp->initial_args[ckp->args++] = strdup("-H");
