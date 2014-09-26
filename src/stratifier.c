@@ -1774,6 +1774,11 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	int64_t next_blockid, optimal;
 	tv_t now_t;
 
+	/* Ignore successive rejects in count if they haven't submitted a valid
+	 * share yet. */
+	if (unlikely(!client->ssdc && !valid))
+		return;
+
 	tv_time(&now_t);
 
 	ck_rlock(&workbase_lock);
@@ -1837,7 +1842,9 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	if (drr > 0.15 && drr < 0.4)
 		return;
 
-	optimal = round(dsps * 3.33);
+	/* Round away from zero to avoid bouncing around diffs at the lower
+	 * end of the scale. */
+	optimal = lround(dsps * 3.33);
 	/* Clamp to mindiff ~ network_diff */
 	if (optimal < ckp->mindiff)
 		optimal = ckp->mindiff;
