@@ -1378,12 +1378,10 @@ static bool new_enonce1(stratum_instance_t *client)
 	switch(wb->enonce1varlen) {
 		case 8:
 			enonce1_64++;
-			LOGWARNING("Enonce1_64 is %lu", enonce1_64);
 			ret = true;
 			break;
 		case 4:
 			++(*enonce1_32);
-			LOGWARNING("Enonce1_32 is %lu", *enonce1_32);
 			ret = true;
 			break;
 		case 2:
