@@ -31,7 +31,7 @@ bool validate_address(connsock_t *cs, const char *address)
 		return ret;
 	}
 	len = strlen(address);
-	if (len < 27 || len > 34) {
+	if (len < 27 || len > 36) {
 		LOGWARNING("Invalid address length %d passed to validate_address", len);
 		return ret;
 	}

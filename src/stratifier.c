@@ -1216,6 +1216,21 @@ static void block_solve(ckpool_t *ckp)
 
 }
 
+/* Some upstream pools (like p2pool) don't update stratum often enough and
+ * miners disconnect if they don't receive regular communication so send them
+ * a ping at regular intervals */
+static void broadcast_ping(void)
+{
+	json_t *json_msg;
+
+	JSON_CPACK(json_msg, "{s:[],s:o,s:s}",
+		   "params",
+		   "id", json_null(),
+		   "method", "mining.ping");
+
+	stratum_broadcast(json_msg);
+}
+
 static int stratum_loop(ckpool_t *ckp, proc_instance_t *pi)
 {
 	int sockd, ret = 0, selret = 0;
@@ -1225,19 +1240,23 @@ static int stratum_loop(ckpool_t *ckp, proc_instance_t *pi)
 
 retry:
 	do {
-		if (!ckp->proxy) {
-			double tdiff;
-			tv_t end_tv;
+		double tdiff;
+		tv_t end_tv;
 
-			tv_time(&end_tv);
-			tdiff = tvdiff(&end_tv, &start_tv);
-			if (tdiff > ckp->update_interval) {
-				copy_tv(&start_tv, &end_tv);
+		tv_time(&end_tv);
+		tdiff = tvdiff(&end_tv, &start_tv);
+		if (tdiff > ckp->update_interval) {
+			copy_tv(&start_tv, &end_tv);
+			if (!ckp->proxy) {
 				LOGDEBUG("%ds elapsed in strat_loop, updating gbt base",
 					 ckp->update_interval);
 				update_base(ckp, GEN_NORMAL);
-				continue;
+			} else {
+				LOGDEBUG("%ds elapsed in strat_loop, pinging miners",
+					 ckp->update_interval);
+				broadcast_ping();
 			}
+			continue;
 		}
 		selret = wait_read_select(us->sockd, 5);
 		if (!selret && !ping_main(ckp)) {
