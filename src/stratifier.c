@@ -1615,7 +1615,7 @@ static int send_recv_auth(stratum_instance_t *client)
 {
 	user_instance_t *user_instance = client->user_instance;
 	ckpool_t *ckp = client->ckp;
-	char *buf, *json_msg;
+	char *buf = NULL, *json_msg;
 	char cdfield[64];
 	int ret = 1;
 	json_t *val;
