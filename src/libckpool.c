@@ -101,9 +101,29 @@ void _mutex_unlock(pthread_mutex_t *lock, const char *file, const char *func, co
 
 int _mutex_trylock(pthread_mutex_t *lock, __maybe_unused const char *file, __maybe_unused const char *func, __maybe_unused const int line)
 {
+	int ret;
+
 	TRYLOCK(lock, file, func, line);
-	int ret = pthread_mutex_trylock(lock);
+	ret = pthread_mutex_trylock(lock);
 	DIDLOCK(ret, lock, file, func, line);
+
+	return ret;
+}
+
+int _mutex_timedlock(pthread_mutex_t *lock, int timeout, __maybe_unused const char *file, __maybe_unused const char *func, __maybe_unused const int line)
+{
+	tv_t now;
+	ts_t abs;
+	int ret;
+
+	tv_time(&now);
+	tv_to_ts(&abs, &now);
+	abs.tv_sec += timeout;
+
+	TRYLOCK(lock, file, func, line);
+	ret = pthread_mutex_timedlock(lock, &abs);
+	DIDLOCK(ret, lock, file, func, line);
+
 	return ret;
 }
 

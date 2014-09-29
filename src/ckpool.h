@@ -176,6 +176,7 @@ struct ckpool_instance {
 
 ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func);
 void ckmsgq_add(ckmsgq_t *ckmsgq, void *data);
+bool ckmsgq_empty(ckmsgq_t *ckmsgq);
 
 ckpool_t *global_ckp;
 

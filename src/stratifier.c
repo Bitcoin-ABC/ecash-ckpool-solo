@@ -78,7 +78,11 @@ typedef struct pool_stats pool_stats_t;
 
 static pool_stats_t stats;
 
+/* Protects changes to pool stats */
 static pthread_mutex_t stats_lock;
+
+/* Serialises sends/receives to ckdb if possible */
+static pthread_mutex_t ckdb_lock;
 
 static uint64_t enonce1_64;
 
@@ -201,12 +205,26 @@ struct userwb {
 
 static int64_t user_instance_id;
 
+struct user_instance;
+struct worker_instance;
+struct stratum_instance;
+
+typedef struct user_instance user_instance_t;
+typedef struct worker_instance worker_instance_t;
+typedef struct stratum_instance stratum_instance_t;
+
 struct user_instance {
 	UT_hash_handle hh;
 	char username[128];
 	int64_t id;
 	char *secondaryuserid;
 	bool btcaddress;
+
+	/* A linked list of all connected instances of this user */
+	stratum_instance_t *instances;
+
+	/* A linked list of all connected workers of this user */
+	worker_instance_t *worker_instances;
 
 	int workers;
 	char txnbin[25];
@@ -220,18 +238,29 @@ struct user_instance {
 	tv_t last_share;
 };
 
-typedef struct user_instance user_instance_t;
-
 static user_instance_t *user_instances;
 
-typedef struct stratum_instance stratum_instance_t;
+/* Combined data from workers with the same workername */
+struct worker_instance {
+	char *workername;
+
+	worker_instance_t *next;
+	worker_instance_t *prev;
+
+	double dsps1;
+	double dsps5;
+	double dsps60;
+	double dsps1440;
+	tv_t last_share;
+
+	int64_t mindiff; /* User chosen mindiff */
+};
 
 /* Per client stratum instance == workers */
 struct stratum_instance {
 	UT_hash_handle hh;
 	int64_t id;
 
-	/* For the dead instances linked list */
 	stratum_instance_t *next;
 	stratum_instance_t *prev;
 
@@ -261,6 +290,8 @@ struct stratum_instance {
 	bool notified_idle;
 
 	user_instance_t *user_instance;
+	worker_instance_t *worker_instance;
+
 	char *useragent;
 	char *workername;
 	char *password;
@@ -275,7 +306,6 @@ struct stratum_instance {
  * is sorted by enonce1_64. */
 static stratum_instance_t *stratum_instances;
 static stratum_instance_t *disconnected_instances;
-static stratum_instance_t *dead_instances;
 
 /* Protects both stratum and user instances */
 static cklock_t instance_lock;
@@ -308,6 +338,7 @@ static int gen_priority;
 #define ID_USERSTATS 6
 #define ID_BLOCK 7
 #define ID_ADDRAUTH 8
+#define ID_HEARTBEAT 9
 
 static const char *ckdb_ids[] = {
 	"authorise",
@@ -319,6 +350,7 @@ static const char *ckdb_ids[] = {
 	"userstats",
 	"block",
 	"addrauth",
+	"heartbeat"
 };
 
 static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
@@ -1153,8 +1185,6 @@ static void drop_client(int64_t id)
 		/* Only keep around one copy of the old client in server mode */
 		if (!client->ckp->proxy && !old_client && client->enonce1_64)
 			HASH_ADD(hh, disconnected_instances, enonce1_64, sizeof(uint64_t), client);
-		else // Keep around instance so we don't get a dereference
-			LL_PREPEND(dead_instances, client);
 		ck_dwilock(&instance_lock);
 	}
 	ck_uilock(&instance_lock);
@@ -1520,10 +1550,12 @@ static bool test_address(ckpool_t *ckp, const char *address)
 
 /* This simply strips off the first part of the workername and matches it to a
  * user or creates a new one. */
-static user_instance_t *authorise_user(ckpool_t *ckp, const char *workername)
+static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
+				      const char *workername)
 {
 	char *base_username = strdupa(workername), *username;
 	user_instance_t *instance;
+	stratum_instance_t *tmp;
 	bool new = false;
 	int len;
 
@@ -1534,7 +1566,7 @@ static user_instance_t *authorise_user(ckpool_t *ckp, const char *workername)
 	if (unlikely(len > 127))
 		username[127] = '\0';
 
-	ck_ilock(&instance_lock);
+	ck_wlock(&instance_lock);
 	HASH_FIND_STR(user_instances, username, instance);
 	if (!instance) {
 		/* New user instance. Secondary user id will be NULL */
@@ -1542,12 +1574,24 @@ static user_instance_t *authorise_user(ckpool_t *ckp, const char *workername)
 		strcpy(instance->username, username);
 		new = true;
 
-		ck_ulock(&instance_lock);
 		instance->id = user_instance_id++;
 		HASH_ADD_STR(user_instances, username, instance);
-		ck_dwilock(&instance_lock);
 	}
-	ck_uilock(&instance_lock);
+	DL_FOREACH(instance->instances, tmp) {
+		if (!safecmp(workername, tmp->workername)) {
+			client->worker_instance = tmp->worker_instance;
+			break;
+		}
+	}
+	/* Create one worker instance for combined data from workers of the
+	 * same name */
+	if (!client->worker_instance) {
+		client->worker_instance = ckzalloc(sizeof(worker_instance_t));
+		client->worker_instance->workername = strdup(workername);
+		DL_APPEND(instance->worker_instances, client->worker_instance);
+	}
+	DL_APPEND(instance->instances, client);
+	ck_wunlock(&instance_lock);
 
 	if (new && !ckp->proxy) {
 		/* Is this a btc address based username? */
@@ -1600,11 +1644,20 @@ static int send_recv_auth(stratum_instance_t *client)
 		LOGWARNING("Failed to dump json in send_recv_auth");
 		return ret;
 	}
-	buf = ckdb_msg_call(ckp, json_msg);
+
+	/* We want responses from ckdb serialised and not interleaved with
+	 * other requests. Wait up to 3 seconds for exclusive access to ckdb
+	 * and if we don't receive it treat it as a delayed auth if possible */
+	if (likely(!mutex_timedlock(&ckdb_lock, 3))) {
+		buf = ckdb_msg_call(ckp, json_msg);
+		mutex_unlock(&ckdb_lock);
+	}
+
 	free(json_msg);
 	if (likely(buf)) {
-		char *secondaryuserid, *response = alloca(128);
+		char *secondaryuserid, response[PAGESIZE] = {};
 
+		LOGINFO("Got ckdb response: %s", buf);
 		sscanf(buf, "id.%*d.%s", response);
 		secondaryuserid = response;
 		strsep(&secondaryuserid, ".");
@@ -1705,7 +1758,7 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 		*err_val = json_string("Invalid character in username");
 		goto out;
 	}
-	user_instance = client->user_instance = authorise_user(ckp, buf);
+	user_instance = client->user_instance = generate_user(ckp, client, buf);
 	client->user_id = user_instance->id;
 	ts_realtime(&now);
 	client->start_time = now.tv_sec;
@@ -1786,6 +1839,7 @@ static double sane_tdiff(tv_t *end, tv_t *start)
 
 static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool valid)
 {
+	worker_instance_t *worker = client->worker_instance;
 	double tdiff, bdiff, dsps, drr, network_diff, bias;
 	user_instance_t *instance = client->user_instance;
 	int64_t next_blockid, optimal;
@@ -1818,6 +1872,13 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	decay_time(&client->dsps1440, diff, tdiff, 86400);
 	decay_time(&client->dsps10080, diff, tdiff, 604800);
 	copy_tv(&client->last_share, &now_t);
+
+	tdiff = sane_tdiff(&now_t, &worker->last_share);
+	decay_time(&worker->dsps1, diff, tdiff, 60);
+	decay_time(&worker->dsps5, diff, tdiff, 300);
+	decay_time(&worker->dsps60, diff, tdiff, 3600);
+	decay_time(&worker->dsps1440, diff, tdiff, 86400);
+	copy_tv(&worker->last_share, &now_t);
 
 	tdiff = sane_tdiff(&now_t, &instance->last_share);
 	decay_time(&instance->dsps1, diff, tdiff, 60);
@@ -2692,7 +2753,10 @@ static void ckdbq_process(ckpool_t *ckp, char *msg)
 	char *buf = NULL;
 
 	while (!buf) {
+		mutex_lock(&ckdb_lock);
 		buf = ckdb_msg_call(ckp, msg);
+		mutex_unlock(&ckdb_lock);
+
 		if (unlikely(!buf)) {
 			if (!failed) {
 				failed = true;
@@ -2706,8 +2770,18 @@ static void ckdbq_process(ckpool_t *ckp, char *msg)
 		failed = false;
 		LOGWARNING("Successfully resumed talking to ckdb");
 	}
-	LOGINFO("Got ckdb response: %s", buf);
-	free(buf);
+	/* TODO: Process any requests from ckdb that are heartbeat responses
+	 * with specific requests. */
+	if (likely(buf)) {
+		char response[PAGESIZE] = {};
+
+		sscanf(buf, "id.%*d.%s", response);
+		if (safecmp(response, "ok"))
+			LOGINFO("Got ckdb response: %s", buf);
+		else
+			LOGWARNING("Got failed ckdb response: %s", buf);
+		free(buf);
+	}
 }
 
 static int transactions_by_jobid(int64_t id)
@@ -2986,6 +3060,7 @@ static void *statsupdate(void *arg)
 			if (!client->authorised)
 				continue;
 
+			/* Decay times per connected instance */
 			if (now.tv_sec - client->last_share.tv_sec > 60) {
 				/* No shares for over a minute, decay to 0 */
 				decay_time(&client->dsps1, 0, tdiff, 60);
@@ -3000,10 +3075,47 @@ static void *statsupdate(void *arg)
 		}
 
 		HASH_ITER(hh, user_instances, instance, tmpuser) {
+			worker_instance_t *worker;
 			bool idle = false;
 
+			/* Decay times per worker */
+			DL_FOREACH(instance->worker_instances, worker) {
+				if (now.tv_sec - worker->last_share.tv_sec > 60) {
+					decay_time(&worker->dsps1, 0, tdiff, 60);
+					decay_time(&worker->dsps5, 0, tdiff, 300);
+					decay_time(&worker->dsps60, 0, tdiff, 3600);
+					decay_time(&worker->dsps1440, 0, tdiff, 86400);
+				}
+				ghs = worker->dsps1 * nonces;
+				suffix_string(ghs, suffix1, 16, 0);
+				ghs = worker->dsps5 * nonces;
+				suffix_string(ghs, suffix5, 16, 0);
+				ghs = worker->dsps60 * nonces;
+				suffix_string(ghs, suffix60, 16, 0);
+				ghs = worker->dsps1440 * nonces;
+				suffix_string(ghs, suffix1440, 16, 0);
+
+				JSON_CPACK(val, "{ss,ss,ss,ss}",
+						"hashrate1m", suffix1,
+						"hashrate5m", suffix5,
+						"hashrate1hr", suffix60,
+						"hashrate1d", suffix1440);
+
+				snprintf(fname, 511, "%s/workers/%s", ckp->logdir, worker->workername);
+				fp = fopen(fname, "we");
+				if (unlikely(!fp)) {
+					LOGERR("Failed to fopen %s", fname);
+					continue;
+				}
+				s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
+				fprintf(fp, "%s\n", s);
+				dealloc(s);
+				json_decref(val);
+				fclose(fp);
+			}
+
+			/* Decay times per user */
 			if (now.tv_sec - instance->last_share.tv_sec > 60) {
-				/* No shares for over a minute, decay to 0 */
 				decay_time(&instance->dsps1, 0, tdiff, 60);
 				decay_time(&instance->dsps5, 0, tdiff, 300);
 				decay_time(&instance->dsps60, 0, tdiff, 3600);
@@ -3098,9 +3210,41 @@ static void *statsupdate(void *arg)
 	return NULL;
 }
 
+/* Sends a heartbeat to ckdb every second to maintain the relationship of
+ * ckpool always initiating a request -> getting a ckdb response, but allows
+ * ckdb to provide specific commands to ckpool. */
+static void *ckdb_heartbeat(void *arg)
+{
+	ckpool_t *ckp = (ckpool_t *)arg;
+
+	pthread_detach(pthread_self());
+	rename_proc("heartbeat");
+
+	while (42) {
+		char cdfield[64];
+		ts_t ts_now;
+		json_t *val;
+
+		cksleep_ms(1000);
+		if (unlikely(!ckmsgq_empty(ckdbq))) {
+			LOGDEBUG("Witholding heartbeat due to ckdb messages being queued");
+			continue;
+		}
+		ts_realtime(&ts_now);
+		sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
+		JSON_CPACK(val, "{ss,ss,ss,ss}",
+				"createdate", cdfield,
+				"createby", "code",
+				"createcode", __func__,
+				"createinet", ckp->serverurl);
+		ckdbq_add(ckp, ID_HEARTBEAT, val);
+	}
+	return NULL;
+}
+
 int stratifier(proc_instance_t *pi)
 {
-	pthread_t pth_blockupdate, pth_statsupdate;
+	pthread_t pth_blockupdate, pth_statsupdate, pth_heartbeat;
 	ckpool_t *ckp = pi->ckp;
 	int ret = 1;
 	char *buf;
@@ -3143,12 +3287,15 @@ int stratifier(proc_instance_t *pi)
 		ckp->serverurl = "127.0.0.1";
 	cklock_init(&instance_lock);
 
+	mutex_init(&ckdb_lock);
 	ssends = create_ckmsgq(ckp, "ssender", &ssend_process);
 	srecvs = create_ckmsgq(ckp, "sreceiver", &srecv_process);
 	sshareq = create_ckmsgq(ckp, "sprocessor", &sshare_process);
 	sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
 	ckdbq = create_ckmsgq(ckp, "ckdbqueue", &ckdbq_process);
 	stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
+	if (!ckp->standalone)
+		create_pthread(&pth_heartbeat, ckdb_heartbeat, ckp);
 
 	cklock_init(&workbase_lock);
 	if (!ckp->proxy)

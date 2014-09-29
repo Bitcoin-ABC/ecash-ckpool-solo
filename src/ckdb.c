@@ -49,7 +49,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.2"
-#define CKDB_VERSION DB_VERSION"-0.330"
+#define CKDB_VERSION DB_VERSION"-0.333"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -240,13 +240,14 @@ static LOADSTATUS dbstatus;
 typedef struct poolstatus {
 	int64_t workinfoid; // Last block
 	int32_t height;
+	int64_t reward;
 	double diffacc;
 	double diffinv; // Non-acc
 	double shareacc;
 	double shareinv; // Non-acc
 	double best_sdiff; // TODO (maybe)
 } POOLSTATUS;
-static POOLSTATUS pool = { 0, START_POOL_HEIGHT, 0, 0, 0, 0, 0 };
+static POOLSTATUS pool = { 0, START_POOL_HEIGHT, 0, 0, 0, 0, 0, 0 };
 /* TODO: when we know about orphans, the count reset to zero
  * will need to be undone - i.e. recalculate this data from
  * the memory tables - maybe ... */
@@ -478,21 +479,24 @@ static const tv_t date_begin = { DATE_BEGIN, 0L };
 		_row->expirydate.tv_usec = default_expiry.tv_usec; \
 	} while (0)
 
-// Override _row defaults if transfer fields are present
+/* Override _row defaults if transfer fields are present
+ * We don't care about the reply so it can be small */
 #define HISTORYDATETRANSFER(_root, _row) do { \
+		char __reply[16]; \
+		size_t __siz = sizeof(__reply); \
 		K_ITEM *__item; \
 		TRANSFER *__transfer; \
-		__item = optional_name(_root, "createby", 1, NULL); \
+		__item = optional_name(_root, "createby", 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createby, __transfer->mvalue); \
 		} \
-		__item = optional_name(_root, "createcode", 1, NULL); \
+		__item = optional_name(_root, "createcode", 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createcode, __transfer->mvalue); \
 		} \
-		__item = optional_name(_root, "createinet", 1, NULL); \
+		__item = optional_name(_root, "createinet", 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createinet, __transfer->mvalue); \
@@ -644,21 +648,24 @@ static const tv_t date_begin = { DATE_BEGIN, 0L };
 		STRNCPY(_row->createinet, inet_default); \
 	} while (0)
 
-// Override _row defaults if transfer fields are present
+/* Override _row defaults if transfer fields are present
+ * We don't care about the reply so it can be small */
 #define SIMPLEDATETRANSFER(_root, _row) do { \
+		char __reply[16]; \
+		size_t __siz = sizeof(__reply); \
 		K_ITEM *__item; \
 		TRANSFER *__transfer; \
-		__item = optional_name(_root, "createby", 1, NULL); \
+		__item = optional_name(_root, "createby", 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createby, __transfer->mvalue); \
 		} \
-		__item = optional_name(_root, "createcode", 1, NULL); \
+		__item = optional_name(_root, "createcode", 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createcode, __transfer->mvalue); \
 		} \
-		__item = optional_name(_root, "createinet", 1, NULL); \
+		__item = optional_name(_root, "createinet", 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createinet, __transfer->mvalue); \
@@ -764,11 +771,14 @@ static cklock_t fpm_lock;
 static char *first_pool_message;
 static sem_t socketer_sem;
 
-static const char *userpatt = "^[^/\\._"FLDSEPSTR"]*$"; // disallow: '/' '.' '_' and FLDSEP
+// disallow: '/' '.' '_' and FLDSEP
+static const char *userpatt = "^[^/\\._"FLDSEPSTR"]*$";
 static const char *mailpatt = "^[A-Za-z0-9_-][A-Za-z0-9_\\.-]*@[A-Za-z0-9][A-Za-z0-9\\.-]*[A-Za-z0-9]$";
 static const char *idpatt = "^[_A-Za-z][_A-Za-z0-9]*$";
 static const char *intpatt = "^[0-9][0-9]*$";
 static const char *hashpatt = "^[A-Fa-f0-9]*$";
+// TODO: bitcoind will check it properly
+static const char *addrpatt = "^[A-Za-z0-9]*$";
 
 #define JSON_TRANSFER "json="
 #define JSON_TRANSFER_LEN (sizeof(JSON_TRANSFER)-1)
@@ -793,6 +803,7 @@ enum cmd_values {
 	CMD_AUTH,
 	CMD_ADDRAUTH,
 	CMD_ADDUSER,
+	CMD_HEARTBEAT,
 	CMD_NEWPASS,
 	CMD_CHKPASS,
 	CMD_USERSET,
@@ -2160,11 +2171,12 @@ static K_ITEM *find_transfer(K_TREE *trf_root, char *name)
 	return find_in_ktree(trf_root, &look, cmp_transfer, ctx);
 }
 
-#define optional_name(_root, _name, _len, _patt) \
-		_optional_name(_root, _name, _len, _patt, WHERE_FFL_HERE)
+#define optional_name(_root, _name, _len, _patt, _reply, _siz) \
+		_optional_name(_root, _name, _len, _patt, _reply, _siz, \
+				WHERE_FFL_HERE)
 
 static K_ITEM *_optional_name(K_TREE *trf_root, char *name, int len, char *patt,
-				WHERE_FFL_ARGS)
+				char *reply, size_t siz, WHERE_FFL_ARGS)
 {
 	TRANSFER *trf;
 	K_ITEM *item;
@@ -2172,6 +2184,8 @@ static K_ITEM *_optional_name(K_TREE *trf_root, char *name, int len, char *patt,
 	regex_t re;
 	size_t dlen;
 	int ret;
+
+	reply[0] = '\0';
 
 	item = find_transfer(trf_root, name);
 	if (!item)
@@ -2187,19 +2201,24 @@ static K_ITEM *_optional_name(K_TREE *trf_root, char *name, int len, char *patt,
 		if (!mvalue) {
 			LOGERR("%s(): field '%s' NULL (%d) from %s():%d",
 				__func__, name, (int)dlen, len, func, line);
-		}
+		} else
+			snprintf(reply, siz, "failed.short %s", name);
 		return NULL;
 	}
 
 	if (patt) {
-		if (regcomp(&re, patt, REG_NOSUB) != 0)
+		if (regcomp(&re, patt, REG_NOSUB) != 0) {
+			snprintf(reply, siz, "failed.REG %s", name);
 			return NULL;
+		}
 
 		ret = regexec(&re, mvalue, (size_t)0, NULL, 0);
 		regfree(&re);
 
-		if (ret != 0)
+		if (ret != 0) {
+			snprintf(reply, siz, "failed.invalid %s", name);
 			return NULL;
+		}
 	}
 
 	return item;
@@ -2218,6 +2237,8 @@ static K_ITEM *_require_name(K_TREE *trf_root, char *name, int len, char *patt,
 	regex_t re;
 	size_t dlen;
 	int ret;
+
+	reply[0] = '\0';
 
 	item = find_transfer(trf_root, name);
 	if (!item) {
@@ -2246,7 +2267,7 @@ static K_ITEM *_require_name(K_TREE *trf_root, char *name, int len, char *patt,
 			LOGERR("%s(): failed, field '%s' failed to"
 				" compile patt from %s():%d",
 				__func__, name, func, line);
-			snprintf(reply, siz, "failed.REC %s", name);
+			snprintf(reply, siz, "failed.REG %s", name);
 			return NULL;
 		}
 
@@ -4975,6 +4996,7 @@ static int64_t workinfo_add(PGconn *conn, char *workinfoidstr, char *poolinstanc
 	STRNCPY(row->bits, bits);
 	STRNCPY(row->ntime, ntime);
 	TXT_TO_BIGINT("reward", reward, row->reward);
+	pool.reward = row->reward;
 
 	HISTORYDATEINIT(row, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, row);
@@ -5505,6 +5527,7 @@ static bool workinfo_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_BIGINT("reward", field, row->reward);
+		pool.reward = row->reward;
 
 		HISTORYDATEFLDS(res, i, row, ok);
 		if (!ok)
@@ -8955,30 +8978,41 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
-	i_username = require_name(trf_root, "username", 3, (char *)userpatt, reply, siz);
+	i_username = require_name(trf_root, "username", 3, (char *)userpatt,
+				  reply, siz);
 	if (!i_username)
 		return strdup(reply);
 
-	i_oldhash = optional_name(trf_root, "oldhash", 64, (char *)hashpatt);
+	i_oldhash = optional_name(trf_root, "oldhash", 64, (char *)hashpatt,
+				  reply, siz);
 	if (i_oldhash)
 		oldhash = transfer_data(i_oldhash);
-	else
+	else {
+		// fail if the oldhash is invalid
+		if (*reply)
+			ok = false;
 		oldhash = EMPTY;
+	}
 
-	i_newhash = require_name(trf_root, "newhash", 64, (char *)hashpatt, reply, siz);
-	if (!i_newhash)
-		return strdup(reply);
+	if (ok) {
+		i_newhash = require_name(trf_root, "newhash",
+					 64, (char *)hashpatt,
+					 reply, siz);
+		if (!i_newhash)
+			return strdup(reply);
 
-	K_RLOCK(users_free);
-	u_item = find_users(transfer_data(i_username));
-	K_RUNLOCK(users_free);
+		K_RLOCK(users_free);
+		u_item = find_users(transfer_data(i_username));
+		K_RUNLOCK(users_free);
 
-	if (u_item) {
-		ok = users_pass_email(NULL, u_item,
-					    oldhash,
-					    transfer_data(i_newhash),
-					    NULL,
-					    by, code, inet, now, trf_root);
+		if (u_item) {
+			ok = users_pass_email(NULL, u_item,
+						    oldhash,
+						    transfer_data(i_newhash),
+						    NULL,
+						    by, code, inet, now,
+						    trf_root);
+		}
 	}
 
 	if (!ok) {
@@ -9065,7 +9099,13 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 	} else {
 		DATA_USERS(users, u_item);
 		i_passwordhash = optional_name(trf_root, "passwordhash",
-						64, (char *)hashpatt);
+						64, (char *)hashpatt,
+						reply, siz);
+		if (*reply) {
+			reason = "Invalid data";
+			goto struckout;
+		}
+
 		if (!i_passwordhash) {
 			APPEND_REALLOC_INIT(answer, off, len);
 			snprintf(tmp, sizeof(tmp), "email=%s%c",
@@ -9090,16 +9130,30 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 				reason = "Incorrect password";
 				goto struckout;
 			}
-			i_email = optional_name(trf_root, "email", 1, (char *)mailpatt);
+			i_email = optional_name(trf_root, "email",
+						1, (char *)mailpatt,
+						reply, siz);
 			if (i_email)
 				email = transfer_data(i_email);
-			else
+			else {
+				if (*reply) {
+					reason = "Invalid email";
+					goto struckout;
+				}
 				email = NULL;
-			i_address = optional_name(trf_root, "address", 1, NULL);
+			}
+			i_address = optional_name(trf_root, "address",
+						  27, (char *)addrpatt,
+						  reply, siz);
 			if (i_address)
 				address = transfer_data(i_address);
-			else
+			else {
+				if (*reply) {
+					reason = "Invalid address";
+					goto struckout;
+				}
 				address = NULL;
+			}
 			if ((email == NULL || *email == '\0') &&
 			    (address == NULL || *address == '\0')) {
 				reason = "Missing/Invalid value";
@@ -9169,7 +9223,7 @@ static char *cmd_poolstats_do(PGconn *conn, char *cmd, char *id, char *by,
 	if (!i_poolinstance)
 		return strdup(reply);
 
-	i_elapsed = optional_name(trf_root, "elapsed", 1, NULL);
+	i_elapsed = optional_name(trf_root, "elapsed", 1, NULL, reply, siz);
 	if (!i_elapsed)
 		i_elapsed = &poolstats_elapsed;
 
@@ -9280,7 +9334,7 @@ static char *cmd_userstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	if (!i_poolinstance)
 		return strdup(reply);
 
-	i_elapsed = optional_name(trf_root, "elapsed", 1, NULL);
+	i_elapsed = optional_name(trf_root, "elapsed", 1, NULL, reply, siz);
 	if (!i_elapsed)
 		i_elapsed = &userstats_elapsed;
 
@@ -9288,7 +9342,7 @@ static char *cmd_userstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	if (!i_username)
 		return strdup(reply);
 
-	i_workername = optional_name(trf_root, "workername", 1, NULL);
+	i_workername = optional_name(trf_root, "workername", 1, NULL, reply, siz);
 	if (!i_workername)
 		i_workername = &userstats_workername;
 
@@ -9308,13 +9362,13 @@ static char *cmd_userstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	if (!i_hashrate24hr)
 		return strdup(reply);
 
-	i_idle = optional_name(trf_root, "idle", 1, NULL);
+	i_idle = optional_name(trf_root, "idle", 1, NULL, reply, siz);
 	if (!i_idle)
 		i_idle = &userstats_idle;
 
 	idle = (strcasecmp(transfer_data(i_idle), TRUE_STR) == 0);
 
-	i_eos = optional_name(trf_root, "eos", 1, NULL);
+	i_eos = optional_name(trf_root, "eos", 1, NULL, reply, siz);
 	if (!i_eos)
 		i_eos = &userstats_eos;
 
@@ -9727,7 +9781,7 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 		return strdup("bad");
 	DATA_USERS(users, u_item);
 
-	i_stats = optional_name(trf_root, "stats", 1, NULL);
+	i_stats = optional_name(trf_root, "stats", 1, NULL, reply, siz);
 	if (!i_stats)
 		stats = false;
 	else
@@ -9745,6 +9799,13 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 	DATA_WORKERS_NULL(workers, w_item);
 	APPEND_REALLOC_INIT(buf, off, len);
 	APPEND_REALLOC(buf, off, len, "ok.");
+	snprintf(tmp, sizeof(tmp), "blockacc=%.1f%c",
+				   pool.diffacc, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "blockreward=%"PRId64"%c",
+				   pool.reward, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+
 	rows = 0;
 	while (w_item && workers->userid == users->userid) {
 		if (CURRENT(&(workers->expirydate))) {
@@ -10235,7 +10296,8 @@ wiconf:
 		if (!i_sdiff)
 			return strdup(reply);
 
-		i_secondaryuserid = optional_name(trf_root, "secondaryuserid", 1, NULL);
+		i_secondaryuserid = optional_name(trf_root, "secondaryuserid",
+						  1, NULL, reply, siz);
 		if (!i_secondaryuserid)
 			i_secondaryuserid = &shares_secondaryuserid;
 
@@ -10303,7 +10365,8 @@ sconf:
 		if (!i_error)
 			return strdup(reply);
 
-		i_secondaryuserid = optional_name(trf_root, "secondaryuserid", 1, NULL);
+		i_secondaryuserid = optional_name(trf_root, "secondaryuserid",
+						  1, NULL, reply, siz);
 		if (!i_secondaryuserid)
 			i_secondaryuserid = &shareerrors_secondaryuserid;
 
@@ -10520,7 +10583,8 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
-	i_poolinstance = optional_name(trf_root, "poolinstance", 1, NULL);
+	i_poolinstance = optional_name(trf_root, "poolinstance", 1, NULL,
+					reply, siz);
 	if (!i_poolinstance)
 		i_poolinstance = &auth_poolinstance;
 
@@ -10544,7 +10608,7 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	if (!i_useragent)
 		return strdup(reply);
 
-	i_preauth = optional_name(trf_root, "preauth", 1, NULL);
+	i_preauth = optional_name(trf_root, "preauth", 1, NULL, reply, siz);
 	if (!i_preauth)
 		i_preauth = &auth_preauth;
 
@@ -10597,7 +10661,8 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
-	i_poolinstance = optional_name(trf_root, "poolinstance", 1, NULL);
+	i_poolinstance = optional_name(trf_root, "poolinstance", 1, NULL,
+					reply, siz);
 	if (!i_poolinstance)
 		i_poolinstance = &auth_poolinstance;
 
@@ -10662,6 +10727,25 @@ static char *cmd_addrauth(PGconn *conn, char *cmd, char *id,
 	return cmd_addrauth_do(conn, cmd, id, by, code, inet, cd, igndup, trf_root);
 }
 
+/* TODO: This must decide the reply based on the reloading/startup status
+ * Reload data will be a simple pulse reply
+ * If workers have been loaded (db_auths_complete) then any worker diff
+ *  changes from the web, after that, will mean a diff change reply
+ */
+static char *cmd_heartbeat(__maybe_unused PGconn *conn, char *cmd, char *id,
+			   __maybe_unused tv_t *now, __maybe_unused char *by,
+			   __maybe_unused char *code, __maybe_unused char *inet,
+			   __maybe_unused tv_t *cd,
+			   __maybe_unused K_TREE *trf_root)
+{
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+
+	snprintf(reply, siz, "ok.pulse");
+	LOGDEBUG("%s.%s.%s", cmd, id, reply);
+	return strdup(reply);
+}
+
 static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  __maybe_unused tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
@@ -10670,6 +10754,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_ITEM *i_username, *u_item, *b_item, *p_item, *us_item, look;
 	double u_hashrate5m, u_hashrate1hr;
 	char reply[1024], tmp[1024], *buf;
+	size_t siz = sizeof(reply);
 	USERSTATS lookuserstats, *userstats;
 	POOLSTATS *poolstats;
 	BLOCKS *blocks;
@@ -10681,12 +10766,12 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
-	i_username = optional_name(trf_root, "username", 1, NULL);
+	i_username = optional_name(trf_root, "username", 1, NULL, reply, siz);
 
 	APPEND_REALLOC_INIT(buf, off, len);
 	APPEND_REALLOC(buf, off, len, "ok.");
 	if (last_bc.tv_sec) {
-		tvs_to_buf(&last_bc, reply, sizeof(reply));
+		tvs_to_buf(&last_bc, reply, siz);
 		snprintf(tmp, sizeof(tmp), "lastbc=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 		K_RLOCK(workinfo_free);
@@ -10723,7 +10808,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_RUNLOCK(blocks_free);
 	if (b_item) {
 		DATA_BLOCKS(blocks, b_item);
-		tvs_to_buf(&(blocks->createdate), reply, sizeof(reply));
+		tvs_to_buf(&(blocks->createdate), reply, siz);
 		snprintf(tmp, sizeof(tmp), "lastblock=%s%cconfirmed=%s%c",
 					   reply, FLDSEP,
 					   blocks->confirmed, FLDSEP);
@@ -10759,23 +10844,23 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	p_item = last_in_ktree(poolstats_root, ctx);
 	if (p_item) {
 		DATA_POOLSTATS(poolstats, p_item);
-		int_to_buf(poolstats->users, reply, sizeof(reply));
+		int_to_buf(poolstats->users, reply, siz);
 		snprintf(tmp, sizeof(tmp), "users=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 
-		int_to_buf(poolstats->workers, reply, sizeof(reply));
+		int_to_buf(poolstats->workers, reply, siz);
 		snprintf(tmp, sizeof(tmp), "workers=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 
-		double_to_buf(poolstats->hashrate5m, reply, sizeof(reply));
+		double_to_buf(poolstats->hashrate5m, reply, siz);
 		snprintf(tmp, sizeof(tmp), "p_hashrate5m=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 
-		double_to_buf(poolstats->hashrate1hr, reply, sizeof(reply));
+		double_to_buf(poolstats->hashrate1hr, reply, siz);
 		snprintf(tmp, sizeof(tmp), "p_hashrate1hr=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 
-		bigint_to_buf(poolstats->elapsed, reply, sizeof(reply));
+		bigint_to_buf(poolstats->elapsed, reply, siz);
 		snprintf(tmp, sizeof(tmp), "p_elapsed=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 	} else {
@@ -10833,15 +10918,15 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	}
 
 	if (has_uhr) {
-		double_to_buf(u_hashrate5m, reply, sizeof(reply));
+		double_to_buf(u_hashrate5m, reply, siz);
 		snprintf(tmp, sizeof(tmp), "u_hashrate5m=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 
-		double_to_buf(u_hashrate1hr, reply, sizeof(reply));
+		double_to_buf(u_hashrate1hr, reply, siz);
 		snprintf(tmp, sizeof(tmp), "u_hashrate1hr=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 
-		bigint_to_buf(u_elapsed, reply, sizeof(reply));
+		bigint_to_buf(u_elapsed, reply, siz);
 		snprintf(tmp, sizeof(tmp), "u_elapsed=%s", reply);
 		APPEND_REALLOC(buf, off, len, tmp);
 	} else {
@@ -11600,15 +11685,15 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		return strdup(reply);
 	TXT_TO_INT("height", transfer_data(i_height), height);
 
-	i_difftimes = optional_name(trf_root, "diff_times", 1, NULL);
+	i_difftimes = optional_name(trf_root, "diff_times", 1, NULL, reply, siz);
 	if (i_difftimes)
 		TXT_TO_DOUBLE("diff_times", transfer_data(i_difftimes), diff_times);
 
-	i_diffadd = optional_name(trf_root, "diff_add", 1, NULL);
+	i_diffadd = optional_name(trf_root, "diff_add", 1, NULL, reply, siz);
 	if (i_diffadd)
 		TXT_TO_DOUBLE("diff_add", transfer_data(i_diffadd), diff_add);
 
-	i_allowaged = optional_name(trf_root, "allow_aged", 1, NULL);
+	i_allowaged = optional_name(trf_root, "allow_aged", 1, NULL, reply, siz);
 	if (i_allowaged) {
 		DATA_TRANSFER(transfer, i_allowaged);
 		if (toupper(transfer->mvalue[0]) == TRUE_STR[0])
@@ -12072,6 +12157,7 @@ static struct CMDS {
 	{ CMD_SHARELOG,	STR_AGEWORKINFO, false,	true,	cmd_sharelog,	ACCESS_POOL },
 	{ CMD_AUTH,	"authorise",	false,	true,	cmd_auth,	ACCESS_POOL },
 	{ CMD_ADDRAUTH,	"addrauth",	false,	true,	cmd_addrauth,	ACCESS_POOL },
+	{ CMD_HEARTBEAT,"heartbeat",	false,	true,	cmd_heartbeat,	ACCESS_POOL },
 	{ CMD_ADDUSER,	"adduser",	false,	false,	cmd_adduser,	ACCESS_WEB },
 	{ CMD_NEWPASS,	"newpass",	false,	false,	cmd_newpass,	ACCESS_WEB },
 	{ CMD_CHKPASS,	"chkpass",	false,	false,	cmd_chkpass,	ACCESS_WEB },
@@ -12933,6 +13019,7 @@ static void *socketer(__maybe_unused void *arg)
 					// Always process immediately:
 					case CMD_AUTH:
 					case CMD_ADDRAUTH:
+					case CMD_HEARTBEAT:
 						// First message from the pool
 						if (want_first) {
 							ck_wlock(&fpm_lock);
@@ -13199,6 +13286,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 				break;
 			case CMD_AUTH:
 			case CMD_ADDRAUTH:
+			case CMD_HEARTBEAT:
 			case CMD_POOLSTAT:
 			case CMD_USERSTAT:
 			case CMD_BLOCK:

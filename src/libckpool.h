@@ -138,6 +138,7 @@ static inline void flip_80(void *dest_p, const void *src_p)
 #define mutex_unlock_noyield(_lock) _mutex_unlock_noyield(_lock, __FILE__, __func__, __LINE__)
 #define mutex_unlock(_lock) _mutex_unlock(_lock, __FILE__, __func__, __LINE__)
 #define mutex_trylock(_lock) _mutex_trylock(_lock, __FILE__, __func__, __LINE__)
+#define mutex_timedlock(_lock, timeout) _mutex_timedlock(_lock, timeout, __FILE__, __func__, __LINE__)
 #define wr_lock(_lock) _wr_lock(_lock, __FILE__, __func__, __LINE__)
 #define wr_trylock(_lock) _wr_trylock(_lock, __FILE__, __func__, __LINE__)
 #define rd_lock(_lock) _rd_lock(_lock, __FILE__, __func__, __LINE__)
@@ -355,6 +356,7 @@ void _mutex_lock(pthread_mutex_t *lock, const char *file, const char *func, cons
 void _mutex_unlock_noyield(pthread_mutex_t *lock, const char *file, const char *func, const int line);
 void _mutex_unlock(pthread_mutex_t *lock, const char *file, const char *func, const int line);
 int _mutex_trylock(pthread_mutex_t *lock, __maybe_unused const char *file, __maybe_unused const char *func, __maybe_unused const int line);
+int _mutex_timedlock(pthread_mutex_t *lock, int timeout, __maybe_unused const char *file, __maybe_unused const char *func, __maybe_unused const int line);
 void _wr_lock(pthread_rwlock_t *lock, const char *file, const char *func, const int line);
 int _wr_trylock(pthread_rwlock_t *lock, __maybe_unused const char *file, __maybe_unused const char *func, __maybe_unused const int line);
 void _rd_lock(pthread_rwlock_t *lock, const char *file, const char *func, const int line);
