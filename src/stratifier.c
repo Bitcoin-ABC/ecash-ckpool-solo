@@ -242,6 +242,7 @@ static user_instance_t *user_instances;
 
 /* Combined data from workers with the same workername */
 struct worker_instance {
+	user_instance_t *instance;
 	char *workername;
 
 	worker_instance_t *next;
@@ -300,6 +301,8 @@ struct stratum_instance {
 	ckpool_t *ckp;
 
 	time_t last_txns; /* Last time this worker requested txn hashes */
+
+	int64_t suggest_diff; /* Stratum client suggested diff */
 };
 
 /* Stratum_instances hashlist is stored by id, whereas disconnected_instances
@@ -1588,6 +1591,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	if (!client->worker_instance) {
 		client->worker_instance = ckzalloc(sizeof(worker_instance_t));
 		client->worker_instance->workername = strdup(workername);
+		client->worker_instance->instance = instance;
 		DL_APPEND(instance->worker_instances, client->worker_instance);
 	}
 	DL_APPEND(instance->instances, client);
@@ -1920,12 +1924,23 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	if (drr > 0.15 && drr < 0.4)
 		return;
 
-	/* Round away from zero to avoid bouncing around diffs at the lower
-	 * end of the scale. */
-	optimal = lround(dsps * 3.33);
+	/* Allow slightly lower diffs when users choose their own mindiff */
+	if (worker->mindiff || client->suggest_diff) {
+		if (drr < 0.5)
+			return;
+		optimal = lround(dsps * 2.4);
+	} else
+		optimal = lround(dsps * 3.33);
+
 	/* Clamp to mindiff ~ network_diff */
 	if (optimal < ckp->mindiff)
 		optimal = ckp->mindiff;
+	/* Client suggest diff overrides worker mindiff */
+	if (client->suggest_diff) {
+		if (optimal < client->suggest_diff)
+			optimal = client->suggest_diff;
+	} else if (optimal < worker->mindiff)
+		optimal = worker->mindiff;
 	if (optimal > network_diff)
 		optimal = network_diff;
 	if (client->diff == optimal)
@@ -2478,6 +2493,66 @@ static json_params_t *create_json_params(const int64_t client_id, const json_t *
 	return jp;
 }
 
+#if 0
+static void set_worker_mindiff(ckpool_t *ckp, worker_instance_t *worker, int64_t mindiff)
+{
+	stratum_instance_t *client;
+	user_instance_t *instance;
+
+	if (mindiff < 1)
+		return LOGINFO("Worker %s requested invalid diff %ld", worker->workername, mindiff);
+	if (mindiff < ckp->mindiff)
+		mindiff = ckp->mindiff;
+	if (mindiff == worker->mindiff)
+		return;
+	worker->mindiff = mindiff;
+	instance = worker->instance;
+
+	/* Iterate over all the workers from this user to find any with the
+	 * matching worker that are currently live and send them a new diff
+	 * if we can. Otherwise it will only act as a clamp on next share
+	 * submission. */
+	ck_rlock(&instance_lock);
+	DL_FOREACH(instance->instances, client) {
+		if (client->worker_instance != worker)
+			continue;
+		/* Per connection suggest diff overrides worker mindiff ugh */
+		if (mindiff < client->suggest_diff)
+			continue;
+		if (mindiff == client->diff)
+			continue;
+		/* If we're going down in diff, do not allow the next diff to
+		 * be drastically lower than the current diff */
+		if (mindiff < client->diff * 2 / 3)
+			client->diff = client->diff * 2 / 3;
+		else
+			client->diff = mindiff;
+		stratum_send_diff(client);
+	}
+	ck_runlock(&instance_lock);
+}
+#endif
+
+static void suggest_diff(stratum_instance_t *client, const char *method)
+{
+	int64_t sdiff;
+
+	if (unlikely(!client->authorised))
+		return LOGWARNING("Attempted to suggest diff on unauthorised client %ld", client->id);
+	if (sscanf(method, "mining.suggest_difficulty(%ld", &sdiff) != 1)
+		return LOGINFO("Failed to parse suggest_difficulty for client %ld", client->id);
+	if (sdiff == client->suggest_diff)
+		return;
+	client->suggest_diff = sdiff;
+	if (client->diff == sdiff)
+		return;
+	if (sdiff < client->diff * 2 / 3)
+		client->diff = client->diff * 2 / 3;
+	else
+		client->diff = sdiff;
+	stratum_send_diff(client);
+}
+
 static void parse_method(const int64_t client_id, json_t *id_val, json_t *method_val,
 			 json_t *params_val, char *address)
 {
@@ -2553,6 +2628,11 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 		json_params_t *jp = create_json_params(client_id, params_val, id_val, address);
 
 		ckmsgq_add(sshareq, jp);
+		return;
+	}
+
+	if (cmdmatch(method, "mining.suggest")) {
+		suggest_diff(client, method);
 		return;
 	}
 
