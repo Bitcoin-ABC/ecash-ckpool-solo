@@ -177,8 +177,7 @@ static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 out:
 	if (!ret) {
 		/* Close and invalidate the file handle */
-		close(cs->fd);
-		cs->fd = -1;
+		Close(cs->fd);
 	} else
 		keep_sockalive(cs->fd);
 	return ret;
@@ -225,8 +224,7 @@ static void kill_server(server_instance_t *si)
 
 	LOGNOTICE("Killing server");
 	cs = &si->cs;
-	close(cs->fd);
-	cs->fd = -1;
+	Close(cs->fd);
 	dealloc(cs->url);
 	dealloc(cs->port);
 	dealloc(cs->auth);
@@ -290,7 +288,7 @@ retry:
 	buf = recv_unix_msg(sockd);
 	if (!buf) {
 		LOGWARNING("Failed to get message in gen_loop");
-		close(sockd);
+		Close(sockd);
 		goto retry;
 	}
 	LOGDEBUG("Generator received request: %s", buf);
@@ -365,7 +363,7 @@ retry:
 		LOGDEBUG("Generator received ping request");
 		send_unix_msg(sockd, "pong");
 	}
-	close(sockd);
+	Close(sockd);
 	goto retry;
 
 out:
@@ -627,10 +625,8 @@ retry:
 	goto retry;
 
 out:
-	if (!ret) {
-		close(cs->fd);
-		cs->fd = -1;
-	}
+	if (!ret)
+		Close(cs->fd);
 	return ret;
 }
 
@@ -670,7 +666,7 @@ out:
 	if (val)
 		json_decref(val);
 	if (!ret)
-		close(cs->fd);
+		Close(cs->fd);
 	return ret;
 }
 
@@ -934,7 +930,7 @@ static bool auth_stratum(connsock_t *cs, proxy_instance_t *proxi)
 	json_decref(req);
 	if (!ret) {
 		LOGWARNING("Failed to send message in auth_stratum");
-		close(cs->fd);
+		Close(cs->fd);
 		goto out;
 	}
 
@@ -979,7 +975,7 @@ out:
 	return ret;
 }
 
-static void send_subscribe(proxy_instance_t *proxi, int sockd)
+static void send_subscribe(proxy_instance_t *proxi, int *sockd)
 {
 	json_t *json_msg;
 	char *msg;
@@ -988,12 +984,12 @@ static void send_subscribe(proxy_instance_t *proxi, int sockd)
 			     "nonce2len", proxi->nonce2len);
 	msg = json_dumps(json_msg, JSON_NO_UTF8);
 	json_decref(json_msg);
-	send_unix_msg(sockd, msg);
+	send_unix_msg(*sockd, msg);
 	free(msg);
-	close(sockd);
+	_Close(sockd);
 }
 
-static void send_notify(proxy_instance_t *proxi, int sockd)
+static void send_notify(proxy_instance_t *proxi, int *sockd)
 {
 	json_t *json_msg, *merkle_arr;
 	notify_instance_t *ni;
@@ -1017,12 +1013,12 @@ static void send_notify(proxy_instance_t *proxi, int sockd)
 
 	msg = json_dumps(json_msg, JSON_NO_UTF8);
 	json_decref(json_msg);
-	send_unix_msg(sockd, msg);
+	send_unix_msg(*sockd, msg);
 	free(msg);
-	close(sockd);
+	_Close(sockd);
 }
 
-static void send_diff(proxy_instance_t *proxi, int sockd)
+static void send_diff(proxy_instance_t *proxi, int *sockd)
 {
 	json_t *json_msg;
 	char *msg;
@@ -1030,9 +1026,9 @@ static void send_diff(proxy_instance_t *proxi, int sockd)
 	JSON_CPACK(json_msg, "{sf}", "diff", proxi->diff);
 	msg = json_dumps(json_msg, JSON_NO_UTF8);
 	json_decref(json_msg);
-	send_unix_msg(sockd, msg);
+	send_unix_msg(*sockd, msg);
 	free(msg);
-	close(sockd);
+	_Close(sockd);
 }
 
 static void submit_share(proxy_instance_t *proxi, json_t *val)
@@ -1242,8 +1238,7 @@ static void *proxy_send(void *arg)
 		free(msg);
 		if (!ret && cs->fd > 0) {
 			LOGWARNING("Failed to send msg in proxy_send, dropping to reconnect");
-			close(cs->fd);
-			cs->fd = -1;
+			Close(cs->fd);
 		}
 	}
 	return NULL;
@@ -1350,8 +1345,7 @@ static bool proxy_alive(ckpool_t *ckp, server_instance_t *si, proxy_instance_t *
 out:
 	if (!ret) {
 		/* Close and invalidate the file handle */
-		close(cs->fd);
-		cs->fd = -1;
+		Close(cs->fd);
 	} else
 		keep_sockalive(cs->fd);
 	return ret;
@@ -1421,8 +1415,7 @@ static void kill_proxy(ckpool_t *ckp, proxy_instance_t *proxi)
 
 	LOGNOTICE("Killing proxy");
 	cs = proxi->cs;
-	close(cs->fd);
-	cs->fd = -1;
+	Close(cs->fd);
 
 	/* All our notify data is invalid if we reconnect so discard them */
 	mutex_lock(&proxi->notify_lock);
@@ -1495,7 +1488,7 @@ retry:
 	buf = recv_unix_msg(sockd);
 	if (!buf) {
 		LOGWARNING("Failed to get message in proxy_loop");
-		close(sockd);
+		Close(sockd);
 		goto retry;
 	}
 	LOGDEBUG("Proxy received request: %s", buf);
@@ -1503,11 +1496,11 @@ retry:
 		ret = 0;
 		goto out;
 	} else if (cmdmatch(buf, "getsubscribe")) {
-		send_subscribe(proxi, sockd);
+		send_subscribe(proxi, &sockd);
 	} else if (cmdmatch(buf, "getnotify")) {
-		send_notify(proxi, sockd);
+		send_notify(proxi, &sockd);
 	} else if (cmdmatch(buf, "getdiff")) {
-		send_diff(proxi, sockd);
+		send_diff(proxi, &sockd);
 	} else if (cmdmatch(buf, "reconnect")) {
 		goto reconnect;
 	} else if (cmdmatch(buf, "submitblock:")) {
@@ -1536,11 +1529,11 @@ retry:
 		else
 			submit_share(proxi, val);
 	}
-	close(sockd);
+	Close(sockd);
 	goto retry;
 out:
 	kill_proxy(ckp, proxi);
-	close(sockd);
+	Close(sockd);
 	return ret;
 }
 
@@ -1653,7 +1646,7 @@ static int proxy_mode(ckpool_t *ckp, proc_instance_t *pi)
 
 	for (i = 0; i < ckp->proxies; i++) {
 		si = ckp->servers[i];
-		close(si->cs.fd);
+		Close(si->cs.fd);
 		proxi = si->data;
 		free(proxi->enonce1);
 		free(proxi->enonce1bin);
