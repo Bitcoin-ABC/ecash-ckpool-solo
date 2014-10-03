@@ -1310,18 +1310,18 @@ retry:
 	dealloc(buf);
 	buf = recv_unix_msg(sockd);
 	if (!buf) {
-		close(sockd);
+		Close(sockd);
 		LOGWARNING("Failed to get message in stratum_loop");
 		goto retry;
 	}
 	if (cmdmatch(buf, "ping")) {
 		LOGDEBUG("Stratifier received ping request");
 		send_unix_msg(sockd, "pong");
-		close(sockd);
+		Close(sockd);
 		goto retry;
 	}
 
-	close(sockd);
+	Close(sockd);
 	LOGDEBUG("Stratifier received request: %s", buf);
 	if (cmdmatch(buf, "shutdown")) {
 		ret = 0;
