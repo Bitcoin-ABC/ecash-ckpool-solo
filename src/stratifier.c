@@ -1772,7 +1772,7 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 		client->password = strdup(pw);
 	LOGNOTICE("Authorised client %ld worker %s as user %s %s", client->id, buf,
 		  user_instance->username, pw ? pw : "");
-	if (CKP_STANDALONE(client->ckp))
+	if (CKP_STANDALONE(client->ckp)) {
 		if (!ckp->btcsolo || client->user_instance->btcaddress)
 			ret = true;
 	} else {
@@ -1940,11 +1940,8 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 			optimal = client->suggest_diff;
 	} else if (optimal < worker->mindiff)
 		optimal = worker->mindiff;
-<<<<<<< HEAD
-=======
 	if (ckp->maxdiff && optimal > ckp->maxdiff)
 		optimal = ckp->maxdiff;
->>>>>>> master
 	if (optimal > network_diff)
 		optimal = network_diff;
 	if (client->diff == optimal)
