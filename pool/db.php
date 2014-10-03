@@ -116,12 +116,12 @@ function homeInfo($user)
  else
  {
 	$ans = repDecode($rep);
-	if ($ans['lastblock'] == '?')
-	{
+//	if ($ans['lastblock'] == '?')
+//	{
 //		$ans['lastblock'] = 1401237522;
 //		$ans['lastblock'] = 1403819191;
-		$ans['lastblock'] = 1407113822;
-	}
+//		$ans['lastblock'] = 1407113822;
+//	}
  }
 
  return $ans;
@@ -188,6 +188,16 @@ function userSettings($user, $email = null, $addr = null, $pass = null)
  return repDecode($rep);
 }
 #
+function workerSet($user, $settings)
+{
+ $flds = array_merge(array('username' => $user), $settings);
+ $msg = msgEncode('workerset', 'workerset', $flds, $user);
+ $rep = sendsockreply('workerSet', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
 function getAllUsers($user)
 {
  $flds = array();
@@ -198,11 +208,11 @@ function getAllUsers($user)
  return repDecode($rep);
 }
 #
-function getWorkers($user)
+function getWorkers($user, $stats = 'Y')
 {
  if ($user == false)
 	showIndex();
- $flds = array('username' => $user, 'stats' => 'Y');
+ $flds = array('username' => $user, 'stats' => $stats);
  $msg = msgEncode('workers', 'work', $flds, $user);
  $rep = sendsockreply('getWorkers', $msg);
  if (!$rep)

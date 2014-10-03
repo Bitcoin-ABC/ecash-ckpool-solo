@@ -153,6 +153,7 @@ struct ckpool_instance {
 	/* Difficulty settings */
 	int64_t mindiff; // Default 1
 	int64_t startdiff; // Default 42
+	int64_t maxdiff; // No default
 
 	/* Coinbase data */
 	char *btcaddress; // Address to mine to
@@ -173,6 +174,12 @@ struct ckpool_instance {
 	char **proxypass;
 	server_instance_t *btcdbackup;
 };
+
+#ifdef USE_CKDB
+#define CKP_STANDALONE(CKP) ((CKP)->standalone == true)
+#else
+#define CKP_STANDALONE(CKP) (true)
+#endif
 
 ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func);
 void ckmsgq_add(ckmsgq_t *ckmsgq, void *data);

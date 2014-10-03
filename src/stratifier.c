@@ -84,7 +84,12 @@ static pthread_mutex_t stats_lock;
 /* Serialises sends/receives to ckdb if possible */
 static pthread_mutex_t ckdb_lock;
 
-static uint64_t enonce1_64;
+static union {
+	uint64_t u64;
+	uint32_t u32;
+	uint16_t u16;
+	uint8_t u8;
+} enonce1u;
 
 struct workbase {
 	/* Hash table data */
@@ -573,7 +578,7 @@ static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char 
 		fflush(stdout);
 	}
 
-	if (ckp->standalone)
+	if (CKP_STANDALONE(ckp))
 		return json_decref(val);
 
 	json_msg = ckdb_msg(ckp, val, idtype);
@@ -1045,16 +1050,17 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id)
 	instance->diff = instance->old_diff = ckp->startdiff;
 	instance->ckp = ckp;
 	tv_time(&instance->ldc);
-	LOGINFO("Added instance %d", id);
+	LOGINFO("Added instance %ld", id);
 	HASH_ADD_I64(stratum_instances, id, instance);
 	return instance;
 }
 
+/* Only supports a full ckpool instance sessionid with an 8 byte sessionid */
 static bool disconnected_sessionid_exists(const char *sessionid, int64_t id)
 {
-	bool connected_exists = false, ret = false;
 	stratum_instance_t *instance, *tmp;
 	uint64_t session64;
+	bool ret = false;
 
 	if (!sessionid)
 		goto out;
@@ -1069,12 +1075,9 @@ static bool disconnected_sessionid_exists(const char *sessionid, int64_t id)
 			continue;
 		if (instance->enonce1_64 == session64) {
 			/* Only allow one connected instance per enonce1 */
-			connected_exists = true;
-			break;
+			goto out_unlock;
 		}
 	}
-	if (connected_exists)
-		goto out_unlock;
 	instance = NULL;
 	HASH_FIND(hh, disconnected_instances, &session64, sizeof(uint64_t), instance);
 	if (instance)
@@ -1172,7 +1175,7 @@ static void drop_client(int64_t id)
 
 	LOGINFO("Stratifier dropping client %ld", id);
 
-	ck_ilock(&instance_lock);
+	ck_wlock(&instance_lock);
 	client = __instance_by_id(id);
 	if (client) {
 		stratum_instance_t *old_client = NULL;
@@ -1182,15 +1185,13 @@ static void drop_client(int64_t id)
 			client->authorised = false;
 		}
 
-		ck_ulock(&instance_lock);
 		HASH_DEL(stratum_instances, client);
 		HASH_FIND(hh, disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
 		/* Only keep around one copy of the old client in server mode */
 		if (!client->ckp->proxy && !old_client && client->enonce1_64)
 			HASH_ADD(hh, disconnected_instances, enonce1_64, sizeof(uint64_t), client);
-		ck_dwilock(&instance_lock);
 	}
-	ck_uilock(&instance_lock);
+	ck_wunlock(&instance_lock);
 
 	if (dec)
 		dec_worker(client->user_instance);
@@ -1417,10 +1418,6 @@ out:
  * unused enonce1 value and reject clients instead if there is no space left */
 static bool new_enonce1(stratum_instance_t *client)
 {
-	void *enoncev = &enonce1_64;
-	uint32_t *enonce1_32 = enoncev;
-	uint16_t *enonce1_16 = enoncev;
-	uint8_t *enonce1_8 = enoncev;
 	bool ret = false;
 	workbase_t *wb;
 	int i;
@@ -1429,30 +1426,32 @@ static bool new_enonce1(stratum_instance_t *client)
 	wb = current_workbase;
 	switch(wb->enonce1varlen) {
 		case 8:
-			enonce1_64++;
+			enonce1u.u64++;
 			ret = true;
 			break;
 		case 4:
-			++(*enonce1_32);
+			enonce1u.u32++;
 			ret = true;
 			break;
 		case 2:
-			i = 0;
-			do {
-				++(*enonce1_16);
-				ret = enonce1_free(enonce1_64);
-			} while (++i < 65536 && !ret);
+			for (i = 0; i < 65536; i++) {
+				enonce1u.u16++;
+				ret = enonce1_free(enonce1u.u64);
+				if (ret)
+					break;
+			}
 			break;
 		case 1:
-			i = 0;
-			do {
-				++(*enonce1_8);
-				ret = enonce1_free(enonce1_64);
-			} while (++i < 256 && !ret);
+			for (i = 0; i < 256; i++) {
+				enonce1u.u8++;
+				ret = enonce1_free(enonce1u.u64);
+				if (ret)
+					break;
+			}
 			break;
 	}
 	if (ret)
-		client->enonce1_64 = enonce1_64;
+		client->enonce1_64 = enonce1u.u64;
 	if (wb->enonce1constlen)
 		memcpy(client->enonce1bin, wb->enonce1constbin, wb->enonce1constlen);
 	memcpy(client->enonce1bin + wb->enonce1constlen, &client->enonce1_64, wb->enonce1varlen);
@@ -1773,7 +1772,7 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 		client->password = strdup(pw);
 	LOGNOTICE("Authorised client %ld worker %s as user %s %s", client->id, buf,
 		  user_instance->username, pw ? pw : "");
-	if (ckp->standalone) {
+	if (CKP_STANDALONE(client->ckp))
 		if (!ckp->btcsolo || client->user_instance->btcaddress)
 			ret = true;
 	} else {
@@ -1841,7 +1840,8 @@ static double sane_tdiff(tv_t *end, tv_t *start)
 	return tdiff;
 }
 
-static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool valid)
+static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool valid,
+		       bool submit)
 {
 	worker_instance_t *worker = client->worker_instance;
 	double tdiff, bdiff, dsps, drr, network_diff, bias;
@@ -1849,9 +1849,16 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	int64_t next_blockid, optimal;
 	tv_t now_t;
 
-	/* Ignore successive rejects in count if they haven't submitted a valid
-	 * share yet. */
-	if (unlikely(!client->ssdc && !valid))
+	mutex_lock(&stats_lock);
+	if (valid) {
+		stats.unaccounted_shares++;
+		stats.unaccounted_diff_shares += diff;
+	} else
+		stats.unaccounted_rejects += diff;
+	mutex_unlock(&stats_lock);
+
+	/* Count only accepted and stale rejects in diff calculation. */
+	if (!valid && !submit)
 		return;
 
 	tv_time(&now_t);
@@ -1898,14 +1905,6 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 	bias = time_bias(bdiff, 300);
 	tdiff = sane_tdiff(&now_t, &client->ldc);
 
-	mutex_lock(&stats_lock);
-	if (valid) {
-		stats.unaccounted_shares++;
-		stats.unaccounted_diff_shares += diff;
-	} else
-		stats.unaccounted_rejects += diff;
-	mutex_unlock(&stats_lock);
-
 	/* Check the difficulty every 240 seconds or as many shares as we
 	 * should have had in that time, whichever comes first. */
 	if (client->ssdc < 72 && tdiff < 240)
@@ -1941,6 +1940,11 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 			optimal = client->suggest_diff;
 	} else if (optimal < worker->mindiff)
 		optimal = worker->mindiff;
+<<<<<<< HEAD
+=======
+	if (ckp->maxdiff && optimal > ckp->maxdiff)
+		optimal = ckp->maxdiff;
+>>>>>>> master
 	if (optimal > network_diff)
 		optimal = network_diff;
 	if (client->diff == optimal)
@@ -1956,7 +1960,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, int diff, bool
 
 	client->ssdc = 0;
 
-	LOGINFO("Client %d biased dsps %.2f dsps %.2f drr %.2f adjust diff from %ld to: %ld ",
+	LOGINFO("Client %ld biased dsps %.2f dsps %.2f drr %.2f adjust diff from %ld to: %ld ",
 		client->id, dsps, client->dsps5, drr, client->diff, optimal);
 
 	copy_tv(&client->ldc, &now_t);
@@ -2122,19 +2126,17 @@ static bool new_share(const uchar *hash, int64_t  wb_id)
 	share_t *share, *match = NULL;
 	bool ret = false;
 
-	ck_ilock(&share_lock);
+	ck_wlock(&share_lock);
 	HASH_FIND(hh, shares, hash, 32, match);
 	if (match)
 		goto out_unlock;
 	share = ckzalloc(sizeof(share_t));
 	memcpy(share->hash, hash, 32);
 	share->workbase_id = wb_id;
-	ck_ulock(&share_lock);
 	HASH_ADD(hh, shares, hash, 32, share);
-	ck_dwilock(&share_lock);
 	ret = true;
 out_unlock:
-	ck_uilock(&share_lock);
+	ck_wunlock(&share_lock);
 
 	return ret;
 }
@@ -2171,9 +2173,9 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	char *fname = NULL, *s, *nonce2;
 	enum share_err err = SE_NONE;
 	ckpool_t *ckp = client->ckp;
+	workbase_t *wb = NULL;
 	char idstring[20];
 	uint32_t ntime32;
-	workbase_t *wb;
 	uchar hash[32];
 	int64_t id;
 	json_t *val;
@@ -2273,7 +2275,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	}
 	invalid = false;
 out_submit:
-	if (wb->proxy && sdiff >= wdiff)
+	if (sdiff >= wdiff)
 		submit = true;
 out_unlock:
 	ck_runlock(&workbase_lock);
@@ -2287,41 +2289,41 @@ out_unlock:
 		suffix_string(wdiff, wdiffsuffix, 16, 0);
 		if (sdiff >= diff) {
 			if (new_share(hash, id)) {
-				LOGINFO("Accepted client %d share diff %.1f/%.0f/%s: %s",
+				LOGINFO("Accepted client %ld share diff %.1f/%.0f/%s: %s",
 					client->id, sdiff, diff, wdiffsuffix, hexhash);
 				result = true;
 			} else {
 				err = SE_DUPE;
 				json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
-				LOGINFO("Rejected client %d dupe diff %.1f/%.0f/%s: %s",
+				LOGINFO("Rejected client %ld dupe diff %.1f/%.0f/%s: %s",
 					client->id, sdiff, diff, wdiffsuffix, hexhash);
 				submit = false;
 			}
 		} else {
 			err = SE_HIGH_DIFF;
-			LOGINFO("Rejected client %d high diff %.1f/%.0f/%s: %s",
+			LOGINFO("Rejected client %ld high diff %.1f/%.0f/%s: %s",
 				client->id, sdiff, diff, wdiffsuffix, hexhash);
 			json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
 			submit = false;
 		}
 	}  else
-		LOGINFO("Rejected client %d invalid share", client->id);
+		LOGINFO("Rejected client %ld invalid share", client->id);
 
 	/* Submit share to upstream pool in proxy mode. We submit valid and
 	 * stale shares and filter out the rest. */
-	if (submit) {
+	if (wb && wb->proxy && submit) {
 		LOGINFO("Submitting share upstream: %s", hexhash);
 		submit_share(client, id, nonce2, ntime, nonce, json_integer_value(json_object_get(json_msg, "id")));
 	}
 
-	add_submit(ckp, client, diff, result);
+	add_submit(ckp, client, diff, result, submit);
 
 	/* Now write to the pool's sharelog. */
 	val = json_object();
 	json_set_int(val, "workinfoid", id);
 	json_set_int(val, "clientid", client->id);
 	json_set_string(val, "enonce1", client->enonce1);
-	if (!ckp->standalone)
+	if (!CKP_STANDALONE(ckp))
 		json_set_string(val, "secondaryuserid", user_instance->secondaryuserid);
 	json_set_string(val, "nonce2", nonce2);
 	json_set_string(val, "nonce", nonce);
@@ -2370,7 +2372,7 @@ out:
 				"createcode", __func__,
 				"createinet", ckp->serverurl);
 		ckdbq_add(ckp, ID_SHAREERR, val);
-		LOGINFO("Invalid share from client %d: %s", client->id, client->workername);
+		LOGINFO("Invalid share from client %ld: %s", client->id, client->workername);
 	}
 	free(fname);
 	return json_boolean(result);
@@ -2599,7 +2601,7 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 		HASH_DEL(stratum_instances, client);
 		ck_wunlock(&instance_lock);
 
-		LOGINFO("Adding passthrough client %d", client->id);
+		LOGINFO("Adding passthrough client %ld", client->id);
 		snprintf(buf, 255, "passthrough=%ld", client->id);
 		send_proc(client->ckp->connector, buf);
 		free(client);
@@ -2618,7 +2620,7 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 		/* Dropping unauthorised clients here also allows the
 		 * stratifier process to restart since it will have lost all
 		 * the stratum instance data. Clients will just reconnect. */
-		LOGINFO("Dropping unauthorised client %d", client->id);
+		LOGINFO("Dropping unauthorised client %ld", client->id);
 		snprintf(buf, 255, "dropclient=%ld", client->id);
 		send_proc(client->ckp->connector, buf);
 		return;
@@ -2709,15 +2711,13 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 	json_object_clear(val);
 
 	/* Parse the message here */
-	ck_ilock(&instance_lock);
+	ck_wlock(&instance_lock);
 	instance = __instance_by_id(msg->client_id);
 	if (!instance) {
 		/* client_id instance doesn't exist yet, create one */
-		ck_ulock(&instance_lock);
 		instance = __stratum_add_instance(ckp, msg->client_id);
-		ck_dwilock(&instance_lock);
 	}
-	ck_uilock(&instance_lock);
+	ck_wunlock(&instance_lock);
 
 	parse_instance_msg(msg);
 
@@ -2770,11 +2770,11 @@ static void sshare_process(ckpool_t __maybe_unused *ckp, json_params_t *jp)
 	ck_runlock(&instance_lock);
 
 	if (unlikely(!client)) {
-		LOGINFO("Share processor failed to find client id %d in hashtable!", client_id);
+		LOGINFO("Share processor failed to find client id %ld in hashtable!", client_id);
 		goto out;
 	}
 	if (unlikely(!client->authorised)) {
-		LOGDEBUG("Client %d no longer authorised to submit shares", client_id);
+		LOGDEBUG("Client %ld no longer authorised to submit shares", client_id);
 		goto out;
 	}
 	json_msg = json_object();
@@ -3374,7 +3374,7 @@ int stratifier(proc_instance_t *pi)
 	sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
 	ckdbq = create_ckmsgq(ckp, "ckdbqueue", &ckdbq_process);
 	stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
-	if (!ckp->standalone)
+	if (!CKP_STANDALONE(ckp))
 		create_pthread(&pth_heartbeat, ckdb_heartbeat, ckp);
 
 	cklock_init(&workbase_lock);

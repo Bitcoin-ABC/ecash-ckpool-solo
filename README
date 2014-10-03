@@ -138,6 +138,7 @@ ckpool supports the following options:
 -A Standalone mode tells ckpool not to try to communicate with ckdb or log any
 ckdb requests in the rotating ckdb logs it would otherwise store. All users
 are automatically accepted without any attempt to authorise users in any way.
+This option is explicitly enabled when built without ckdb support.
 
 -c <CONFIG> tells ckpool to override its default configuration filename and
 load the specified one. If -c is not specified, ckpool looks for ckpool.conf
@@ -145,6 +146,7 @@ whereas in proxy or passthrough modes it will look for ckproxy.conf
 
 -d <CKDB-NAME> tells ckpool what the name of the ckdb process is that it should
 speak to, otherwise it will look for ckdb.
+This option does not exist when built without ckdb support.
 
 -g <GROUP> will start ckpool as the group ID specified.
 
@@ -179,6 +181,7 @@ it to scale to large hashrates. Standalone mode is Optional.
 
 -S <CKDB-SOCKDIR> tells ckpool which directory to look for the ckdb socket to
 talk to.
+This option does not exist when built without ckdb support.
 
 -s <SOCKDIR> tells ckpool which directory to place its own communication
 sockets (/tmp by default)
@@ -248,5 +251,8 @@ and 3334 in proxy mode.
 "mindiff" : Minimum diff that vardiff will allow miners to drop to. Default 1
 
 "startdiff" : Starting diff that new clients are given. Default 42
+
+"maxdiff" : Optional maximum diff that vardiff will clamp to where zero is no
+maximum.
 
 "logdir" : Which directory to store pool and client logs. Default "logs"

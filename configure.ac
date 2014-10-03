@@ -59,6 +59,7 @@ AC_ARG_WITH([ckdb],
 if test "x$ckdb" != "xno"; then
 	AC_CHECK_LIB([pq], [main],[PQ=-lpq],echo "Error: Required library libpq-dev
 		not found. Install it or disable postgresql support with --without-ckdb" && exit 1)
+	AC_DEFINE([USE_CKDB], [1], [Defined to 1 if ckdb support required])
 	PQ_LIBS="-lpq"
 else
 	PQ_LIBS=""

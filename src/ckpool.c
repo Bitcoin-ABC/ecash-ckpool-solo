@@ -983,6 +983,7 @@ static void parse_config(ckpool_t *ckp)
 	json_get_string(&ckp->serverurl, json_conf, "serverurl");
 	json_get_int64(&ckp->mindiff, json_conf, "mindiff");
 	json_get_int64(&ckp->startdiff, json_conf, "startdiff");
+	json_get_int64(&ckp->maxdiff, json_conf, "maxdiff");
 	json_get_string(&ckp->logdir, json_conf, "logdir");
 	arr_val = json_object_get(json_conf, "proxy");
 	if (arr_val && json_is_array(arr_val)) {
@@ -1058,6 +1059,7 @@ static void *watchdog(void *arg)
 	return NULL;
 }
 
+#ifdef USE_CKDB
 static struct option long_options[] = {
 	{"standalone",	no_argument,		0,	'A'},
 	{"btcsolo",	no_argument,		0,	'B'},
@@ -1076,6 +1078,22 @@ static struct option long_options[] = {
 	{"sockdir",	required_argument,	0,	's'},
 	{0, 0, 0, 0}
 };
+#else
+static struct option long_options[] = {
+	{"config",	required_argument,	0,	'c'},
+	{"group",	required_argument,	0,	'g'},
+	{"handover",	no_argument,		0,	'H'},
+	{"help",	no_argument,		0,	'h'},
+	{"killold",	no_argument,		0,	'k'},
+	{"log-shares",	no_argument,		0,	'L'},
+	{"loglevel",	required_argument,	0,	'l'},
+	{"name",	required_argument,	0,	'n'},
+	{"passthrough",	no_argument,		0,	'P'},
+	{"proxy",	no_argument,		0,	'p'},
+	{"sockdir",	required_argument,	0,	's'},
+	{0, 0, 0, 0}
+};
+#endif
 
 int main(int argc, char **argv)
 {
@@ -1200,7 +1218,7 @@ int main(int argc, char **argv)
 	}
 	trail_slash(&ckp.socket_dir);
 
-	if (!ckp.standalone) {
+	if (!CKP_STANDALONE(&ckp)) {
 		if (!ckp.ckdb_name)
 			ckp.ckdb_name = "ckdb";
 		if (!ckp.ckdb_sockdir) {

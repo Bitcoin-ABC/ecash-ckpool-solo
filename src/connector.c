@@ -186,33 +186,22 @@ static void send_client(conn_instance_t *ci, int64_t id, char *buf);
 static void parse_client_msg(conn_instance_t *ci, client_instance_t *client)
 {
 	ckpool_t *ckp = ci->pi->ckp;
-	int buflen, ret, flags = 0;
 	char msg[PAGESIZE], *eol;
-	bool moredata = false;
+	int buflen, ret;
 	json_t *val;
 
-retry:
 	buflen = PAGESIZE - client->bufofs;
-	if (moredata)
-		flags = MSG_DONTWAIT;
-	ret = recv(client->fd, client->buf + client->bufofs, buflen, flags);
+	ret = recv(client->fd, client->buf + client->bufofs, buflen, 0);
 	if (ret < 1) {
-		/* Nothing else ready to be read */
-		if (!ret && flags)
-			return;
-
 		/* We should have something to read if called since poll set
 		 * this fd's revents status so if there's nothing it means the
 		 * client has disconnected. */
-		LOGINFO("Client fd %d disconnected", client->fd);
+		LOGINFO("Client fd %d disconnected with bufofs %d ret %d errno %d %s",
+			client->fd, client->bufofs, ret, errno, errno ? strerror(errno) : "");
 		invalidate_client(ckp, ci, client);
 		return;
 	}
 	client->bufofs += ret;
-	if (client->bufofs == PAGESIZE)
-		moredata = true;
-	else
-		moredata = false;
 reparse:
 	eol = memchr(client->buf, '\n', client->bufofs);
 	if (!eol) {
@@ -221,8 +210,6 @@ reparse:
 			invalidate_client(ckp, ci, client);
 			return;
 		}
-		if (moredata)
-			goto retry;
 		return;
 	}
 
@@ -234,9 +221,10 @@ reparse:
 		return;
 	}
 	memcpy(msg, client->buf, buflen);
-	msg[buflen] = 0;
+	msg[buflen] = '\0';
 	client->bufofs -= buflen;
 	memmove(client->buf, client->buf + buflen, client->bufofs);
+	client->buf[client->bufofs] = '\0';
 	if (!(val = json_loads(msg, 0, NULL))) {
 		char *buf = strdup("Invalid JSON, disconnecting\n");
 

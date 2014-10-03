@@ -49,10 +49,13 @@ function check()
 		'Home' => ''
 	),
 	'Account' => array(
-		'Workers' => 'workers',
 		'Payments' => 'payments',
 		'Settings' => 'settings',
 		'User Settings' => 'userset'
+	),
+	'Workers' => array(
+		'Workers ' => 'workers',
+		'Management' => 'workmgt',
 	),
 	'Pool' => array(
 		'Stats' => 'stats',
