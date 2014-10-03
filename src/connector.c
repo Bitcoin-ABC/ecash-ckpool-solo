@@ -185,19 +185,33 @@ static void send_client(conn_instance_t *ci, int64_t id, char *buf);
 
 static void parse_client_msg(conn_instance_t *ci, client_instance_t *client)
 {
+	int buflen, ret, selfail = 0;
 	ckpool_t *ckp = ci->pi->ckp;
 	char msg[PAGESIZE], *eol;
-	int buflen, ret;
 	json_t *val;
 
+retry:
+	/* Select should always return positive after poll unless we have
+	 * been disconnected. On retries, decide whether we should do further
+	 * reads based on select readiness and only fail if we get an error. */
+	ret = wait_read_select(client->fd, 0);
+	if (ret < 1) {
+		if (ret > selfail)
+			return;
+		LOGINFO("Client fd %d disconnected - select fail with bufofs %d ret %d errno %d %s",
+			client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
+		invalidate_client(ckp, ci, client);
+		return;
+	}
+	selfail = -1;
 	buflen = PAGESIZE - client->bufofs;
 	ret = recv(client->fd, client->buf + client->bufofs, buflen, 0);
 	if (ret < 1) {
 		/* We should have something to read if called since poll set
 		 * this fd's revents status so if there's nothing it means the
 		 * client has disconnected. */
-		LOGINFO("Client fd %d disconnected with bufofs %d ret %d errno %d %s",
-			client->fd, client->bufofs, ret, errno, errno ? strerror(errno) : "");
+		LOGINFO("Client fd %d disconnected - recv fail with bufofs %d ret %d errno %d %s",
+			client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
 		invalidate_client(ckp, ci, client);
 		return;
 	}
@@ -210,7 +224,7 @@ reparse:
 			invalidate_client(ckp, ci, client);
 			return;
 		}
-		return;
+		goto retry;
 	}
 
 	/* Do something useful with this message now */
@@ -255,6 +269,7 @@ reparse:
 
 	if (client->bufofs)
 		goto reparse;
+	goto retry;
 }
 
 /* Waits on fds ready to read on from the list stored in conn_instance and
@@ -386,7 +401,8 @@ void *sender(void *arg)
 		ret = wait_write_select(fd, 0);
 		if (ret < 1) {
 			if (ret < 0) {
-				LOGDEBUG("Discarding message sent to interrupted client");
+				LOGINFO("Client id %d fd %d interrupted", client->id, fd);
+				invalidate_client(ckp, ci, client);
 				free(sender_send->buf);
 				free(sender_send);
 				continue;
@@ -403,7 +419,7 @@ void *sender(void *arg)
 		while (sender_send->len) {
 			ret = send(fd, sender_send->buf + ofs, sender_send->len , 0);
 			if (unlikely(ret < 0)) {
-				LOGINFO("Client id %d disconnected", client->id);
+				LOGINFO("Client id %d fd %d disconnected", client->id, fd);
 				invalidate_client(ckp, ci, client);
 				break;
 			}
