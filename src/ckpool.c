@@ -280,10 +280,10 @@ retry:
 			if (newfd > 0) {
 				LOGDEBUG("Sending new fd %d", newfd);
 				send_fd(newfd, sockd);
-				close(newfd);
+				Close(newfd);
 			} else
 				LOGWARNING("Failed to get_fd");
-			close(connfd);
+			Close(connfd);
 		} else
 			LOGWARNING("Failed to send_procmsg to connector");
 	} else if (cmdmatch(buf, "restart")) {
@@ -300,7 +300,7 @@ retry:
 		LOGINFO("Listener received unhandled message: %s", buf);
 		send_unix_msg(sockd, "unknown");
 	}
-	close(sockd);
+	Close(sockd);
 	goto retry;
 out:
 	dealloc(buf);
@@ -386,10 +386,7 @@ int read_socket_line(connsock_t *cs, int timeout)
 out:
 	if (ret < 0) {
 		dealloc(cs->buf);
-		if (cs->fd > 0) {
-			close(cs->fd);
-			cs->fd = -1;
-		}
+		Close(cs->fd);
 	}
 	return ret;
 }
@@ -447,7 +444,7 @@ bool _send_proc(proc_instance_t *pi, const char *msg, const char *file, const ch
 		LOGWARNING("Failed to send %s to socket %s", msg, path);
 	else
 		ret = true;
-	close(sockd);
+	Close(sockd);
 out:
 	if (unlikely(!ret)) {
 		LOGERR("Failure in send_proc from %s %s:%d", file, func, line);
@@ -484,7 +481,7 @@ char *_send_recv_proc(proc_instance_t *pi, const char *msg, const char *file, co
 		LOGWARNING("Failed to send %s to socket %s", msg, path);
 	else
 		buf = recv_unix_msg(sockd);
-	close(sockd);
+	Close(sockd);
 out:
 	if (unlikely(!buf))
 		LOGERR("Failure in send_recv_proc from %s %s:%d", file, func, line);
@@ -515,7 +512,7 @@ char *_send_recv_ckdb(const ckpool_t *ckp, const char *msg, const char *file, co
 		LOGWARNING("Failed to send %s to ckdb", msg);
 	else
 		buf = recv_unix_msg(sockd);
-	close(sockd);
+	Close(sockd);
 out:
 	if (unlikely(!buf))
 		LOGERR("Failure in send_recv_ckdb from %s %s:%d", file, func, line);
@@ -608,7 +605,7 @@ out_empty:
 		/* Assume that a failed request means the socket will be closed
 		 * and reopen it */
 		LOGWARNING("Reopening socket to %s:%s", cs->url, cs->port);
-		close(cs->fd);
+		Close(cs->fd);
 		cs->fd = connect_socket(cs->url, cs->port);
 	}
 out:
@@ -1320,12 +1317,12 @@ int main(int argc, char **argv)
 		if (sockd > 0 && send_unix_msg(sockd, "getfd")) {
 			ckp.oldconnfd = get_fd(sockd);
 
-			close(sockd);
+			Close(sockd);
 			sockd = open_unix_client(ckp.main.us.path);
 			send_unix_msg(sockd, "shutdown");
 			if (ckp.oldconnfd > 0)
 				LOGWARNING("Inherited old socket with new file descriptor %d!", ckp.oldconnfd);
-			close(sockd);
+			Close(sockd);
 		}
 	}
 
