@@ -415,11 +415,14 @@ bool extract_sockaddr(char *url, char **sockaddr_url, char **sockaddr_port);
 void keep_sockalive(int fd);
 void noblock_socket(int fd);
 void block_socket(int fd);
+void _Close(int *fd);
+#define Close(FD) _Close(&FD)
 int bind_socket(char *url, char *port);
 int connect_socket(char *url, char *port);
 int write_socket(int fd, const void *buf, size_t nbyte);
 void empty_socket(int fd);
-void close_unix_socket(const int sockd, const char *server_path);
+void _close_unix_socket(int *sockd, const char *server_path);
+#define close_unix_socket(sockd, server_path) _close_unix_socket(&sockd, server_path)
 int _open_unix_server(const char *server_path, const char *file, const char *func, const int line);
 #define open_unix_server(server_path) _open_unix_server(server_path, __FILE__, __func__, __LINE__)
 int _open_unix_client(const char *server_path, const char *file, const char *func, const int line);

@@ -432,6 +432,15 @@ void block_socket(int fd)
 	fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 }
 
+void _Close(int *fd)
+{
+	if (*fd < 0)
+		return;
+	LOGDEBUG("Closing file handle %d", *fd);
+	close(*fd);
+	*fd = -1;
+}
+
 int bind_socket(char *url, char *port)
 {
 	struct addrinfo servinfobase, *servinfo, hints, *p;
@@ -460,8 +469,7 @@ int bind_socket(char *url, char *port)
 	ret = bind(sockd, p->ai_addr, p->ai_addrlen);
 	if (ret < 0) {
 		LOGWARNING("Failed to bind socket for %s:%s", url, port);
-		close(sockd);
-		sockd = -1;
+		Close(sockd);
 		goto out;
 	}
 
@@ -500,7 +508,7 @@ int connect_socket(char *url, char *port)
 			int selret;
 
 			if (!sock_connecting()) {
-				close(sockd);
+				Close(sockd);
 				LOGDEBUG("Failed sock connect");
 				continue;
 			}
@@ -517,8 +525,7 @@ int connect_socket(char *url, char *port)
 					break;
 				}
 			}
-			close(sockd);
-			sockd = -1;
+			Close(sockd);
 			LOGDEBUG("Select timeout/failed connect");
 			continue;
 		}
@@ -575,13 +582,10 @@ void empty_socket(int fd)
 	} while (ret > 0);
 }
 
-void close_unix_socket(const int sockd, const char *server_path)
+void _close_unix_socket(int *sockd, const char *server_path)
 {
-	int ret;
-
-	ret = close(sockd);
-	if (unlikely(ret < 0))
-		LOGERR("Failed to close sock %d %s", sockd, server_path);
+	LOGDEBUG("Closing unix socket %d %s", *sockd, server_path);
+	_Close(sockd);
 }
 
 int _open_unix_server(const char *server_path, const char *file, const char *func, const int line)
@@ -681,8 +685,7 @@ int _open_unix_client(const char *server_path, const char *file, const char *fun
 	ret = connect(sockd, (struct sockaddr *)&serveraddr, sizeof(serveraddr));
 	if (unlikely(ret < 0)) {
 		LOGERR("Failed to bind to socket in open_unix_client");
-		close(sockd);
-		sockd = -1;
+		Close(sockd);
 		goto out;
 	}
 
@@ -951,7 +954,7 @@ int _get_fd(int sockd, const char *file, const char *func, const int line)
 		goto out;
 	}
 out:
-	close(sockd);
+	Close(sockd);
 	cm = (int *)CMSG_DATA(cmptr);
 	newfd = *cm;
 	free(cmptr);
@@ -1032,7 +1035,7 @@ bool rotating_log(const char *path, const char *msg)
 	}
 	fp = fdopen(fd, "ae");
 	if (unlikely(!fp)) {
-		close(fd);
+		Close(fd);
 		LOGERR("Failed to fdopen %s in rotating_log!", filename);
 		goto stageleft;
 	}
