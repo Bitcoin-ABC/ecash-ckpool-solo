@@ -123,7 +123,7 @@ retry:
 		default:
 			LOGWARNING("Unknown INET type for client %d on socket %d",
 				   ci->nfds, fd);
-			close(fd);
+			Close(fd);
 			free(client);
 			goto retry;
 	}
@@ -153,11 +153,10 @@ static int drop_client(conn_instance_t *ci, client_instance_t *client)
 	ck_wlock(&ci->lock);
 	fd = client->fd;
 	if (fd != -1) {
-		close(fd);
+		Close(client->fd);
 		HASH_DEL(clients, client);
 		HASH_DELETE(fdhh, fdclients, client);
 		LL_PREPEND(dead_clients, client);
-		client->fd = -1;
 	}
 	ck_wunlock(&ci->lock);
 
@@ -521,7 +520,7 @@ static int connector_loop(proc_instance_t *pi, conn_instance_t *ci)
 	LOGWARNING("%s connector ready", ckp->name);
 
 retry:
-	close(sockd);
+	Close(sockd);
 	sockd = accept(us->sockd, NULL, NULL);
 	if (sockd < 0) {
 		LOGEMERG("Failed to accept on connector socket, exiting");
@@ -625,7 +624,7 @@ retry:
 
 	goto retry;
 out:
-	close(sockd);
+	Close(sockd);
 	dealloc(buf);
 	return ret;
 }
@@ -688,7 +687,7 @@ int connector(proc_instance_t *pi)
 		} while (++tries < 25);
 		if (ret < 0) {
 			LOGERR("Connector failed to bind to socket for 2 minutes");
-			close(sockd);
+			Close(sockd);
 			goto out;
 		}
 	}
@@ -698,7 +697,7 @@ int connector(proc_instance_t *pi)
 	ret = listen(sockd, 10);
 	if (ret < 0) {
 		LOGERR("Connector failed to listen on socket");
-		close(sockd);
+		Close(sockd);
 		goto out;
 	}
 
