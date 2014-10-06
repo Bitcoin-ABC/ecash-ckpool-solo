@@ -82,16 +82,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 		else
 		{
 			$totrate += $uhr;
-			$uhr /= 10000000;
-			if ($uhr < 0.01)
-				$uhr = '0GHs';
-			else
-			{
-				if ($uhr < 100000)
-					$uhr = number_format(round($uhr)/100,2).'GHs';
-				else
-					$uhr = number_format(round($uhr/1000)/100,2).'THs';
-			}
+			$uhr = dsprate($uhr);
 		}
 		$pg .= "<td class=dr>$uhr</td>";
 
@@ -106,16 +97,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 function worktotal($offset, $totshare, $totdiff, $totinvalid, $totrate, $blockacc, $blockreward)
 {
  $pg = '';
- $totrate /= 10000000;
- if ($totrate < 0.01)
-	$totrate = '0GHs';
- else
- {
-	if ($totrate < 100000)
-		$totrate = number_format(round($totrate)/100,2).'GHs';
-	else
-		$totrate = number_format(round($totrate/1000)/100,2).'THs';
- }
+ $totrate = dsprate($totrate);
  if (($offset % 2) == 0)
 	$row = 'even';
  else

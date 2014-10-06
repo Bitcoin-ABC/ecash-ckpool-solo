@@ -5,21 +5,21 @@ include_once('email.php');
 #
 function doregres($data, $u)
 {
- if (isset($data['user']))
-	$user = htmlspecialchars($data['user']);
+ if (isset($data['data']['user']))
+	$user = htmlspecialchars($data['data']['user']);
  else
 	$user = '';
 
- if (isset($data['mail']))
-	$mail = htmlspecialchars($data['mail']);
+ if (isset($data['data']['mail']))
+	$mail = htmlspecialchars($data['data']['mail']);
  else
 	$mail = '';
 
  $pg = '<br><br><table cellpadding=5 cellspacing=0 border=1><tr><td class=dc>';
 
  $pg .= '<h1>Register</h1>';
- if (isset($data['error']))
-	$pg .= "<br><b>".$data['error']." - please try again</b><br><br>";
+ if (isset($data['data']['error']))
+	$pg .= "<br><b>".$data['data']['error']." - please try again</b><br><br>";
  $pg .= makeForm('');
  $pg .= "
 <table>
@@ -65,8 +65,8 @@ An Email will be sent to you, to let you reset your password</font></td></tr>
 #
 function doreg2($data)
 {
- if (isset($data['user']))
-	$user = htmlspecialchars($data['user']);
+ if (isset($data['data']['user']))
+	$user = htmlspecialchars($data['data']['user']);
  else
 	$user = '';
 
@@ -74,8 +74,8 @@ function doreg2($data)
 // $pg .= '<br>You will receive an email shortly to verify your account';
  $pg .= '<br>Your account is registered and ready to mine.';
  $pg .= '<br>Choose your own worker names in cgminer.';
- $pg .= '<br>Worker names must start with your username like';
- $pg .= ": <span class=hil>${user}_</span> or <span class=hil>${user}.</span>";
+ $pg .= '<br>Worker names must start with your username and a dot or an underscore';
+ $pg .= "<br>e.g. <span class=hil>${user}_worker1</span> or <span class=hil>${user}.worker7</span>";
  return $pg;
 }
 #
@@ -138,8 +138,8 @@ function try_reg($page, $menu, $name, $u)
 #
 function doreset2($data)
 {
- $user = $data['user'];
- $email = $data['email'];
+ $user = $data['data']['user'];
+ $email = $data['data']['email'];
 
  $emailinfo = getOpts($user, emailOptList());
  if ($emailinfo['STATUS'] != 'ok')
@@ -154,7 +154,7 @@ function doreset2($data)
  {
 	// This line $code = isn't an attempt at security -
 	// it's simply to ensure the username is readable when we get it back
-	$code = bin2hex($data['user']). '_';
+	$code = bin2hex($data['data']['user']). '_';
 
 	// A code that's large enough to not be worth guessing
 	$ran = $ans['STAMP'].$user.$email.rand(100000000,999999999);

@@ -145,11 +145,10 @@ h1 {margin-top: 20px; float:middle; font-size: 20px;}
  return $head;
 }
 #
-function pgtop($dotop, $user, $douser)
+function pgtop($info, $dotop, $user, $douser)
 {
  global $site_title;
 
- $info = homeInfo($user);
  $phr = '?THs';
  $plb = '?';
  $nlb = '?';
@@ -164,21 +163,15 @@ function pgtop($dotop, $user, $douser)
 	if (isset($info['p_hashrate5m']))
 		$phr = $info['p_hashrate5m'];
 
-	if (isset($info['p_elapsed'])
-	and isset($info['p_hashrate1hr'])
-	and $info['p_elapsed'] > 3600)
-		$phr = $info['p_hashrate1hr'];
+//	if (isset($info['p_elapsed'])
+//	and isset($info['p_hashrate1hr'])
+//	and $info['p_elapsed'] > 3600)
+//		$phr = $info['p_hashrate1hr'];
 
 	if ($phr == '?')
 		$phr = '?THs';
 	else
-	{
-		$phr /= 10000000;
-		if ($phr < 100000)
-			$phr = (round($phr)/100).'GHs';
-		else
-			$phr = (round($phr/1000)/100).'THs';
-	}
+		$phr = dsprate($phr);
 
 	if (isset($info['lastblock']))
 	{
@@ -254,13 +247,7 @@ function pgtop($dotop, $user, $douser)
 		if ($uhr == '?')
 			$uhr = '?GHs';
 		else
-		{
-			$uhr /= 10000000;
-			if ($uhr < 100000)
-				$uhr = (round($uhr)/100).'GHs';
-			else
-				$uhr = (round($uhr/1000)/100).'THs';
-		}
+			$uhr = dsprate($uhr);
 	}
 
 	if (isset($info['u_hashrate1hr'])
@@ -272,11 +259,7 @@ function pgtop($dotop, $user, $douser)
 			$u1hr = '';
 		else
 		{
-			$u1hr /= 10000000;
-			if ($u1hr < 100000)
-				$u1hr = '/'.(round($u1hr)/100).'GHs';
-			else
-				$u1hr = '/'.(round($u1hr/1000)/100).'THs';
+			$u1hr = dsprate($u1hr);
 
 			if (substr($u1hr, -3) == substr($uhr, -3))
 				$uhr = substr($uhr, 0, -3);
@@ -395,7 +378,7 @@ function pgmenu($menus)
  return $ret;
 }
 #
-function pgbody($page, $menu, $dotop, $user, $douser)
+function pgbody($info, $page, $menu, $dotop, $user, $douser)
 {
  $body = '<body onload="jst()"';
  if ($page == 'index')
@@ -407,7 +390,7 @@ function pgbody($page, $menu, $dotop, $user, $douser)
  $body .=    '<table border=0 cellpadding=0 cellspacing=0 width=94%>';
 
  $body .=     '<tr><td>';
- $body .= pgtop($dotop, $user, $douser);
+ $body .= pgtop($info, $dotop, $user, $douser);
  $body .=     '</td></tr>';
 
  $body .=     '<tr><td>';
@@ -449,8 +432,13 @@ function gopage($data, $pagefun, $page, $menu, $name, $user, $ispage = true, $do
  else
 	$pg = '';
 
+ $info = homeInfo($user);
+
  if ($ispage == true)
-	$pg .= $pagefun($data, $user);
+ {
+	$both = array('info' => $info, 'data' => $data);
+	$pg .= $pagefun($both, $user);
+ }
  else
 	$pg .= $pagefun;
 
@@ -458,7 +446,7 @@ function gopage($data, $pagefun, $page, $menu, $name, $user, $ispage = true, $do
 //	unset($_SESSION['logkey']);
 
  $head = pghead($script_marker, $name);
- $body = pgbody($page, $menu, $dotop, $user, $douser);
+ $body = pgbody($info, $page, $menu, $dotop, $user, $douser);
  $foot = pgfoot();
 
  if ($dbg === true)

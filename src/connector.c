@@ -92,7 +92,7 @@ void *acceptor(void *arg)
 	conn_instance_t *ci = (conn_instance_t *)arg;
 	client_instance_t *client, *old_client;
 	socklen_t address_len;
-	int fd;
+	int fd, port;
 
 	rename_proc("acceptor");
 
@@ -115,10 +115,12 @@ retry:
 		case AF_INET:
 			inet4_in = (struct sockaddr_in *)&client->address;
 			inet_ntop(AF_INET, &inet4_in->sin_addr, client->address_name, INET6_ADDRSTRLEN);
+			port = htons(inet4_in->sin_port);
 			break;
 		case AF_INET6:
 			inet6_in = (struct sockaddr_in6 *)&client->address;
 			inet_ntop(AF_INET6, &inet6_in->sin6_addr, client->address_name, INET6_ADDRSTRLEN);
+			port = htons(inet6_in->sin6_port);
 			break;
 		default:
 			LOGWARNING("Unknown INET type for client %d on socket %d",
@@ -129,8 +131,9 @@ retry:
 	}
 
 	keep_sockalive(fd);
+	nolinger_socket(fd);
 
-	LOGINFO("Connected new client %d on socket %d from %s", ci->nfds, fd, client->address_name);
+	LOGINFO("Connected new client %d on socket %d from %s:%d", ci->nfds, fd, client->address_name, port);
 
 	client->fd = fd;
 
@@ -169,11 +172,8 @@ static int drop_client(conn_instance_t *ci, client_instance_t *client)
 static void invalidate_client(ckpool_t *ckp, conn_instance_t *ci, client_instance_t *client)
 {
 	char buf[256];
-	int fd;
 
-	fd = drop_client(ci, client);
-	if (fd == -1)
-		return;
+	drop_client(ci, client);
 	if (ckp->passthrough)
 		return;
 	sprintf(buf, "dropclient=%ld", client->id);
@@ -289,6 +289,11 @@ retry:
 
 	ck_rlock(&ci->lock);
 	HASH_ITER(fdhh, fdclients, client, tmp) {
+		if (unlikely(client->fd == -1)) {
+			LOGWARNING("Client id %d is still in fdclients hashtable with invalidated fd!",
+				   client->id);
+			continue;
+		}
 		fds[nfds].fd = client->fd;
 		fds[nfds].events = POLLIN;
 		fds[nfds].revents = 0;
@@ -300,7 +305,7 @@ retry:
 		cksleep_ms(100);
 		goto retry;
 	}
-	ret = poll(fds, nfds, 1000);
+	ret = poll(fds, nfds, 100);
 	if (unlikely(ret < 0)) {
 		LOGERR("Failed to poll in receiver");
 		goto out;
@@ -459,7 +464,8 @@ static void send_client(conn_instance_t *ci, int64_t id, char *buf)
 
 	if (unlikely(fd == -1)) {
 		if (client) {
-			LOGINFO("Client id %ld disconnected", id);
+			/* This shouldn't happen */
+			LOGWARNING("Client id %ld disconnected but fd already invalidated!", id);
 			invalidate_client(ci->pi->ckp, ci, client);
 		} else
 			LOGINFO("Connector failed to find client id %ld to send to", id);

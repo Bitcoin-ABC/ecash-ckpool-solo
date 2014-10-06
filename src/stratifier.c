@@ -287,6 +287,7 @@ struct stratum_instance {
 	int ssdc; /* Shares since diff change */
 	tv_t first_share;
 	tv_t last_share;
+	time_t first_invalid; /* Time of first invalid in run of non stale rejects */
 	time_t start_time;
 
 	char address[INET6_ADDRSTRLEN];
@@ -294,6 +295,9 @@ struct stratum_instance {
 	bool authorised;
 	bool idle;
 	bool notified_idle;
+	int reject;	/* Indicator that this client is having a run of rejects
+			 * or other problem and should be dropped lazily if
+			 * this is set to 2 */
 
 	user_instance_t *user_instance;
 	worker_instance_t *worker_instance;
@@ -1511,6 +1515,7 @@ static json_t *parse_subscribe(stratum_instance_t *client, int64_t client_id, js
 		/* Create a new extranonce1 based on a uint64_t pointer */
 		if (!new_enonce1(client)) {
 			stratum_send_message(client, "Pool full of clients");
+			client->reject = 2;
 			return json_string("proxy full");
 		}
 		LOGINFO("Set new subscription %ld to new enonce1 %s", client->id,
@@ -2174,13 +2179,15 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	char idstring[20];
 	uint32_t ntime32;
 	uchar hash[32];
-	int64_t id;
+	time_t now_t;
 	json_t *val;
+	int64_t id;
 	ts_t now;
 	FILE *fp;
 	int len;
 
 	ts_realtime(&now);
+	now_t = now.tv_sec;
 	sprintf(cdfield, "%lu,%lu", now.tv_sec, now.tv_nsec);
 
 	if (unlikely(!json_is_array(params_val))) {
@@ -2354,6 +2361,26 @@ out_unlock:
 	}
 	ckdbq_add(ckp, ID_SHARES, val);
 out:
+	if ((!result && !submit) || !share) {
+		/* Is this the first in a run of invalids? */
+		if (client->first_invalid < client->last_share.tv_sec || !client->first_invalid)
+			client->first_invalid = now_t;
+		else if (client->first_invalid && client->first_invalid < now_t - 120) {
+			LOGNOTICE("Client %d rejecting for 120s, disconnecting", client->id);
+			stratum_send_message(client, "Disconnecting for continuous invalid shares");
+			client->reject = 2;
+		} else if (client->first_invalid && client->first_invalid < now_t - 60) {
+			if (!client->reject) {
+				LOGINFO("Client %d rejecting for 60s, sending diff", client->id);
+				stratum_send_diff(client);
+				client->reject = 1;
+			}
+		}
+	} else {
+		client->first_invalid = 0;
+		client->reject = 0;
+	}
+
 	if (!share) {
 		JSON_CPACK(val, "{sI,ss,ss,sI,ss,ss,so,si,ss,ss,ss,ss}",
 				"clientid", client->id,
@@ -2565,6 +2592,13 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 
 	if (unlikely(!client)) {
 		LOGINFO("Failed to find client id %ld in hashtable!", client_id);
+		return;
+	}
+
+	if (unlikely(client->reject == 2)) {
+		LOGINFO("Dropping client %d tagged for lazy invalidation", client_id);
+		snprintf(buf, 255, "dropclient=%ld", client->id);
+		send_proc(client->ckp->connector, buf);
 		return;
 	}
 
@@ -3041,7 +3075,9 @@ static void *statsupdate(void *arg)
 	sleep(1);
 
 	while (42) {
-		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080, tdiff, bias, bias5, bias60, bias1440;
+		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080;
+		double bias, bias5, bias60, bias1440;
+		double tdiff, per_tdiff;
 		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
 		char suffix360[16], suffix1440[16], suffix10080[16];
 		user_instance_t *instance, *tmpuser;
@@ -3136,15 +3172,16 @@ static void *statsupdate(void *arg)
 			if (!client->authorised)
 				continue;
 
+			per_tdiff = tvdiff(&now, &client->last_share);
 			/* Decay times per connected instance */
-			if (now.tv_sec - client->last_share.tv_sec > 60) {
+			if (per_tdiff > 60) {
 				/* No shares for over a minute, decay to 0 */
-				decay_time(&client->dsps1, 0, tdiff, 60);
-				decay_time(&client->dsps5, 0, tdiff, 300);
-				decay_time(&client->dsps60, 0, tdiff, 3600);
-				decay_time(&client->dsps1440, 0, tdiff, 86400);
-				decay_time(&client->dsps10080, 0, tdiff, 604800);
-				if (now.tv_sec - client->last_share.tv_sec > 600)
+				decay_time(&client->dsps1, 0, per_tdiff, 60);
+				decay_time(&client->dsps5, 0, per_tdiff, 300);
+				decay_time(&client->dsps60, 0, per_tdiff, 3600);
+				decay_time(&client->dsps1440, 0, per_tdiff, 86400);
+				decay_time(&client->dsps10080, 0, per_tdiff, 604800);
+				if (per_tdiff > 600)
 					client->idle = true;
 				continue;
 			}
@@ -3156,11 +3193,12 @@ static void *statsupdate(void *arg)
 
 			/* Decay times per worker */
 			DL_FOREACH(instance->worker_instances, worker) {
-				if (now.tv_sec - worker->last_share.tv_sec > 60) {
-					decay_time(&worker->dsps1, 0, tdiff, 60);
-					decay_time(&worker->dsps5, 0, tdiff, 300);
-					decay_time(&worker->dsps60, 0, tdiff, 3600);
-					decay_time(&worker->dsps1440, 0, tdiff, 86400);
+				per_tdiff = tvdiff(&now, &worker->last_share);
+				if (per_tdiff > 60) {
+					decay_time(&worker->dsps1, 0, per_tdiff, 60);
+					decay_time(&worker->dsps5, 0, per_tdiff, 300);
+					decay_time(&worker->dsps60, 0, per_tdiff, 3600);
+					decay_time(&worker->dsps1440, 0, per_tdiff, 86400);
 				}
 				ghs = worker->dsps1 * nonces;
 				suffix_string(ghs, suffix1, 16, 0);
@@ -3194,12 +3232,13 @@ static void *statsupdate(void *arg)
 			}
 
 			/* Decay times per user */
-			if (now.tv_sec - instance->last_share.tv_sec > 60) {
-				decay_time(&instance->dsps1, 0, tdiff, 60);
-				decay_time(&instance->dsps5, 0, tdiff, 300);
-				decay_time(&instance->dsps60, 0, tdiff, 3600);
-				decay_time(&instance->dsps1440, 0, tdiff, 86400);
-				decay_time(&instance->dsps10080, 0, tdiff, 604800);
+			per_tdiff = tvdiff(&now, &instance->last_share);
+			if (per_tdiff > 60) {
+				decay_time(&instance->dsps1, 0, per_tdiff, 60);
+				decay_time(&instance->dsps5, 0, per_tdiff, 300);
+				decay_time(&instance->dsps60, 0, per_tdiff, 3600);
+				decay_time(&instance->dsps1440, 0, per_tdiff, 86400);
+				decay_time(&instance->dsps10080, 0, per_tdiff, 604800);
 				idle = true;
 			}
 			ghs = instance->dsps1 * nonces;

@@ -87,6 +87,22 @@ function siprefmt($amt)
  return number_format($amt, $dot).$sipre[$pref];
 }
 #
+function dsprate($hr)
+{
+ $hr /= 10000000;
+ if ($hr < 100000)
+ {
+	if ($hr < 0.01)
+		$hr = '0GHs';
+	else
+		$hr = number_format(round($hr)/100, 2).'GHs';
+ }
+ else
+	$hr = number_format(round($hr/1000)/100, 2).'THs';
+
+ return $hr;
+}
+#
 function difffmt($amt)
 {
  return siprefmt($amt);

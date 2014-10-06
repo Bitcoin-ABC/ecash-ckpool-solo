@@ -413,6 +413,7 @@ static inline bool sock_timeout(void)
 
 bool extract_sockaddr(char *url, char **sockaddr_url, char **sockaddr_port);
 void keep_sockalive(int fd);
+void nolinger_socket(int fd);
 void noblock_socket(int fd);
 void block_socket(int fd);
 void _Close(int *fd);

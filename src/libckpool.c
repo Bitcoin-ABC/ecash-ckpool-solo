@@ -418,6 +418,13 @@ void keep_sockalive(int fd)
 	setsockopt(fd, SOL_TCP, TCP_KEEPINTVL, &tcp_keepintvl, sizeof(tcp_keepintvl));
 }
 
+void nolinger_socket(int fd)
+{
+	const struct linger so_linger = { 1, 0 };
+
+	setsockopt(fd, SOL_SOCKET, SO_LINGER, &so_linger, sizeof(so_linger));
+}
+
 void noblock_socket(int fd)
 {
 	int flags = fcntl(fd, F_GETFL, 0);
@@ -437,7 +444,8 @@ void _Close(int *fd)
 	if (*fd < 0)
 		return;
 	LOGDEBUG("Closing file handle %d", *fd);
-	close(*fd);
+	if (unlikely(close(*fd)))
+		LOGWARNING("Close of fd %d failed with errno %d:%s", *fd, errno, strerror(errno));
 	*fd = -1;
 }
 

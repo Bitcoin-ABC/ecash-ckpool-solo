@@ -4456,6 +4456,7 @@ unparam:
 	return ok;
 }
 
+// This is to RAM. The summariser calls the DB I/O functions for userstats
 bool userstats_add(char *poolinstance, char *elapsed, char *username,
 			char *workername, char *hashrate, char *hashrate5m,
 			char *hashrate1hr, char *hashrate24hr, bool idle,

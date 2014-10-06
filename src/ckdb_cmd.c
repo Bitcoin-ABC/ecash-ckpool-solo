@@ -9,7 +9,6 @@
 
 #include "ckdb.h"
 
-
 static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 			 char *code, char *inet, __maybe_unused tv_t *notcd,
 			 K_TREE *trf_root)
@@ -53,7 +52,7 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_ITEM *i_username, *i_oldhash, *i_newhash, *u_item;
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
-	bool ok = false;
+	bool ok = true;
 	char *oldhash;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
@@ -2007,6 +2006,10 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 		snprintf(tmp, sizeof(tmp), "workers=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 
+		double_to_buf(poolstats->hashrate, reply, siz);
+		snprintf(tmp, sizeof(tmp), "p_hashrate=%s%c", reply, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
 		double_to_buf(poolstats->hashrate5m, reply, siz);
 		snprintf(tmp, sizeof(tmp), "p_hashrate5m=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
@@ -2015,13 +2018,24 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 		snprintf(tmp, sizeof(tmp), "p_hashrate1hr=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 
+		double_to_buf(poolstats->hashrate24hr, reply, siz);
+		snprintf(tmp, sizeof(tmp), "p_hashrate24hr=%s%c", reply, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
 		bigint_to_buf(poolstats->elapsed, reply, siz);
 		snprintf(tmp, sizeof(tmp), "p_elapsed=%s%c", reply, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
+
+		tvs_to_buf(&(poolstats->createdate), reply, siz);
+		snprintf(tmp, sizeof(tmp), "p_statsdate=%s%c", reply, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
 	} else {
-		snprintf(tmp, sizeof(tmp), "users=?%cworkers=?%cp_hashrate5m=?%c"
-					   "p_hashrate1hr=?%cp_elapsed=?%c",
-					   FLDSEP, FLDSEP, FLDSEP, FLDSEP, FLDSEP);
+		snprintf(tmp, sizeof(tmp), "users=?%cworkers=?%cp_hashrate=?%c"
+					   "p_hashrate5m=?%cp_hashrate1hr=?%c"
+					   "p_hashrate24hr=?%cp_elapsed=?%c"
+					   "p_statsdate=?%c",
+					   FLDSEP, FLDSEP, FLDSEP, FLDSEP,
+					   FLDSEP, FLDSEP, FLDSEP, FLDSEP);
 		APPEND_REALLOC(buf, off, len, tmp);
 	}
 
@@ -3292,7 +3306,12 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
  *	loglevel.ID
  *  sets the loglevel to atoi(ID)
  *  Without an ID, it just reports the current value
+ *
+ *  createdate = true
+ *   means that the data sent must contain a fld or json fld called createdate
  */
+
+//	  cmd_val	cmd_str		noid	createdate func		access
 struct CMDS ckdb_cmds[] = {
 	{ CMD_SHUTDOWN,	"shutdown",	true,	false,	NULL,		ACCESS_SYSTEM },
 	{ CMD_PING,	"ping",		true,	false,	NULL,		ACCESS_SYSTEM ACCESS_POOL ACCESS_WEB },

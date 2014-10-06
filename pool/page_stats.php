@@ -12,6 +12,50 @@ function dostats($data, $user)
 {
  $pg = '<h1>Pool Stats</h1>';
 
+ if (isset($data['info']) && $data['info'] !== false)
+ {
+	$info = $data['info'];
+	$dsp = '?THs';
+	$dsp5m = '?THs';
+	$dsp1hr = '?THs';
+	$dsp24hr = '?THs';
+
+	if (isset($info['p_hashrate']))
+	{
+		$hr = $info['p_hashrate'];
+		if ($hr != '?')
+			$dsp = dsprate($hr);
+	}
+
+	if (isset($info['p_hashrate5m']))
+	{
+		$hr = $info['p_hashrate5m'];
+		if ($hr != '?')
+			$dsp5m = dsprate($hr);
+	}
+
+	if (isset($info['p_hashrate1hr']))
+	{
+		$hr = $info['p_hashrate1hr'];
+		if ($hr != '?')
+			$dsp1hr = dsprate($hr);
+	}
+
+	if (isset($info['p_hashrate24hr']))
+	{
+		$hr = $info['p_hashrate24hr'];
+		if ($hr != '?')
+			$dsp24hr = dsprate($hr);
+	}
+
+	$pg .= '<table cellpadding=8 cellspacing=0 border=0><tr>';
+	$pg .= "<td>Pool Hashrate: $dsp</td>";
+	$pg .= "<td>5m: $dsp5m</td>";
+	$pg .= "<td>1hr: $dsp1hr</td>";
+	$pg .= "<td>24hr: $dsp24hr</td>";
+	$pg .= '</tr></table><br>';
+ }
+
  $ans = getAllUsers($user);
 
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
@@ -45,17 +89,7 @@ function dostats($data, $user)
 		if ($uhr == '?')
 			$dsp = '?GHs';
 		else
-		{
-			$uhr /= 10000000;
-			if ($uhr < 100000)
-				$rate = 'G';
-			else
-			{
-				$rate = 'T';
-				$uhr /= 1000;
-			}
-			$dsp = number_format($uhr/100, 2).$rate.'Hs';
-		}
+			$dsp = dsprate($uhr);
 		$pg .= "<td class=dr>$dsp</td>";
 		$pg .= "</tr>\n";
 	}
