@@ -1007,6 +1007,10 @@ static void send_notify(proxy_instance_t *proxi, int *sockd)
 
 	mutex_lock(&proxi->notify_lock);
 	ni = proxi->current_notify;
+	if (unlikely(!ni)) {
+		mutex_unlock(&proxi->notify_lock);
+		goto out_close;
+	}
 	for (i = 0; i < ni->merkles; i++)
 		json_array_append_new(merkle_arr, json_string(&ni->merklehash[i][0]));
 	/* Use our own jobid instead of the server's one for easy lookup */
@@ -1022,6 +1026,7 @@ static void send_notify(proxy_instance_t *proxi, int *sockd)
 	json_decref(json_msg);
 	send_unix_msg(*sockd, msg);
 	free(msg);
+out_close:
 	_Close(sockd);
 }
 
