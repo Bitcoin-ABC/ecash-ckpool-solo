@@ -1,9 +1,26 @@
 <?php
 #
-# See function sendsockreply($fun, $msg) at the end
+# See function sendsockreply($fun, $msg, $tmo) at the end
+#
+function socktmo($socket, $factor)
+{
+ # default timeout factor
+ if ($factor === false)
+	$factor = 1;
+
+ # on a slower server increase this base value
+ $tmo = 2;
+
+ $usetmo = $tmo * $factor;
+ $sec = floor($usetmo);
+ $usec = floor(($usetmo - $sec) * 1000000);
+ $tmoval = array('sec' => $sec, 'usec' => $use);
+ socket_set_option($socket, SOL_SOCKET, SO_SNDTIMEO, $tmo);
+ socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, $tmo);
+}
 #
 # Note that $port in AF_UNIX should be the socket filename
-function _getsock($fun, $port, $unix=true)
+function _getsock($fun, $port, $tmo, $unix=true)
 {
  $socket = null;
  if ($unix === true)
@@ -12,9 +29,10 @@ function _getsock($fun, $port, $unix=true)
 	 $socket = socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
  if ($socket === false || $socket === null)
  {
-	$sockerr = socket_strerror(socket_last_error());
+	$sle = socket_last_error();
+	$sockerr = socket_strerror($sle);
 	$msg = "$fun() _getsock() create($port) failed";
-	error_log("CKPERR: $msg '$sockerr'");
+	error_log("CKPERR: $msg ($sle) '$sockerr'");
 	return false;
  }
 
@@ -43,60 +61,76 @@ function _getsock($fun, $port, $unix=true)
 		}
 		if ($res === false)
 		{
-			$sockerr = socket_strerror(socket_last_error());
+			$sle = socket_last_error();
+			$sockerr = socket_strerror($sle);
 			if ($unix === true)
 				$msg = "$fun() _getsock() connect($port) failed 3x";
 			else
 				$msg = "$fun() _getsock() connect($port) failed 3x (+2+5s sleep)";
-			error_log("CKPERR: $msg '$sockerr'");
+			error_log("CKPERR: $msg ($sle) '$sockerr'");
 			socket_close($socket);
 			return false;
 		}
 	}
  }
+ # Avoid getting locked up for long
+ socktmo($socket, $tmo);
+ # Enable timeout
+ socket_set_block($socket);
  return $socket;
 }
 #
-function getsock($fun)
+function getsock($fun, $tmo)
 {
- return _getsock($fun, '/opt/ckdb/listener');
+ return _getsock($fun, '/opt/ckdb/listener', $tmo);
 }
 #
 function readsockline($fun, $socket)
 {
- $siz = socket_read($socket, 4);
+ $siz = socket_read($socket, 4, PHP_BINARY_READ);
  if ($siz === false)
  {
-	$sockerr = socket_strerror(socket_last_error());
+	$sle = socket_last_error();
+	$sockerr = socket_strerror($sle);
 	$msg = "$fun() readsockline() failed";
-	error_log("CKPERR: $msg '$sockerr'");
+	error_log("CKPERR: $msg ($sle) '$sockerr'");
 	return false;
  }
  if (strlen($siz) != 4)
  {
-	$msg = "$fun() readsockline() short read $siz vs ".strlen($siz);
+	$msg = "$fun() readsockline() short 4 read got ".strlen($siz);
 	error_log("CKPERR: $msg");
 	return false;
  }
  $len = ord($siz[0]) + ord($siz[1])*256 +
 	ord($siz[2])*65536 + ord($siz[3])*16777216;
- $line = socket_read($socket, $len);
- if ($line === false)
+ $ans = '';
+ $left = $len;
+ while ($left > 0)
  {
-	$sockerr = socket_strerror(socket_last_error());
-	$msg = "$fun() readsockline() failed";
-	error_log("CKPERR: $msg '$sockerr'");
-	return false;
- }
- else
-	if (strlen($line) != $len)
+	$line = socket_read($socket, $left, PHP_BINARY_READ);
+	if ($line === false)
 	{
-		$msg = "$fun() readsockline() incomplete ($len)";
-		error_log("CKPERR: $msg '$line'");
+		$sle = socket_last_error();
+		$sockerr = socket_strerror($sle);
+		$msg = "$fun() readsockline() $left failed (len=$len)";
+		error_log("CKPERR: $msg ($sle) '$sockerr'");
 		return false;
 	}
-
- return $line;
+	$red = strlen($line);
+	if ($red == 0)
+	{
+		$msg = "$fun() readsockline() incomplete (".($len-$left)." vs $len)";
+		$sub = "'".substr($line, 0, 30)."'";
+		if (strlen($line) > 30)
+			$sub .= '...';
+		error_log("CKPERR: $msg $sub");
+		return false;
+	}
+	$left -= $red;
+	$ans .= $line;
+ }
+ return $ans;
 }
 #
 function dosend($fun, $socket, $msg)
@@ -115,7 +149,9 @@ function dosend($fun, $socket, $msg)
 
  $msg = $siz . $msg;
 
- $left = $len + 4;
+ $len += 4;
+ $left = $len;
+ $ret = false;
  while ($left > 0)
  {
 	$res = socket_write($socket, substr($msg, 0 - $left), $left);
@@ -126,8 +162,13 @@ function dosend($fun, $socket, $msg)
 		error_log("CKPERR: $msg '$sockerr'");
 		break;
 	}
-	else
-		$left -= $res;
+	if ($res == 0)
+	{
+		$msg = "$fun() sendsock() incomplete (".($len-$left)." vs $len)";
+		error_log("CKPERR: $msg");
+		break;
+	}
+	$left -= $res;
  }
  if ($left == 0)
 	$ret = true;
@@ -135,10 +176,10 @@ function dosend($fun, $socket, $msg)
  return $ret;
 }
 #
-function sendsock($fun, $msg)
+function sendsock($fun, $msg, $tmo = false)
 {
  $ret = false;
- $socket = getsock($fun);
+ $socket = getsock($fun, $tmo);
  if ($socket !== false)
  {
 	$ret = dosend($fun, $socket, $msg);
@@ -152,10 +193,10 @@ function sendsock($fun, $msg)
 # and the data $msg to send to ckdb
 # and it returns $ret = false on error or $ret = the string reply
 #
-function sendsockreply($fun, $msg)
+function sendsockreply($fun, $msg, $tmo = false)
 {
  $ret = false;
- $socket = getsock($fun);
+ $socket = getsock($fun, $tmo);
  if ($socket !== false)
  {
 	$ret = dosend($fun, $socket, $msg);

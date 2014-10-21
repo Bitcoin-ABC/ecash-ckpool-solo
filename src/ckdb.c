@@ -272,8 +272,13 @@ static cklock_t fpm_lock;
 static char *first_pool_message;
 static sem_t socketer_sem;
 
+char *btc_server = "http://127.0.0.1:8330";
+char *btc_auth;
+int btc_timeout = 5;
+
 char *by_default = "code";
 char *inet_default = "127.0.0.1";
+char *id_default = "42";
 
 // LOGQUEUE
 K_LIST *logqueue_free;
@@ -284,6 +289,10 @@ K_LIST *workqueue_free;
 K_STORE *workqueue_store;
 pthread_mutex_t wq_waitlock;
 pthread_cond_t wq_waitcond;
+
+// HEARTBEATQUEUE
+K_LIST *heartbeatqueue_free;
+K_STORE *heartbeatqueue_store;
 
 // TRANSFER
 K_LIST *transfer_free;
@@ -369,7 +378,7 @@ K_STORE *sharesummary_store;
 // BLOCKS block.id.json={...}
 const char *blocks_new = "New";
 const char *blocks_confirm = "1-Confirm";
-const char *blocks_42 = "42-Confirm";
+const char *blocks_42 = "Matured";
 const char *blocks_orphan = "Orphan";
 const char *blocks_unknown = "?Unknown?";
 
@@ -538,7 +547,7 @@ void logmsg(int loglevel, const char *fmt, ...)
 	free(buf);
 }
 
-static void setnow(tv_t *now)
+void setnow(tv_t *now)
 {
 	ts_t spec;
 	spec.tv_sec = 0;
@@ -861,6 +870,11 @@ static void alloc_storage()
 					ALLOC_WORKQUEUE, LIMIT_WORKQUEUE, true);
 	workqueue_store = k_new_store(workqueue_free);
 
+	heartbeatqueue_free = k_new_list("HeartBeatQueue", sizeof(HEARTBEATQUEUE),
+					 ALLOC_HEARTBEATQUEUE,
+					 LIMIT_HEARTBEATQUEUE, true);
+	heartbeatqueue_store = k_new_store(heartbeatqueue_free);
+
 	transfer_free = k_new_list(Transfer, sizeof(TRANSFER),
 					ALLOC_TRANSFER, LIMIT_TRANSFER, true);
 	transfer_free->dsp_func = dsp_transfer;
@@ -893,6 +907,7 @@ static void alloc_storage()
 					   LIMIT_PAYMENTADDRESSES, true);
 	paymentaddresses_store = k_new_store(paymentaddresses_free);
 	paymentaddresses_root = new_ktree();
+	paymentaddresses_free->dsp_func = dsp_paymentaddresses;
 
 	payments_free = k_new_list("Payments", sizeof(PAYMENTS),
 					ALLOC_PAYMENTS, LIMIT_PAYMENTS, true);
@@ -1248,6 +1263,33 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 	return ckdb_cmds[*which_cmds].cmd_val;
 }
 
+static void check_blocks()
+{
+	K_TREE_CTX ctx[1];
+	K_ITEM *b_item;
+	BLOCKS *blocks;
+
+	K_RLOCK(blocks_free);
+	// Find the oldest block BLOCKS_NEW or BLOCKS_CONFIRM
+	b_item = first_in_ktree(blocks_root, ctx);
+	while (b_item) {
+		DATA_BLOCKS(blocks, b_item);
+		if (!blocks->ignore &&
+		    CURRENT(&(blocks->expirydate)) &&
+		    (blocks->confirmed[0] == BLOCKS_NEW ||
+		     blocks->confirmed[0] == BLOCKS_CONFIRM))
+			break;
+		b_item = next_in_ktree(ctx);
+	}
+	K_RUNLOCK(blocks_free);
+
+	// None
+	if (!b_item)
+		return;
+
+	btc_blockstatus(blocks);
+}
+
 static void summarise_blocks()
 {
 	K_ITEM *b_item, *b_prev, *wi_item, ss_look, *ss_item;
@@ -1588,8 +1630,11 @@ static void *summariser(__maybe_unused void *arg)
 
 	while (!everyone_die) {
 		sleep(5);
-		if (!everyone_die)
+		if (!everyone_die) {
+			if (startup_complete)
+				check_blocks();
 			summarise_blocks();
+		}
 
 		sleep(4);
 		if (!everyone_die)
@@ -3010,7 +3055,6 @@ static void check_restore_dir(char *name)
 }
 
 static struct option long_options[] = {
-	{ "dbprefix",		required_argument,	0,	'b' },
 	{ "config",		required_argument,	0,	'c' },
 	{ "dbname",		required_argument,	0,	'd' },
 	{ "help",		no_argument,		0,	'h' },
@@ -3018,10 +3062,14 @@ static struct option long_options[] = {
 	{ "loglevel",		required_argument,	0,	'l' },
 	{ "name",		required_argument,	0,	'n' },
 	{ "dbpass",		required_argument,	0,	'p' },
+	{ "btc-pass",		required_argument,	0,	'P' },
 	{ "ckpool-logdir",	required_argument,	0,	'r' },
 	{ "logdir",		required_argument,	0,	'R' },
 	{ "sockdir",		required_argument,	0,	's' },
+	{ "btc-server",		required_argument,	0,	'S' },
+	{ "btc-timeout",	required_argument,	0,	't' },
 	{ "dbuser",		required_argument,	0,	'u' },
+	{ "btc-user",		required_argument,	0,	'U' },
 	{ "version",		no_argument,		0,	'v' },
 	{ "confirm",		no_argument,		0,	'y' },
 	{ "confirmrange",	required_argument,	0,	'Y' },
@@ -3039,6 +3087,8 @@ static void sighandler(int sig)
 int main(int argc, char **argv)
 {
 	struct sigaction handler;
+	char *btc_user = "user";
+	char *btc_pass = "p";
 	char buf[512];
 	ckpool_t ckp;
 	int c, ret, i = 0, j;
@@ -3053,7 +3103,7 @@ int main(int argc, char **argv)
 	memset(&ckp, 0, sizeof(ckp));
 	ckp.loglevel = LOG_NOTICE;
 
-	while ((c = getopt_long(argc, argv, "c:d:hkl:n:p:r:R:s:u:vyY:", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "c:d:hkl:n:p:P:r:R:s:S:t:u:U:vyY:", long_options, &i)) != -1) {
 		switch(c) {
 			case 'c':
 				ckp.config = strdup(optarg);
@@ -3102,6 +3152,14 @@ int main(int argc, char **argv)
 				while (*kill)
 					*(kill++) = '\0';
 				break;
+			case 'P':
+				btc_pass = strdup(optarg);
+				kill = optarg;
+				if (*kill)
+					*(kill++) = ' ';
+				while (*kill)
+					*(kill++) = '\0';
+				break;
 			case 'r':
 				restorefrom = strdup(optarg);
 				break;
@@ -3111,8 +3169,20 @@ int main(int argc, char **argv)
 			case 's':
 				ckp.socket_dir = strdup(optarg);
 				break;
+			case 'S':
+				btc_server = strdup(optarg);
+				break;
+			case 't':
+				btc_timeout = atoi(optarg);
+				break;
 			case 'u':
 				db_user = strdup(optarg);
+				kill = optarg;
+				while (*kill)
+					*(kill++) = ' ';
+				break;
+			case 'U':
+				btc_user = strdup(optarg);
 				kill = optarg;
 				while (*kill)
 					*(kill++) = ' ';
@@ -3129,6 +3199,10 @@ int main(int argc, char **argv)
 				break;
 		}
 	}
+
+	snprintf(buf, sizeof(buf), "%s:%s", btc_user, btc_pass);
+	btc_auth = http_base64(buf);
+	bzero(buf, sizeof(buf));
 
 	if (confirm_sharesummary)
 		dbcode = "y";

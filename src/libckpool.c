@@ -813,7 +813,7 @@ bool _send_unix_msg(int sockd, const char *buf, const char *file, const char *fu
 {
 	uint32_t msglen, len;
 	bool retval = false;
-	int ret;
+	int ret, ern;
 
 	if (unlikely(!buf)) {
 		LOGWARNING("Null message sent to send_unix_msg");
@@ -827,22 +827,26 @@ bool _send_unix_msg(int sockd, const char *buf, const char *file, const char *fu
 	msglen = htole32(len);
 	ret = wait_write_select(sockd, 5);
 	if (unlikely(ret < 1)) {
-		LOGERR("Select1 failed in send_unix_msg");
+		ern = errno;
+		LOGERR("Select1 failed in send_unix_msg (%d)", ern);
 		goto out;
 	}
 	ret = write_length(sockd, &msglen, 4);
 	if (unlikely(ret < 4)) {
-		LOGERR("Failed to write 4 byte length in send_unix_msg");
+		ern = errno;
+		LOGERR("Failed to write 4 byte length in send_unix_msg (%d)", ern);
 		goto out;
 	}
 	ret = wait_write_select(sockd, 5);
 	if (unlikely(ret < 1)) {
-		LOGERR("Select2 failed in send_unix_msg");
+		ern = errno;
+		LOGERR("Select2 failed in send_unix_msg (%d)", ern);
 		goto out;
 	}
 	ret = write_length(sockd, buf, len);
 	if (unlikely(ret < 0)) {
-		LOGERR("Failed to write %d bytes in send_unix_msg", len);
+		ern = errno;
+		LOGERR("Failed to write %d bytes in send_unix_msg (%d)", len, ern);
 		goto out;
 	}
 	retval = true;

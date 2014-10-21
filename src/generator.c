@@ -347,9 +347,14 @@ retry:
 			}
 		}
 	} else if (cmdmatch(buf, "submitblock:")) {
+		char blockmsg[80];
+		bool ret;
+
 		LOGNOTICE("Submitting block data!");
-		if (submit_block(cs, buf + 12))
-			send_proc(ckp->stratifier, "block");
+		ret = submit_block(cs, buf + 12 + 64 + 1);
+		memset(buf + 12 + 64, 0, 1);
+		sprintf(blockmsg, "%sblock:%s", ret ? "" : "no", buf + 12);
+		send_proc(ckp->stratifier, blockmsg);
 	} else if (cmdmatch(buf, "checkaddr:")) {
 		if (validate_address(cs, buf + 10))
 			send_unix_msg(sockd, "true");
@@ -554,7 +559,9 @@ static bool parse_subscribe(connsock_t *cs, proxy_instance_t *proxi)
 		LOGWARNING("Invalid nonce2len %d in parse_subscribe", size);
 		goto out;
 	}
-	if (size < 4) {
+	if (size == 3)
+		LOGWARNING("Nonce2 length %d means proxied clients can't be >5TH each", size);
+	else if (size < 3) {
 		LOGWARNING("Nonce2 length %d too small to be able to proxy", size);
 		goto out;
 	}

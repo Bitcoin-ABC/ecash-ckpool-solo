@@ -1,13 +1,6 @@
 <?php
 #
-function doindex($data, $user)
-{
- $pg = '
-<h1>CKPool</h1>
-Welcome to CKPool
-';
- return $pg;
-}
+@include_once('myindex.php');
 #
 function show_index($page, $menu, $name, $user)
 {

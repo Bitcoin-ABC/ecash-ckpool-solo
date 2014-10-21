@@ -202,5 +202,7 @@ char *_ckdb_msg_call(const ckpool_t *ckp, char *msg,  const char *file, const ch
 json_t *json_rpc_call(connsock_t *cs, const char *rpc_req);
 
 int process_exit(ckpool_t *ckp, proc_instance_t *pi, int ret);
+void json_get_string(char **store, json_t *val, const char *res);
+void json_get_int(int *store, json_t *val, const char *res);
 
 #endif /* CKPOOL_H */

@@ -450,13 +450,13 @@ K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 	ExecStatusType rescode;
 	bool conned = false;
 	PGresult *res;
-	K_ITEM *item;
-	USERS *row;
+	K_ITEM *item, *u_item;
+	USERS *row, *users;
 	char *ins;
 	char tohash[64];
 	uint64_t hash;
 	__maybe_unused uint64_t tmp;
-	bool ok = false;
+	bool dup, ok = false;
 	char *params[8 + HISTORYDATECOUNT];
 	int n, par = 0;
 
@@ -468,14 +468,30 @@ K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 
 	DATA_USERS(row, item);
 
+	STRNCPY(row->username, username);
+	username_trim(row);
+
+	dup = false;
+	K_RLOCK(users_free);
+	u_item = users_store->head;
+	while (u_item) {
+		DATA_USERS(users, u_item);
+		if (strcmp(row->usertrim, users->usertrim) == 0) {
+			dup = true;
+			break;
+		}
+		u_item = u_item->next;
+	}
+	K_RUNLOCK(users_free);
+
+	if (dup)
+		goto unitem;
+
 	row->userid = nextid(conn, "userid", (int64_t)(666 + (random() % 334)),
 				cd, by, code, inet);
 	if (row->userid == 0)
 		goto unitem;
 
-	// TODO: pre-check the username exists? (to save finding out via a DB error)
-
-	STRNCPY(row->username, username);
 	row->status[0] = '\0';
 	STRNCPY(row->emailaddress, emailaddress);
 
@@ -643,6 +659,8 @@ bool users_fill(PGconn *conn)
 		HISTORYDATEFLDS(res, i, row, ok);
 		if (!ok)
 			break;
+
+		username_trim(row);
 
 		users_root = add_to_ktree(users_root, item, cmp_users);
 		userid_root = add_to_ktree(userid_root, item, cmp_userid);
@@ -1068,6 +1086,7 @@ K_ITEM *workers_add(PGconn *conn, int64_t userid, char *workername,
 		conned = true;
 	}
 
+	bzero(row, sizeof(*row));
 	row->workerid = nextid(conn, "workerid", (int64_t)1, cd, by, code, inet);
 	if (row->workerid == 0)
 		goto unitem;
@@ -1076,10 +1095,13 @@ K_ITEM *workers_add(PGconn *conn, int64_t userid, char *workername,
 	STRNCPY(row->workername, workername);
 	if (difficultydefault && *difficultydefault) {
 		diffdef = atoi(difficultydefault);
-		if (diffdef < DIFFICULTYDEFAULT_MIN)
-			diffdef = DIFFICULTYDEFAULT_MIN;
-		if (diffdef > DIFFICULTYDEFAULT_MAX)
-			diffdef = DIFFICULTYDEFAULT_MAX;
+		// If out of the range, set it in the range
+		if (diffdef != DIFFICULTYDEFAULT_DEF) {
+			if (diffdef < DIFFICULTYDEFAULT_MIN)
+				diffdef = DIFFICULTYDEFAULT_MIN;
+			if (diffdef > DIFFICULTYDEFAULT_MAX)
+				diffdef = DIFFICULTYDEFAULT_MAX;
+		}
 		row->difficultydefault = diffdef;
 	} else
 		row->difficultydefault = DIFFICULTYDEFAULT_DEF;
@@ -1095,14 +1117,19 @@ K_ITEM *workers_add(PGconn *conn, int64_t userid, char *workername,
 
 	if (idlenotificationtime && *idlenotificationtime) {
 		nottime = atoi(idlenotificationtime);
-		if (nottime < DIFFICULTYDEFAULT_MIN) {
-			row->idlenotificationenabled[0] = IDLENOTIFICATIONDISABLED[0];
-			nottime = DIFFICULTYDEFAULT_MIN;
-		} else if (nottime > IDLENOTIFICATIONTIME_MAX)
-			nottime = row->idlenotificationtime;
+		if (nottime != IDLENOTIFICATIONTIME_DEF) {
+			// If out of the range, set to default
+			if (nottime < IDLENOTIFICATIONTIME_MIN ||
+			    nottime > IDLENOTIFICATIONTIME_MAX)
+				nottime = IDLENOTIFICATIONTIME_DEF;
+		}
 		row->idlenotificationtime = nottime;
 	} else
 		row->idlenotificationtime = IDLENOTIFICATIONTIME_DEF;
+
+	// Default is disabled
+	if (row->idlenotificationtime == IDLENOTIFICATIONTIME_DEF)
+		row->idlenotificationenabled[0] = IDLENOTIFICATIONDISABLED[0];
 
 	HISTORYDATEINIT(row, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, row);
@@ -1504,7 +1531,7 @@ unitem:
 	else {
 		// Remove from ram, old (unneeded) records
 		pa.userid = userid;
-		pa.expirydate.tv_sec = 0L;
+		pa.expirydate.tv_sec = DATE_S_EOT;
 		pa.payaddress[0] = '\0';
 		INIT_PAYMENTADDRESSES(&look);
 		look.data = (void *)(&pa);
@@ -3936,24 +3963,23 @@ bool miningpayouts_fill(PGconn *conn)
 	return ok;
 }
 
-char *auths_add(PGconn *conn, char *poolinstance, char *username,
+bool auths_add(PGconn *conn, char *poolinstance, char *username,
 		char *workername, char *clientid, char *enonce1,
 		char *useragent, char *preauth, char *by, char *code,
 		char *inet, tv_t *cd, bool igndup, K_TREE *trf_root,
-		bool addressuser)
+		bool addressuser, USERS **users, WORKERS **workers)
 {
 	ExecStatusType rescode;
 	bool conned = false;
 	PGresult *res;
 	K_TREE_CTX ctx[1];
-	K_ITEM *a_item, *u_item;
+	K_ITEM *a_item, *u_item, *w_item;
 	char cd_buf[DATE_BUFSIZ];
-	USERS *users;
 	AUTHS *row;
 	char *ins;
-	char *secuserid = NULL;
 	char *params[8 + HISTORYDATECOUNT];
 	int n, par = 0;
+	bool ok = false;
 
 	LOGDEBUG("%s(): add", __func__);
 
@@ -3978,14 +4004,20 @@ char *auths_add(PGconn *conn, char *poolinstance, char *username,
 		if (!u_item)
 			goto unitem;
 	}
-	DATA_USERS(users, u_item);
+	DATA_USERS(*users, u_item);
 
 	STRNCPY(row->poolinstance, poolinstance);
-	row->userid = users->userid;
+	row->userid = (*users)->userid;
 	// since update=false, a dup will be ok and do nothing when igndup=true
-	new_worker(conn, false, row->userid, workername, DIFFICULTYDEFAULT_DEF_STR,
-		   IDLENOTIFICATIONENABLED_DEF, IDLENOTIFICATIONTIME_DEF_STR,
-		   by, code, inet, cd, trf_root);
+	w_item = new_worker(conn, false, row->userid, workername,
+			    DIFFICULTYDEFAULT_DEF_STR,
+			    IDLENOTIFICATIONENABLED_DEF,
+			    IDLENOTIFICATIONTIME_DEF_STR,
+			    by, code, inet, cd, trf_root);
+	if (!w_item)
+		goto unitem;
+
+	DATA_WORKERS(*workers, w_item);
 	STRNCPY(row->workername, workername);
 	TXT_TO_INT("clientid", clientid, row->clientid);
 	STRNCPY(row->enonce1, enonce1);
@@ -4009,7 +4041,9 @@ char *auths_add(PGconn *conn, char *poolinstance, char *username,
 				__func__, poolinstance, workername, cd_buf);
 		}
 
-		return users->secondaryuserid;
+		/* Let them mine, that's what matters :)
+		 *  though this would normally only be during a reload */
+		return true;
 	}
 	K_WUNLOCK(auths_free);
 
@@ -4047,9 +4081,7 @@ char *auths_add(PGconn *conn, char *poolinstance, char *username,
 		PGLOGERR("Insert", rescode, conn);
 		goto unparam;
 	}
-
-	secuserid = users->secondaryuserid;
-
+	ok = true;
 unparam:
 	PQclear(res);
 	for (n = 0; n < par; n++)
@@ -4058,7 +4090,7 @@ unitem:
 	if (conned)
 		PQfinish(conn);
 	K_WLOCK(auths_free);
-	if (!secuserid)
+	if (!ok)
 		k_add_head(auths_free, a_item);
 	else {
 		auths_root = add_to_ktree(auths_root, a_item, cmp_auths);
@@ -4066,7 +4098,7 @@ unitem:
 	}
 	K_WUNLOCK(auths_free);
 
-	return secuserid;
+	return ok;
 }
 
 bool auths_fill(PGconn *conn)

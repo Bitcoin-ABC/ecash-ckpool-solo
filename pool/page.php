@@ -259,8 +259,9 @@ function pgtop($info, $dotop, $user, $douser)
 			$u1hr = '';
 		else
 		{
-			$u1hr = dsprate($u1hr);
+			$u1hr = '/'.dsprate($u1hr);
 
+			// Remove the first XHs if they are the same
 			if (substr($u1hr, -3) == substr($uhr, -3))
 				$uhr = substr($uhr, 0, -3);
 		}
@@ -315,8 +316,15 @@ function pgtop($info, $dotop, $user, $douser)
 		}
 		else
 		{
+			$extra = '';
+			$first = substr($who, 0, 1);
+			if (($first == '1' || $first == '3') && strlen($who) > 12)
+			{
+				$who = substr($who, 0, 11);
+				$extra = '&#133;';
+			}
 			$top .= "
-<span class=topwho>$who&nbsp;</span>
+<span class=topwho>".htmlspecialchars($who)."$extra&nbsp;</span>
 <span class=topdes>Hash Rate:</span>
 <span class=topdat>$uhr$u1hr</span>";
 			$top .= makeForm('')."

@@ -18,6 +18,16 @@ function adddbg($str)
  }
 }
 #
+function sq($str)
+{
+ return str_replace("'", "\\'", $str);
+}
+#
+function dq($str)
+{
+ return str_replace('"', "\\\"", $str);
+}
+#
 function howlongago($sec)
 {
  if ($sec < 60)

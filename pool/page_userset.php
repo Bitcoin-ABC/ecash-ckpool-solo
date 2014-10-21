@@ -30,7 +30,9 @@ function uset($data, $user, $api, $err)
 	$pg .= '<tr class=dc><td>&nbsp;</td></tr>';
 	$pg .= '<tr class=dc><td>You can access the API via:';
 	$pg .= '</td></tr><tr class=dc><td>';
-	$pg .= "<span class=hil>/index.php?k=api&username=$user&api=$api&json=y</span><br>";
+	$pg .= "<span class=hil>/index.php?k=api&username=";
+	$pg .= htmlspecialchars(urlencode($user));
+	$pg .= "&api=$api&json=y</span><br>";
 	$pg .= '</td></tr>';
  }
  $pg .= '</table></form>';

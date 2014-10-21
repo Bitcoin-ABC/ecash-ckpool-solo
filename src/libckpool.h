@@ -79,6 +79,16 @@
 #define __maybe_unused		__attribute__((unused))
 #define uninitialised_var(x) x = x
 
+#define MAX(a,b) \
+	({ __typeof__ (a) _a = (a); \
+	__typeof__ (b) _b = (b); \
+	_a > _b ? _a : _b; })
+
+#define MIN(a,b) \
+	({ __typeof__ (a) _a = (a); \
+	__typeof__ (b) _b = (b); \
+	_a < _b ? _a : _b; })
+
 typedef unsigned char uchar;
 
 typedef struct timeval tv_t;

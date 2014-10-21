@@ -174,15 +174,19 @@ function userReg($user, $email, $pass)
 #
 function userSettings($user, $email = null, $addr = null, $pass = null)
 {
+ $tmo = false;
  $flds = array('username' => $user);
  if ($email != null)
 	$flds['email'] = $email;
  if ($addr != null)
+ {
 	$flds['address'] = $addr;
+	$tmo = 3; # 3x the timeout
+ }
  if ($pass != null)
 	$flds['passwordhash'] = myhash($pass);
  $msg = msgEncode('usersettings', 'userset', $flds, $user);
- $rep = sendsockreply('userSettings', $msg);
+ $rep = sendsockreply('userSettings', $msg, $tmo);
  if (!$rep)
 	dbdown();
  return repDecode($rep);

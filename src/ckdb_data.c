@@ -40,6 +40,33 @@ char *safe_text(char *txt)
 	return ret;
 }
 
+#define TRIM_IGNORE(ch) ((ch) == '_' || (ch) == '.' || (ch) == '-' || isspace(ch))
+
+void username_trim(USERS *users)
+{
+	char *front, *trail;
+
+	front = users->username;
+	while (*front && TRIM_IGNORE(*front))
+		front++;
+
+	STRNCPY(users->usertrim, front);
+
+	front = users->usertrim;
+	trail = front + strlen(front) - 1;
+	while (trail >= front) {
+		if (TRIM_IGNORE(*trail))
+			*(trail--) = '\0';
+		else
+			break;
+	}
+
+	while (trail >= front) {
+		*trail = tolower(*trail);
+		trail--;
+	}
+}
+
 void _txt_to_data(enum data_type typ, char *nam, char *fld, void *data, size_t siz, WHERE_FFL_ARGS)
 {
 	char *tmp;
@@ -979,6 +1006,25 @@ static K_ITEM *new_worker_find_user(PGconn *conn, bool update, char *username,
 }
 */
 
+void dsp_paymentaddresses(K_ITEM *item, FILE *stream)
+{
+	char expirydate_buf[DATE_BUFSIZ], createdate_buf[DATE_BUFSIZ];
+	PAYMENTADDRESSES *pa;
+
+	if (!item)
+		fprintf(stream, "%s() called with (null) item\n", __func__);
+	else {
+		DATA_PAYMENTADDRESSES(pa, item);
+		tv_to_buf(&(pa->expirydate), expirydate_buf, sizeof(expirydate_buf));
+		tv_to_buf(&(pa->createdate), createdate_buf, sizeof(createdate_buf));
+		fprintf(stream, " id=%"PRId64" userid=%"PRId64" addr='%s' "
+				"ratio=%"PRId32" exp=%s cd=%s\n",
+				pa->paymentaddressid, pa->userid,
+				pa->payaddress, pa->payratio,
+				expirydate_buf, createdate_buf);
+	}
+}
+
 // order by userid asc,expirydate desc,payaddress asc
 cmp_t cmp_paymentaddresses(K_ITEM *a, K_ITEM *b)
 {
@@ -1402,7 +1448,6 @@ void dsp_sharesummary(K_ITEM *item, FILE *stream)
 		fprintf(stream, "%s() called with (null) item\n", __func__);
 	else {
 		DATA_SHARESUMMARY(s, item);
-
 		tv_to_buf(&(s->createdate), createdate_buf, sizeof(createdate_buf));
 		fprintf(stream, " uid=%"PRId64" wn='%s' wid=%"PRId64" "
 				"da=%f ds=%f ss=%f c='%s' cd=%s\n",
@@ -1618,14 +1663,45 @@ void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 	}
 }
 
-// TODO: do this better ... :)
-void dsp_hash(char *hash, char *buf, size_t siz)
+void _dbhash2btchash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS)
 {
+	size_t len;
+	int i, j;
+
+	// code bug
+	if (siz < (SHA256SIZHEX + 1)) {
+		quitfrom(1, file, func, line,
+			 "%s() passed buf too small %d (%d)",
+			 __func__, (int)siz, SHA256SIZHEX+1);
+	}
+
+	len = strlen(hash);
+	// code bug - check this before calling
+	if (len != SHA256SIZHEX) {
+		quitfrom(1, file, func, line,
+			 "%s() invalid hash passed - size %d (%d)",
+			 __func__, (int)len, SHA256SIZHEX);
+	}
+
+	for (i = 0; i < SHA256SIZHEX; i++) {
+		j = SHA256SIZHEX - 8 - (i & 0xfff8) + (i % 8);
+		buf[i] = hash[j];
+	}
+	buf[SHA256SIZHEX] = '\0';
+}
+
+void _dsp_hash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS)
+{
+	char tmp[SHA256SIZHEX+1];
 	char *ptr;
 
-	ptr = hash + strlen(hash) - (siz - 1) - 8;
-	if (ptr < hash)
-		ptr = hash;
+	_dbhash2btchash(hash, tmp, sizeof(tmp), file, func, line);
+	ptr = tmp;
+	while (*ptr && *ptr == '0')
+		ptr++;
+	ptr -= 4;
+	if (ptr < tmp)
+		ptr = tmp;
 	STRNCPYSIZ(buf, ptr, siz);
 }
 
@@ -1639,7 +1715,6 @@ void dsp_blocks(K_ITEM *item, FILE *stream)
 		fprintf(stream, "%s() called with (null) item\n", __func__);
 	else {
 		DATA_BLOCKS(b, item);
-
 		dsp_hash(b->blockhash, hash_dsp, sizeof(hash_dsp));
 		tv_to_buf(&(b->createdate), createdate_buf, sizeof(createdate_buf));
 		tv_to_buf(&(b->expirydate), expirydate_buf, sizeof(expirydate_buf));

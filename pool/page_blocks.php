@@ -111,7 +111,7 @@ function doblocks($data, $user)
 
 		$pg .= "<tr class=$row>";
 		$pg .= "<td class=dl$ex>$hifld</td>";
-		$pg .= "<td class=dl$ex>".$ans['workername:'.$i].'</td>';
+		$pg .= "<td class=dl$ex>".htmlspecialchars($ans['workername:'.$i]).'</td>';
 		$pg .= "<td class=dr$ex>".btcfmt($ans['reward:'.$i]).'</td>';
 		$pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['firstcreatedate:'.$i]).'</td>';
 		$pg .= "<td class=dr$ex>".$stat.'</td>';

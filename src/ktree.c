@@ -133,6 +133,9 @@ void _dsp_ktree(K_LIST *list, K_TREE *root, char *filename, char *msg, KTREE_FFL
 	time_t now_t;
 	char stamp[128];
 
+	if (!list->dsp_func)
+		FAIL("%s", "NULLDSP NULL dsp_func");
+
 	now_t = time(NULL);
 	localtime_r(&now_t, &tm);
 	snprintf(stamp, sizeof(stamp),

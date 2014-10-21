@@ -379,23 +379,30 @@ out:
 bool submit_block(connsock_t *cs, char *params)
 {
 	json_t *val, *res_val;
+	int len, retries = 0;
 	const char *res_ret;
 	bool ret = false;
 	char *rpc_req;
-	int len;
 
-	len = strlen(params) + 50;
+	len = strlen(params) + 64;
+retry:
 	rpc_req = ckalloc(len);
 	sprintf(rpc_req, "{\"method\": \"submitblock\", \"params\": [\"%s\"]}\n", params);
 	val = json_rpc_call(cs, rpc_req);
 	dealloc(rpc_req);
 	if (!val) {
 		LOGWARNING("Failed to get valid json response to submitblock");
+		if (++retries < 5)
+			goto retry;
 		return ret;
 	}
 	res_val = json_object_get(val, "result");
 	if (!res_val) {
 		LOGWARNING("Failed to get result in json response to submitblock");
+		if (++retries < 5) {
+			json_decref(val);
+			goto retry;
+		}
 		goto out;
 	}
 	if (!json_is_true(res_val)) {

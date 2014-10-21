@@ -29,12 +29,13 @@ function workmgtuser($data, $user, $err)
 
 		$pg .= "<tr class=$row>";
 
-		$wn = $ans['workername:'.$i];
+		$wn = htmlspecialchars($ans['workername:'.$i]);
+		$wnv = urlencode($ans['workername:'.$i]);
 		$pg .= '<td class=dl>';
-		$pg .= "<input type=hidden name='workername:$i' value='$wn'>";
+		$pg .= "<input type=hidden name='workername:$i' value='$wnv'>";
 		$pg .= $wn.'</td>';
 
-		$md = $ans['difficultydefault:'.$i];
+		$md = intval($ans['difficultydefault:'.$i]);
 		$pg .= '<td class=dr>';
 		$pg .= "<input type=text size=6 name='difficultydefault:$i' value='$md'>";
 		$pg .= "<input type=submit name=OK value=OK>";
@@ -45,6 +46,10 @@ function workmgtuser($data, $user, $err)
 		$offset++;
 	}
  }
+ $pg .= '<tr><td colspan=2 class=dc><font size=-1><span class=st1>*</span>';
+ $pg .= ' A value of 0, less than the pool minimum,<br>';
+ $pg .= 'or less than the pool calculated value for you,<br>';
+ $pg .= 'will use the pool calculated value</font></td></tr>';
  $pg .= "</table><input type=hidden name=rows value=$count></form>\n";
 
  return $pg;
@@ -62,7 +67,7 @@ function doworkmgt($data, $user)
 		$settings = array();
 		for ($i = 0; $i < $count; $i++)
 		{
-			$wn = getparam('workername:'.$i, false);
+			$wn = urldecode(getparam('workername:'.$i, false));
 			$md = getparam('difficultydefault:'.$i, false);
 			if (!nuem($wn) && !nuem($md))
 			{

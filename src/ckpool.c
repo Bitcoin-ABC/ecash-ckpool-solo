@@ -286,6 +286,18 @@ retry:
 			Close(connfd);
 		} else
 			LOGWARNING("Failed to send_procmsg to connector");
+	} else if (cmdmatch(buf, "accept")) {
+		LOGWARNING("Listener received accept message, accepting clients");
+		send_procmsg(ckp->connector, "accept");
+		send_unix_msg(sockd, "accepting");
+	} else if (cmdmatch(buf, "reject")) {
+		LOGWARNING("Listener received reject message, rejecting clients");
+		send_procmsg(ckp->connector, "reject");
+		send_unix_msg(sockd, "rejecting");
+	} else if (cmdmatch(buf, "reconnect")) {
+		LOGWARNING("Listener received request to send reconnect to clients");
+		send_procmsg(ckp->stratifier, "reconnect");
+		send_unix_msg(sockd, "reconnecting");
 	} else if (cmdmatch(buf, "restart")) {
 		LOGWARNING("Listener received restart message, attempting handover");
 		send_unix_msg(sockd, "restarting");
@@ -772,7 +784,7 @@ int process_exit(ckpool_t *ckp, proc_instance_t *pi, int ret)
 		LOGWARNING("%s %s exiting with return code %d, shutting down!",
 			   ckp->name, pi->processname, ret);
 		send_proc(&ckp->main, "shutdown");
-		sleep(1);
+		cksleep_ms(100);
 		ret = 1;
 	} else /* Should be part of a normal shutdown */
 		LOGNOTICE("%s %s exited normally", ckp->name, pi->processname);
@@ -844,14 +856,14 @@ static void sighandler(int sig)
 	cancel_join_pthread(&ckp->pth_watchdog);
 
 	__shutdown_children(ckp, SIGUSR1);
-	/* Wait a second, then send SIGKILL */
-	sleep(1);
+	/* Wait, then send SIGKILL */
+	cksleep_ms(100);
 	__shutdown_children(ckp, SIGKILL);
 	cancel_pthread(&ckp->pth_listener);
 	exit(0);
 }
 
-static void json_get_string(char **store, json_t *val, const char *res)
+void json_get_string(char **store, json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);
 	const char *buf;
@@ -883,9 +895,10 @@ static void json_get_int64(int64_t *store, json_t *val, const char *res)
 		return;
 	}
 	*store = json_integer_value(entry);
+	LOGDEBUG("Json found entry %s: %ld", res, *store);
 }
 
-static void json_get_int(int *store, json_t *val, const char *res)
+void json_get_int(int *store, json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);
 
@@ -898,6 +911,7 @@ static void json_get_int(int *store, json_t *val, const char *res)
 		return;
 	}
 	*store = json_integer_value(entry);
+	LOGDEBUG("Json found entry %s: %d", res, *store);
 }
 
 static void json_get_bool(bool *store, json_t *val, const char *res)
@@ -913,6 +927,7 @@ static void json_get_bool(bool *store, json_t *val, const char *res)
 		return;
 	}
 	*store = json_is_true(entry);
+	LOGDEBUG("Json found entry %s: %s", res, *store ? "true" : "false");
 }
 
 static void parse_btcds(ckpool_t *ckp, json_t *arr_val, int arr_size)
@@ -1091,6 +1106,18 @@ static struct option long_options[] = {
 	{0, 0, 0, 0}
 };
 #endif
+
+static void send_recv_path(const char *path, const char *msg)
+{
+	int sockd = open_unix_client(path);
+	char *response;
+
+	send_unix_msg(sockd, msg);
+	response = recv_unix_msg(sockd);
+	LOGWARNING("Received: %s in response to %s request", response, msg);
+	dealloc(response);
+	Close(sockd);
+}
 
 int main(int argc, char **argv)
 {
@@ -1316,13 +1343,15 @@ int main(int argc, char **argv)
 
 		if (sockd > 0 && send_unix_msg(sockd, "getfd")) {
 			ckp.oldconnfd = get_fd(sockd);
-
 			Close(sockd);
-			sockd = open_unix_client(ckp.main.us.path);
-			send_unix_msg(sockd, "shutdown");
+
+			send_recv_path(ckp.main.us.path, "reject");
+			send_recv_path(ckp.main.us.path, "reconnect");
+			send_recv_path(ckp.main.us.path, "shutdown");
+			cksleep_ms(500);
+
 			if (ckp.oldconnfd > 0)
 				LOGWARNING("Inherited old socket with new file descriptor %d!", ckp.oldconnfd);
-			Close(sockd);
 		}
 	}
 

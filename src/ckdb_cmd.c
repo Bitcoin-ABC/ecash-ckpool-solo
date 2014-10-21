@@ -91,7 +91,8 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 						    NULL,
 						    by, code, inet, now,
 						    trf_root);
-		}
+		} else
+			ok = false;
 	}
 
 	if (!ok) {
@@ -239,8 +240,12 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 				goto struckout;
 			}
 
-//			if (address && *address)
-//				TODO: validate it
+			if (address && *address) {
+				if (!btc_valid_address(address)) {
+					reason = "Invalid BTC address";
+					goto struckout;
+				}
+			}
 
 			if (email && *email) {
 				ok = users_pass_email(conn, u_item, NULL,
@@ -284,6 +289,8 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 			   __maybe_unused tv_t *notcd, K_TREE *trf_root)
 {
 	K_ITEM *i_username, *i_workername, *i_diffdef, *u_item, *w_item;
+	HEARTBEATQUEUE *heartbeatqueue;
+	K_ITEM *hq_item;
 	char workername_buf[32]; // 'workername:' + digits
 	char diffdef_buf[32]; // 'difficultydefault:' + digits
 	char reply[1024] = "";
@@ -355,10 +362,12 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 				continue;
 
 			difficultydefault = atoi(transfer_data(i_diffdef));
-			if (difficultydefault < DIFFICULTYDEFAULT_MIN)
-				difficultydefault = DIFFICULTYDEFAULT_MIN;
-			if (difficultydefault > DIFFICULTYDEFAULT_MAX)
-				difficultydefault = DIFFICULTYDEFAULT_MAX;
+			if (difficultydefault != 0) {
+				if (difficultydefault < DIFFICULTYDEFAULT_MIN)
+					difficultydefault = DIFFICULTYDEFAULT_MIN;
+				if (difficultydefault > DIFFICULTYDEFAULT_MAX)
+					difficultydefault = DIFFICULTYDEFAULT_MAX;
+			}
 
 			if (workers->difficultydefault != difficultydefault) {
 				/* This uses a seperate txn per update
@@ -373,6 +382,21 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 					reason = "DB error";
 					break;
 				}
+
+				/* workerset is not from a log file,
+				   so always queue it */
+				K_WLOCK(heartbeatqueue_free);
+				hq_item = k_unlink_head(heartbeatqueue_free);
+				K_WUNLOCK(heartbeatqueue_free);
+
+				DATA_HEARTBEATQUEUE(heartbeatqueue, hq_item);
+				STRNCPY(heartbeatqueue->workername, workers->workername);
+				heartbeatqueue->difficultydefault = workers->difficultydefault;
+				copy_tv(&(heartbeatqueue->createdate), now);
+
+				K_WLOCK(heartbeatqueue_free);
+				k_add_tail(heartbeatqueue_store, hq_item);
+				K_WUNLOCK(heartbeatqueue_free);
 			}
 		}
 	}
@@ -758,6 +782,35 @@ static char *cmd_blockstatus(__maybe_unused PGconn *conn, char *cmd, char *id,
 				ok = blocks_add(conn, transfer_data(i_height),
 						      blocks->blockhash,
 						      BLOCKS_ORPHAN_STR,
+						      EMPTY, EMPTY, EMPTY, EMPTY,
+						      EMPTY, EMPTY, EMPTY, EMPTY,
+						      by, code, inet, now, false, id,
+						      trf_root);
+				if (!ok) {
+					snprintf(reply, siz,
+						 "DBE.action '%s'",
+						 action);
+					LOGERR("%s.%s", id, reply);
+					return strdup(reply);
+				}
+				// TODO: reset the share counter?
+				break;
+			default:
+				snprintf(reply, siz,
+					 "ERR.invalid action '%.*s%s' for block state '%s'",
+					 CMD_SIZ, action,
+					 (strlen(action) > CMD_SIZ) ? "..." : "",
+					 blocks_confirmed(blocks->confirmed));
+				LOGERR("%s.%s", id, reply);
+				return strdup(reply);
+		}
+	} else if (strcasecmp(action, "confirm") == 0) {
+		// Confirm a new block that wasn't confirmed due to some bug
+		switch (blocks->confirmed[0]) {
+			case BLOCKS_NEW:
+				ok = blocks_add(conn, transfer_data(i_height),
+						      blocks->blockhash,
+						      BLOCKS_CONFIRM_STR,
 						      EMPTY, EMPTY, EMPTY, EMPTY,
 						      EMPTY, EMPTY, EMPTY, EMPTY,
 						      by, code, inet, now, false, id,
@@ -1733,7 +1786,9 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	size_t siz = sizeof(reply);
 	K_ITEM *i_poolinstance, *i_username, *i_workername, *i_clientid;
 	K_ITEM *i_enonce1, *i_useragent, *i_preauth;
-	char *secuserid;
+	USERS *users = NULL;
+	WORKERS *workers = NULL;
+	bool ok;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -1766,22 +1821,26 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	if (!i_preauth)
 		i_preauth = &auth_preauth;
 
-	secuserid = auths_add(conn, transfer_data(i_poolinstance),
-				    transfer_data(i_username),
-				    transfer_data(i_workername),
-				    transfer_data(i_clientid),
-				    transfer_data(i_enonce1),
-				    transfer_data(i_useragent),
-				    transfer_data(i_preauth),
-				    by, code, inet, cd, igndup, trf_root, false);
+	ok = auths_add(conn, transfer_data(i_poolinstance),
+			     transfer_data(i_username),
+			     transfer_data(i_workername),
+			     transfer_data(i_clientid),
+			     transfer_data(i_enonce1),
+			     transfer_data(i_useragent),
+			     transfer_data(i_preauth),
+			     by, code, inet, cd, igndup, trf_root, false,
+			     &users, &workers);
 
-	if (!secuserid) {
+	if (!ok) {
 		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
 		return strdup("failed.DBE");
 	}
 
-	LOGDEBUG("%s.ok.auth added for %s", id, secuserid);
-	snprintf(reply, siz, "ok.%s", secuserid);
+	snprintf(reply, siz,
+		 "ok.authorise={\"secondaryuserid\":\"%s\","
+		 "\"difficultydefault\":%d}",
+		 users->secondaryuserid, workers->difficultydefault);
+	LOGDEBUG("%s.%s", id, reply);
 	return strdup(reply);
 }
 
@@ -1811,7 +1870,9 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 	size_t siz = sizeof(reply);
 	K_ITEM *i_poolinstance, *i_username, *i_workername, *i_clientid;
 	K_ITEM *i_enonce1, *i_useragent, *i_preauth;
-	char *secuserid;
+	USERS *users = NULL;
+	WORKERS *workers = NULL;
+	bool ok;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -1844,22 +1905,26 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 	if (!i_preauth)
 		return strdup(reply);
 
-	secuserid = auths_add(conn, transfer_data(i_poolinstance),
-				    transfer_data(i_username),
-				    transfer_data(i_workername),
-				    transfer_data(i_clientid),
-				    transfer_data(i_enonce1),
-				    transfer_data(i_useragent),
-				    transfer_data(i_preauth),
-				    by, code, inet, cd, igndup, trf_root, true);
+	ok = auths_add(conn, transfer_data(i_poolinstance),
+			     transfer_data(i_username),
+			     transfer_data(i_workername),
+			     transfer_data(i_clientid),
+			     transfer_data(i_enonce1),
+			     transfer_data(i_useragent),
+			     transfer_data(i_preauth),
+			     by, code, inet, cd, igndup, trf_root, true,
+			     &users, &workers);
 
-	if (!secuserid) {
+	if (!ok) {
 		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
 		return strdup("failed.DBE");
 	}
 
-	LOGDEBUG("%s.ok.auth added for %s", id, secuserid);
-	snprintf(reply, siz, "ok.%s", secuserid);
+	snprintf(reply, siz,
+		 "ok.addrauth={\"secondaryuserid\":\"%s\","
+		 "\"difficultydefault\":%d}",
+		 users->secondaryuserid, workers->difficultydefault);
+	LOGDEBUG("%s.%s", id, reply);
 	return strdup(reply);
 }
 
@@ -1881,20 +1946,64 @@ static char *cmd_addrauth(PGconn *conn, char *cmd, char *id,
 	return cmd_addrauth_do(conn, cmd, id, by, code, inet, cd, igndup, trf_root);
 }
 
-/* TODO: This must decide the reply based on the reloading/startup status
- * Reload data will be a simple pulse reply
- * If workers have been loaded (db_auths_complete) then any worker diff
- *  changes from the web, after that, will mean a diff change reply
- */
 static char *cmd_heartbeat(__maybe_unused PGconn *conn, char *cmd, char *id,
 			   __maybe_unused tv_t *now, __maybe_unused char *by,
 			   __maybe_unused char *code, __maybe_unused char *inet,
 			   __maybe_unused tv_t *cd,
 			   __maybe_unused K_TREE *trf_root)
 {
-	char reply[1024] = "";
+	HEARTBEATQUEUE *heartbeatqueue;
+	K_STORE *hq_store;
+	K_ITEM *hq_item;
+	char reply[1024], tmp[1024], *buf;
 	size_t siz = sizeof(reply);
+	size_t len, off;
+	bool first;
 
+	// Wait until startup is complete, we get a heartbeat every second
+	if (!startup_complete)
+		goto pulse;
+
+	K_WLOCK(heartbeatqueue_free);
+	if (heartbeatqueue_store->count == 0) {
+		K_WUNLOCK(heartbeatqueue_free);
+		goto pulse;
+	}
+
+	hq_store = k_new_store(heartbeatqueue_free);
+	k_list_transfer_to_head(heartbeatqueue_store, hq_store);
+	K_WUNLOCK(heartbeatqueue_free);
+
+	APPEND_REALLOC_INIT(buf, off, len);
+	APPEND_REALLOC(buf, off, len, "ok.heartbeat={\"diffchange\":[");
+	hq_item = hq_store->tail;
+	first = true;
+	while (hq_item) {
+		DATA_HEARTBEATQUEUE(heartbeatqueue, hq_item);
+		tvs_to_buf(&last_bc, reply, siz);
+		snprintf(tmp, sizeof(tmp),
+			 "%s{\"workername\":\"%s\","
+			 "\"difficultydefault\":%d,"
+			 "\"createdate\":\"%ld,%ld\"}",
+			 first ? "" : ",",
+			 heartbeatqueue->workername,
+			 heartbeatqueue->difficultydefault,
+			 heartbeatqueue->createdate.tv_sec,
+			 heartbeatqueue->createdate.tv_usec);
+		APPEND_REALLOC(buf, off, len, tmp);
+		hq_item = hq_item->prev;
+		first = false;
+	}
+	APPEND_REALLOC(buf, off, len, "]}");
+
+	K_WLOCK(heartbeatqueue_free);
+	k_list_transfer_to_head(hq_store, heartbeatqueue_free);
+	K_WUNLOCK(heartbeatqueue_free);
+	hq_store = k_free_store(hq_store);
+
+	LOGDEBUG("%s.%s.%s", cmd, id, buf);
+	return buf;
+pulse:
 	snprintf(reply, siz, "ok.pulse");
 	LOGDEBUG("%s.%s.%s", cmd, id, reply);
 	return strdup(reply);
@@ -3166,7 +3275,11 @@ static char *cmd_dsp(__maybe_unused PGconn *conn, __maybe_unused char *cmd,
 
 	dsp_ktree(transfer_free, trf_root, transfer_data(i_file), NULL);
 
-	dsp_ktree(sharesummary_free, sharesummary_root, transfer_data(i_file), NULL);
+	dsp_ktree(paymentaddresses_free, paymentaddresses_root,
+		  transfer_data(i_file), NULL);
+
+	dsp_ktree(sharesummary_free, sharesummary_root,
+		  transfer_data(i_file), NULL);
 
 	dsp_ktree(userstats_free, userstats_root, transfer_data(i_file), NULL);
 
@@ -3232,6 +3345,7 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USEINFO(workerstatus, 1, 1);
 	USEINFO(workqueue, 1, 0);
 	USEINFO(transfer, 0, 0);
+	USEINFO(heartbeatqueue, 1, 0);
 	USEINFO(logqueue, 1, 0);
 
 	snprintf(tmp, sizeof(tmp), "totalram=%"PRIu64"%c", tot, FLDSEP);
@@ -3309,6 +3423,11 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
  *
  *  createdate = true
  *   means that the data sent must contain a fld or json fld called createdate
+ *
+ * The reply format for authorise, addrauth and heartbeat includes json:
+ *   ID.STAMP.ok.cmd={json}
+ *  where cmd is auth, addrauth, or heartbeat
+ * For the heartbeat pulse reply it has no '={}'
  */
 
 //	  cmd_val	cmd_str		noid	createdate func		access

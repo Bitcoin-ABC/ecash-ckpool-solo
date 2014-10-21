@@ -41,7 +41,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 			$row = 'odd';
 
 		$pg .= "<tr class=$row>";
-		$pg .= '<td class=dl>'.$ans['workername:'.$i].'</td>';
+		$pg .= '<td class=dl>'.htmlspecialchars($ans['workername:'.$i]).'</td>';
 		if ($ans['w_lastdiff:'.$i] > 0)
 			$ld = difffmt($ans['w_lastdiff:'.$i]);
 		else

@@ -52,7 +52,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.2"
-#define CKDB_VERSION DB_VERSION"-0.405"
+#define CKDB_VERSION DB_VERSION"-0.516"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -245,8 +245,13 @@ extern bool everyone_die;
 #define STR_SHAREERRORS "shareerror"
 #define STR_AGEWORKINFO "ageworkinfo"
 
+extern char *btc_server;
+extern char *btc_auth;
+extern int btc_timeout;
+
 extern char *by_default;
 extern char *inet_default;
+extern char *id_default;
 
 enum cmd_values {
 	CMD_UNSET,
@@ -344,24 +349,26 @@ enum cmd_values {
 /* Override _row defaults if transfer fields are present
  * We don't care about the reply so it can be small */
 #define HISTORYDATETRANSFER(_root, _row) do { \
-		char __reply[16]; \
-		size_t __siz = sizeof(__reply); \
-		K_ITEM *__item; \
-		TRANSFER *__transfer; \
-		__item = optional_name(_root, "createby", 1, NULL, __reply, __siz); \
-		if (__item) { \
-			DATA_TRANSFER(__transfer, __item); \
-			STRNCPY(_row->createby, __transfer->mvalue); \
-		} \
-		__item = optional_name(_root, "createcode", 1, NULL, __reply, __siz); \
-		if (__item) { \
-			DATA_TRANSFER(__transfer, __item); \
-			STRNCPY(_row->createcode, __transfer->mvalue); \
-		} \
-		__item = optional_name(_root, "createinet", 1, NULL, __reply, __siz); \
-		if (__item) { \
-			DATA_TRANSFER(__transfer, __item); \
-			STRNCPY(_row->createinet, __transfer->mvalue); \
+		if (_root) { \
+			char __reply[16]; \
+			size_t __siz = sizeof(__reply); \
+			K_ITEM *__item; \
+			TRANSFER *__transfer; \
+			__item = optional_name(_root, "createby", 1, NULL, __reply, __siz); \
+			if (__item) { \
+				DATA_TRANSFER(__transfer, __item); \
+				STRNCPY(_row->createby, __transfer->mvalue); \
+			} \
+			__item = optional_name(_root, "createcode", 1, NULL, __reply, __siz); \
+			if (__item) { \
+				DATA_TRANSFER(__transfer, __item); \
+				STRNCPY(_row->createcode, __transfer->mvalue); \
+			} \
+			__item = optional_name(_root, "createinet", 1, NULL, __reply, __siz); \
+			if (__item) { \
+				DATA_TRANSFER(__transfer, __item); \
+				STRNCPY(_row->createinet, __transfer->mvalue); \
+			} \
 		} \
 	} while (0)
 
@@ -488,6 +495,21 @@ extern K_STORE *workqueue_store;
 extern pthread_mutex_t wq_waitlock;
 extern pthread_cond_t wq_waitcond;
 
+// HEARTBEATQUEUE
+typedef struct heartbeatqueue {
+	char workername[TXT_BIG+1];
+	int32_t difficultydefault;
+	tv_t createdate;
+} HEARTBEATQUEUE;
+
+#define ALLOC_HEARTBEATQUEUE 128
+#define LIMIT_HEARTBEATQUEUE 0
+#define INIT_HEARTBEATQUEUE(_item) INIT_GENERIC(_item, heartbeatqueue)
+#define DATA_HEARTBEATQUEUE(_var, _item) DATA_GENERIC(_var, _item, heartbeatqueue, true)
+
+extern K_LIST *heartbeatqueue_free;
+extern K_STORE *heartbeatqueue_store;
+
 // TRANSFER
 #define NAME_SIZE 63
 #define VALUE_SIZE 1023
@@ -525,7 +547,8 @@ extern tv_t missing_secuser_max;
 typedef struct users {
 	int64_t userid;
 	char username[TXT_BIG+1];
-	// Anything in 'status' disables the account
+	char usertrim[TXT_BIG+1]; // Non DB field
+	// TODO: Anything in 'status' disables the account
 	char status[TXT_BIG+1];
 	char emailaddress[TXT_BIG+1];
 	tv_t joineddate;
@@ -597,15 +620,17 @@ extern K_LIST *workers_free;
 extern K_STORE *workers_store;
 
 #define DIFFICULTYDEFAULT_MIN 10
-#define DIFFICULTYDEFAULT_MAX 1000000
-#define DIFFICULTYDEFAULT_DEF DIFFICULTYDEFAULT_MIN
+#define DIFFICULTYDEFAULT_MAX 0x7fffffff
+// 0 means it's not set
+#define DIFFICULTYDEFAULT_DEF 0
 #define DIFFICULTYDEFAULT_DEF_STR STRINT(DIFFICULTYDEFAULT_DEF)
 #define IDLENOTIFICATIONENABLED "y"
 #define IDLENOTIFICATIONDISABLED " "
 #define IDLENOTIFICATIONENABLED_DEF IDLENOTIFICATIONDISABLED
 #define IDLENOTIFICATIONTIME_MIN 10
 #define IDLENOTIFICATIONTIME_MAX 60
-#define IDLENOTIFICATIONTIME_DEF IDLENOTIFICATIONTIME_MIN
+// 0 means it's not set and will be flagged disabled
+#define IDLENOTIFICATIONTIME_DEF 0
 #define IDLENOTIFICATIONTIME_DEF_STR STRINT(IDLENOTIFICATIONTIME_DEF)
 
 // PAYMENTADDRESSES
@@ -881,6 +906,7 @@ typedef struct blocks {
 	int64_t elapsed;
 	char statsconfirmed[TXT_FLAG+1];
 	HISTORYDATECONTROLFIELDS;
+	bool ignore; // Non DB field
 } BLOCKS;
 
 #define ALLOC_BLOCKS 100
@@ -893,10 +919,16 @@ typedef struct blocks {
 #define BLOCKS_NEW_STR "n"
 #define BLOCKS_CONFIRM '1'
 #define BLOCKS_CONFIRM_STR "1"
+// 42 doesn't actually mean '42' it means matured
 #define BLOCKS_42 'F'
 #define BLOCKS_42_STR "F"
+// Current block maturity is ... 100
+#define BLOCKS_42_VALUE 100
 #define BLOCKS_ORPHAN 'O'
 #define BLOCKS_ORPHAN_STR "O"
+/* Block height difference required before checking if it's orphaned
+ * TODO: add a cmd_blockstatus option to un-orphan a block */
+#define BLOCKS_ORPHAN_CHECK 1
 
 #define BLOCKS_STATSPENDING FALSE_CHR
 #define BLOCKS_STATSPENDING_STR FALSE_STR
@@ -1149,6 +1181,7 @@ extern K_LIST *workerstatus_free;
 extern K_STORE *workerstatus_store;
 
 extern void logmsg(int loglevel, const char *fmt, ...);
+extern void setnow(tv_t *now);
 extern void tick();
 extern PGconn *dbconnect();
 
@@ -1157,6 +1190,7 @@ extern PGconn *dbconnect();
 // ***
 
 extern char *safe_text(char *txt);
+extern void username_trim(USERS *users);
 
 extern void _txt_to_data(enum data_type typ, char *nam, char *fld, void *data, size_t siz, WHERE_FFL_ARGS);
 
@@ -1249,6 +1283,7 @@ extern K_ITEM *new_worker(PGconn *conn, bool update, int64_t userid, char *worke
 			  char *code, char *inet, tv_t *cd, K_TREE *trf_root);
 extern K_ITEM *new_default_worker(PGconn *conn, bool update, int64_t userid, char *workername,
 				  char *by, char *code, char *inet, tv_t *cd, K_TREE *trf_root);
+extern void dsp_paymentaddresses(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_paymentaddresses(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_paymentaddresses(int64_t userid);
 extern cmp_t cmp_payments(K_ITEM *a, K_ITEM *b);
@@ -1271,10 +1306,16 @@ extern void dsp_sharesummary(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_sharesummary(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_sharesummary_workinfoid(K_ITEM *a, K_ITEM *b);
 extern void zero_sharesummary(SHARESUMMARY *row, tv_t *cd, double diff);
-extern K_ITEM *find_sharesummary(int64_t userid, char *workername, int64_t workinfoid);
+extern K_ITEM *find_sharesummary(int64_t userid, char *workername,
+				 int64_t workinfoid);
 extern void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 			   char *by, char *code, char *inet, tv_t *cd);
-extern void dsp_hash(char *hash, char *buf, size_t siz);
+#define dbhash2btchash(_hash, _buf, _siz) \
+	_dbhash2btchash(_hash, _buf, _siz, WHERE_FFL_HERE)
+void _dbhash2btchash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS);
+#define dsp_hash(_hash, _buf, _siz) \
+	_dsp_hash(_hash, _buf, _siz, WHERE_FFL_HERE)
+extern void _dsp_hash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS);
 extern void dsp_blocks(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_blocks(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_blocks(int32_t height, char *blockhash);
@@ -1412,11 +1453,11 @@ extern bool miningpayouts_add(PGconn *conn, char *username, char *height,
 			      char *blockhash, char *amount, char *by,
 			      char *code, char *inet, tv_t *cd, K_TREE *trf_root);
 extern bool miningpayouts_fill(PGconn *conn);
-extern char *auths_add(PGconn *conn, char *poolinstance, char *username,
+extern bool auths_add(PGconn *conn, char *poolinstance, char *username,
 			char *workername, char *clientid, char *enonce1,
 			char *useragent, char *preauth, char *by, char *code,
 			char *inet, tv_t *cd, bool igndup, K_TREE *trf_root,
-			bool addressuser);
+			bool addressuser, USERS **users, WORKERS **workers);
 extern bool auths_fill(PGconn *conn);
 extern bool poolstats_add(PGconn *conn, bool store, char *poolinstance,
 				char *elapsed, char *users, char *workers,
@@ -1449,5 +1490,12 @@ struct CMDS {
 };
 
 extern struct CMDS ckdb_cmds[];
+
+// ***
+// *** ckdb_btc.c
+// ***
+
+extern bool btc_valid_address(char *addr);
+extern void btc_blockstatus(BLOCKS *blocks);
 
 #endif

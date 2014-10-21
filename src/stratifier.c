@@ -259,7 +259,7 @@ struct worker_instance {
 	double dsps1440;
 	tv_t last_share;
 
-	int64_t mindiff; /* User chosen mindiff */
+	int mindiff; /* User chosen mindiff */
 };
 
 /* Per client stratum instance == workers */
@@ -333,6 +333,12 @@ typedef struct share share_t;
 static share_t *shares;
 
 static cklock_t share_lock;
+
+/* Linked list of block solves, added to during submission, removed on
+ * accept/reject. It is likely we only ever have one solve on here but you
+ * never know... */
+static pthread_mutex_t block_lock;
+static ckmsg_t *block_solves;
 
 static int gen_priority;
 
@@ -867,7 +873,7 @@ static void drop_allclients(ckpool_t *ckp)
 	ck_wunlock(&instance_lock);
 }
 
-static bool update_subscribe(ckpool_t *ckp)
+static void update_subscribe(ckpool_t *ckp)
 {
 	json_t *val;
 	char *buf;
@@ -875,7 +881,8 @@ static bool update_subscribe(ckpool_t *ckp)
 	buf = send_recv_proc(ckp->generator, "getsubscribe");
 	if (unlikely(!buf)) {
 		LOGWARNING("Failed to get subscribe from generator in update_notify");
-		return false;
+		drop_allclients(ckp);
+		return;
 	}
 	LOGDEBUG("Update subscribe: %s", buf);
 	val = json_loads(buf, 0, NULL);
@@ -900,8 +907,6 @@ static bool update_subscribe(ckpool_t *ckp)
 
 	json_decref(val);
 	drop_allclients(ckp);
-
-	return true;
 }
 
 static void update_diff(ckpool_t *ckp);
@@ -1210,48 +1215,107 @@ static void stratum_broadcast_message(const char *msg)
 	stratum_broadcast(json_msg);
 }
 
-static void block_solve(ckpool_t *ckp)
+/* Send a generic reconnect to all clients without parameters to make them
+ * reconnect to the same server. */
+static void reconnect_clients(void)
 {
+	json_t *json_msg;
+
+	JSON_CPACK(json_msg, "{sosss[]}", "id", json_null(), "method", "client.reconnect",
+		   "params");
+	stratum_broadcast(json_msg);
+}
+
+static void block_solve(ckpool_t *ckp, const char *blockhash)
+{
+	ckmsg_t *block, *tmp, *found = NULL;
 	char cdfield[64];
+	int height = 0;
 	ts_t ts_now;
 	json_t *val;
 	char *msg;
 
+	update_base(ckp, GEN_PRIORITY);
+
 	ts_realtime(&ts_now);
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
-	ck_rlock(&workbase_lock);
-	ASPRINTF(&msg, "Block %d solved by %s!", current_workbase->height, ckp->name);
-	/* We send blank settings to ckdb with only the matching data from what we submitted
-	 * to say the block has been confirmed. */
-	JSON_CPACK(val, "{si,ss,sI,ss,ss,si,ss,ss,ss,sI,ss,ss,ss,ss}",
-			"height", current_workbase->height,
-			"confirmed", "1",
-			"workinfoid", current_workbase->id,
-			"username", "",
-			"workername", "",
-			"clientid", 0,
-			"enonce1", "",
-			"nonce2", "",
-			"nonce", "",
-			"reward", current_workbase->coinbasevalue,
-			"createdate", cdfield,
-			"createby", "code",
-			"createcode", __func__,
-			"createinet", ckp->serverurl);
-	ck_runlock(&workbase_lock);
+	mutex_lock(&block_lock);
+	DL_FOREACH_SAFE(block_solves, block, tmp) {
+		val = block->data;
+		char *solvehash;
 
-	update_base(ckp, GEN_PRIORITY);
+		json_get_string(&solvehash, val, "blockhash");
+		if (unlikely(!solvehash)) {
+			LOGERR("Failed to find blockhash in block_solve json!");
+			continue;
+		}
+		if (!strcmp(solvehash, blockhash)) {
+			dealloc(solvehash);
+			found = block;
+			DL_DELETE(block_solves, block);
+			break;
+		}
+		dealloc(solvehash);
+	}
+	mutex_unlock(&block_lock);
 
-	ck_rlock(&workbase_lock);
-	json_set_string(val, "blockhash", current_workbase->prevhash);
-	ck_runlock(&workbase_lock);
+	if (unlikely(!found)) {
+		LOGERR("Failed to find blockhash %s in block_solve!", blockhash);
+		return;
+	}
 
+	val = found->data;
+	json_set_string(val, "confirmed", "1");
+	json_set_string(val, "createdate", cdfield);
+	json_set_string(val, "createcode", __func__);
+	json_get_int(&height, val, "height");
 	ckdbq_add(ckp, ID_BLOCK, val);
+	free(found);
 
+	ASPRINTF(&msg, "Block %d solved by %s!", height, ckp->name);
 	stratum_broadcast_message(msg);
 	free(msg);
 
+	LOGWARNING("Solved and confirmed block %d", height);
+}
+
+static void block_reject(const char *blockhash)
+{
+	ckmsg_t *block, *tmp, *found = NULL;
+	int height = 0;
+	json_t *val;
+
+	mutex_lock(&block_lock);
+	DL_FOREACH_SAFE(block_solves, block, tmp) {
+		val = block->data;
+		char *solvehash;
+
+		json_get_string(&solvehash, val, "blockhash");
+		if (unlikely(!solvehash)) {
+			LOGERR("Failed to find blockhash in block_reject json!");
+			continue;
+		}
+		if (!strcmp(solvehash, blockhash)) {
+			dealloc(solvehash);
+			found = block;
+			DL_DELETE(block_solves, block);
+			break;
+		}
+		dealloc(solvehash);
+	}
+	mutex_unlock(&block_lock);
+
+	if (unlikely(!found)) {
+		LOGERR("Failed to find blockhash %s in block_reject!", blockhash);
+		return;
+	}
+	val = found->data;
+	json_get_int(&height, val, "height");
+	json_decref(val);
+	free(found);
+
+	LOGWARNING("Submitted, but rejected block %d", height);
 }
 
 /* Some upstream pools (like p2pool) don't update stratum often enough and
@@ -1334,8 +1398,7 @@ retry:
 		update_base(ckp, GEN_PRIORITY);
 	} else if (cmdmatch(buf, "subscribe")) {
 		/* Proxifier has a new subscription */
-		if (!update_subscribe(ckp))
-			goto out;
+		update_subscribe(ckp);
 	} else if (cmdmatch(buf, "notify")) {
 		/* Proxifier has a new notify ready */
 		update_notify(ckp);
@@ -1352,7 +1415,11 @@ retry:
 	} else if (cmdmatch(buf, "dropall")) {
 		drop_allclients(ckp);
 	} else if (cmdmatch(buf, "block")) {
-		block_solve(ckp);
+		block_solve(ckp, buf + 6);
+	} else if (cmdmatch(buf, "noblock")) {
+		block_reject(buf + 8);
+	} else if (cmdmatch(buf, "reconnect")) {
+		reconnect_clients();
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else {
@@ -1663,20 +1730,37 @@ static int send_recv_auth(stratum_instance_t *client)
 
 	free(json_msg);
 	if (likely(buf)) {
-		char *secondaryuserid, response[PAGESIZE] = {};
+		worker_instance_t *worker = client->worker_instance;
+		char *cmd = NULL, *secondaryuserid = NULL;
+		char response[PAGESIZE] = {};
+		json_error_t err_val;
+		json_t *val = NULL;
 
 		LOGINFO("Got ckdb response: %s", buf);
 		sscanf(buf, "id.%*d.%s", response);
-		secondaryuserid = response;
-		strsep(&secondaryuserid, ".");
-		LOGINFO("User %s Worker %s got auth response: %s  suid: %s",
+		cmd = response;
+		strsep(&cmd, "=");
+		LOGINFO("User %s Worker %s got auth response: %s  cmd: %s",
 			user_instance->username, client->workername,
-			response, secondaryuserid);
-		if (!safecmp(response, "ok") && secondaryuserid) {
+			response, cmd);
+		val = json_loads(cmd, 0, &err_val);
+		if (unlikely(!val))
+			LOGINFO("AUTH JSON decode failed(%d): %s", err_val.line, err_val.text);
+		else {
+			json_get_string(&secondaryuserid, val, "secondaryuserid");
+			json_get_int(&worker->mindiff, val, "difficultydefault");
+			client->suggest_diff = worker->mindiff;
+		}
+		if (secondaryuserid && (!safecmp(response, "ok.authorise") ||
+					!safecmp(response, "ok.addrauth"))) {
 			if (!user_instance->secondaryuserid)
-				user_instance->secondaryuserid = strdup(secondaryuserid);
+				user_instance->secondaryuserid = secondaryuserid;
+			else
+				dealloc(secondaryuserid);
 			ret = 0;
 		}
+		if (likely(val))
+			json_decref(val);
 	} else {
 		ret = -1;
 		LOGWARNING("Got no auth response from ckdb :(");
@@ -1979,8 +2063,9 @@ test_blocksolve(stratum_instance_t *client, workbase_t *wb, const uchar *data, c
 {
 	int transactions = wb->transactions + 1;
 	char hexcoinbase[1024], blockhash[68];
+	json_t *val = NULL, *val_copy;
 	char *gbt_block, varint[12];
-	json_t *val = NULL;
+	ckmsg_t *block_ckmsg;
 	char cdfield[64];
 	uchar swap[32];
 	ckpool_t *ckp;
@@ -1999,8 +2084,12 @@ test_blocksolve(stratum_instance_t *client, workbase_t *wb, const uchar *data, c
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
 	gbt_block = ckalloc(1024);
-	sprintf(gbt_block, "submitblock:");
-	__bin2hex(gbt_block + 12, data, 80);
+	flip_32(swap, hash);
+	__bin2hex(blockhash, swap, 32);
+
+	/* Message format: "submitblock:hash,data" */
+	sprintf(gbt_block, "submitblock:%s,", blockhash);
+	__bin2hex(gbt_block + 12 + 64 + 1, data, 80);
 	if (transactions < 0xfd) {
 		uint8_t val8 = transactions;
 
@@ -2025,8 +2114,6 @@ test_blocksolve(stratum_instance_t *client, workbase_t *wb, const uchar *data, c
 	send_generator(ckp, gbt_block, GEN_PRIORITY);
 	free(gbt_block);
 
-	flip_32(swap, hash);
-	__bin2hex(blockhash, swap, 32);
 	JSON_CPACK(val, "{si,ss,ss,sI,ss,ss,sI,ss,ss,ss,sI,ss,ss,ss,ss}",
 			"height", wb->height,
 			"blockhash", blockhash,
@@ -2043,6 +2130,14 @@ test_blocksolve(stratum_instance_t *client, workbase_t *wb, const uchar *data, c
 			"createby", "code",
 			"createcode", __func__,
 			"createinet", ckp->serverurl);
+	val_copy = json_deep_copy(val);
+	block_ckmsg = ckalloc(sizeof(ckmsg_t));
+	block_ckmsg->data = val_copy;
+
+	mutex_lock(&block_lock);
+	DL_APPEND(block_solves, block_ckmsg);
+	mutex_unlock(&block_lock);
+
 	ckdbq_add(ckp, ID_BLOCK, val);
 }
 
@@ -2179,12 +2274,12 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	char idstring[20];
 	uint32_t ntime32;
 	uchar hash[32];
+	int nlen, len;
 	time_t now_t;
 	json_t *val;
 	int64_t id;
 	ts_t now;
 	FILE *fp;
-	int len;
 
 	ts_realtime(&now);
 	now_t = now.tv_sec;
@@ -2253,10 +2348,20 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	wdiff = wb->diff;
 	strcpy(idstring, wb->idstring);
 	ASPRINTF(&fname, "%s.sharelog", wb->logdir);
-	/* Fix broken clients sending too many chars */
+	/* Fix broken clients sending too many chars. Nonce2 is part of the
+	 * read only json so use a temporary variable and modify it. */
 	len = wb->enonce2varlen * 2;
-	if ((int)strlen(nonce2) > len)
+	nlen = strlen(nonce2);
+	if (nlen > len) {
+		nonce2 = strdupa(nonce2);
 		nonce2[len] = '\0';
+	} else if (nlen < len) {
+		char *tmp = nonce2;
+
+		nonce2 = strdupa("0000000000000000");
+		memcpy(nonce2, tmp, nlen);
+		nonce2[len] = '\0';
+	}
 	sdiff = submission_diff(client, wb, nonce2, ntime32, nonce, hash);
 	bswap_256(sharehash, hash);
 	__bin2hex(hexhash, sharehash, 32);
@@ -2265,11 +2370,6 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		err = SE_STALE;
 		json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
 		goto out_submit;
-	}
-	if ((int)strlen(nonce2) < len) {
-		err = SE_INVALID_NONCE2;
-		*err_val = JSON_ERR(err);
-		goto out_unlock;
 	}
 	/* Ntime cannot be less, but allow forward ntime rolling up to max */
 	if (ntime32 < wb->ntime32 || ntime32 > wb->ntime32 + 7000) {
@@ -2519,11 +2619,38 @@ static json_params_t *create_json_params(const int64_t client_id, const json_t *
 	return jp;
 }
 
-#if 0
-static void set_worker_mindiff(ckpool_t *ckp, worker_instance_t *worker, int64_t mindiff)
+static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff)
 {
+	worker_instance_t *worker = NULL, *tmp;
+	char *username = strdupa(workername), *ignore;
+	user_instance_t *instance = NULL;
 	stratum_instance_t *client;
-	user_instance_t *instance;
+
+	ignore = username;
+	strsep(&ignore, "._");
+
+	/* Find the user first */
+	ck_rlock(&instance_lock);
+	HASH_FIND_STR(user_instances, username, instance);
+	ck_runlock(&instance_lock);
+
+	/* They may just have not connected yet */
+	if (!instance)
+		return LOGINFO("Failed to find user %s in set_worker_mindiff", username);
+
+	/* Then find the matching worker instance */
+	ck_rlock(&instance_lock);
+	DL_FOREACH(instance->worker_instances, tmp) {
+		if (!safecmp(workername, tmp->workername)) {
+			worker = tmp;
+			break;
+		}
+	}
+	ck_runlock(&instance_lock);
+
+	/* They may just not be connected at the moment */
+	if (!worker)
+		return LOGINFO("Failed to find worker %s in set_worker_mindiff", workername);
 
 	if (mindiff < 1)
 		return LOGINFO("Worker %s requested invalid diff %ld", worker->workername, mindiff);
@@ -2532,7 +2659,6 @@ static void set_worker_mindiff(ckpool_t *ckp, worker_instance_t *worker, int64_t
 	if (mindiff == worker->mindiff)
 		return;
 	worker->mindiff = mindiff;
-	instance = worker->instance;
 
 	/* Iterate over all the workers from this user to find any with the
 	 * matching worker that are currently live and send them a new diff
@@ -2547,25 +2673,24 @@ static void set_worker_mindiff(ckpool_t *ckp, worker_instance_t *worker, int64_t
 			continue;
 		if (mindiff == client->diff)
 			continue;
-		/* If we're going down in diff, do not allow the next diff to
-		 * be drastically lower than the current diff */
-		if (mindiff < client->diff * 2 / 3)
-			client->diff = client->diff * 2 / 3;
-		else
-			client->diff = mindiff;
+		client->diff = mindiff;
 		stratum_send_diff(client);
 	}
 	ck_runlock(&instance_lock);
 }
-#endif
 
-static void suggest_diff(stratum_instance_t *client, const char *method)
+/* Implement support for the diff in the params as well as the originally
+ * documented form of placing diff within the method. */
+static void suggest_diff(stratum_instance_t *client, const char *method, json_t *params_val)
 {
+	json_t *arr_val = json_array_get(params_val, 0);
 	int64_t sdiff;
 
 	if (unlikely(!client->authorised))
 		return LOGWARNING("Attempted to suggest diff on unauthorised client %ld", client->id);
-	if (sscanf(method, "mining.suggest_difficulty(%ld", &sdiff) != 1)
+	if (arr_val && json_is_integer(arr_val))
+		sdiff = json_integer_value(arr_val);
+	else if (sscanf(method, "mining.suggest_difficulty(%ld", &sdiff) != 1)
 		return LOGINFO("Failed to parse suggest_difficulty for client %ld", client->id);
 	if (sdiff == client->suggest_diff)
 		return;
@@ -2665,7 +2790,7 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 	}
 
 	if (cmdmatch(method, "mining.suggest")) {
-		suggest_diff(client, method);
+		suggest_diff(client, method, params_val);
 		return;
 	}
 
@@ -2822,8 +2947,8 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 {
 	json_t *result_val, *json_msg, *err_val = NULL;
 	stratum_instance_t *client;
+	int mindiff, errnum = 0;
 	int64_t client_id;
-	int errnum = 0;
 
 	client_id = jp->client_id;
 
@@ -2853,9 +2978,46 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 	json_object_set_new_nocheck(json_msg, "error", err_val ? err_val : json_null());
 	json_object_set_nocheck(json_msg, "id", jp->id_val);
 	stratum_add_send(json_msg, client_id);
+
+	if (!json_is_true(result_val) || !client->suggest_diff)
+		goto out;
+
+	/* Update the client now if they have set a valid mindiff different
+	 * from the startdiff */
+	mindiff = MAX(ckp->mindiff, client->suggest_diff);
+	if (mindiff != client->diff) {
+		client->diff = mindiff;
+		stratum_send_diff(client);
+	}
 out:
 	discard_json_params(&jp);
 
+}
+
+static void parse_ckdb_cmd(ckpool_t __maybe_unused *ckp, const char *cmd)
+{
+	json_t *val, *res_val, *arr_val;
+	json_error_t err_val;
+	size_t index;
+
+	val = json_loads(cmd, 0, &err_val);
+	if (unlikely(!val)) {
+		LOGWARNING("CKDB MSG %s JSON decode failed(%d): %s", cmd, err_val.line, err_val.text);
+		return;
+	}
+	res_val = json_object_get(val, "diffchange");
+	json_array_foreach(res_val, index, arr_val) {
+		char *workername;
+		int mindiff;
+
+		json_get_string(&workername, arr_val, "workername");
+		if (!workername)
+			continue;
+		json_get_int(&mindiff, arr_val, "difficultydefault");
+		set_worker_mindiff(ckp, workername, mindiff);
+		dealloc(workername);
+	}
+	json_decref(val);
 }
 
 static void ckdbq_process(ckpool_t *ckp, char *msg)
@@ -2887,9 +3049,17 @@ static void ckdbq_process(ckpool_t *ckp, char *msg)
 		char response[PAGESIZE] = {};
 
 		sscanf(buf, "id.%*d.%s", response);
-		if (safecmp(response, "ok"))
-			LOGINFO("Got ckdb response: %s", buf);
-		else
+		if (safecmp(response, "ok")) {
+			char *cmd;
+
+			cmd = response;
+			strsep(&cmd, ".");
+			LOGDEBUG("Got ckdb response: %s cmd %s", response, cmd);
+			if (cmdmatch(cmd, "heartbeat=")) {
+				strsep(&cmd, "=");
+				parse_ckdb_cmd(ckp, cmd);
+			}
+		} else
 			LOGWARNING("Got failed ckdb response: %s", buf);
 		free(buf);
 	}
@@ -3426,6 +3596,7 @@ int stratifier(proc_instance_t *pi)
 	create_pthread(&pth_statsupdate, statsupdate, ckp);
 
 	cklock_init(&share_lock);
+	mutex_init(&block_lock);
 
 	LOGWARNING("%s stratifier ready", ckp->name);
 

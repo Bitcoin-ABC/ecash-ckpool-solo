@@ -84,7 +84,7 @@ function dostats($data, $user)
 			$row = 'odd';
 
 		$pg .= "<tr class=$row>";
-		$pg .= '<td class=dl>'.$all[$i]['username'].'</td>';
+		$pg .= '<td class=dl>'.htmlspecialchars($all[$i]['username']).'</td>';
 		$uhr = $all[$i]['u_hashrate5m'];
 		if ($uhr == '?')
 			$dsp = '?GHs';
