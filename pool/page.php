@@ -390,7 +390,7 @@ function pgbody($info, $page, $menu, $dotop, $user, $douser)
 {
  $body = '<body onload="jst()"';
  if ($page == 'index')
-	$body .= ' background=/BTC.png';
+	$body .= ' background=/BTC20.png';
  $body .= '><div class=page>';
  $body .=  '<table border=0 cellpadding=0 cellspacing=0 width=100%>';
 

@@ -52,7 +52,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.2"
-#define CKDB_VERSION DB_VERSION"-0.516"
+#define CKDB_VERSION DB_VERSION"-0.572"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -327,6 +327,46 @@ enum cmd_values {
 // *** klists/ktrees ***
 // ***
 
+// The size strdup will allocate multiples of
+#define MEMBASE 4
+
+#define SET_POINTER(_list, _fld, _val, _def) do { \
+		size_t _siz; \
+		if ((_fld) && ((_fld) != EMPTY) && ((_fld) != (_def))) { \
+			if (_list) { \
+				_siz = strlen(_fld) + 1; \
+				if (_siz % MEMBASE) \
+					_siz += MEMBASE - (_siz % MEMBASE); \
+				_list->ram -= (int)_siz; \
+			} \
+			free(_fld); \
+		} \
+		if (!(_val) || !(*(_val))) \
+			(_fld) = EMPTY; \
+		else { \
+			if (((_val) == (_def)) || (strcmp(_val, _def) == 0)) \
+				(_fld) = (_def); \
+			else { \
+				if (_list) { \
+					_siz = strlen(_val) + 1; \
+					if (_siz % MEMBASE) \
+						_siz += MEMBASE - (_siz % MEMBASE); \
+					_list->ram += (int)_siz; \
+				} \
+				_fld = strdup(_val); \
+				if (!(_fld)) \
+					quithere(1, "malloc OOM"); \
+			} \
+		} \
+	} while (0)
+
+#define SET_CREATEBY(_list, _fld, _val) SET_POINTER(_list, _fld, _val, by_default)
+#define SET_CREATECODE(_list, _fld, _val) SET_POINTER(_list, _fld, _val, EMPTY)
+#define SET_CREATEINET(_list, _fld, _val) SET_POINTER(_list, _fld, _val, inet_default)
+#define SET_MODIFYBY(_list, _fld, _val) SET_POINTER(_list, _fld, _val, by_default)
+#define SET_MODIFYCODE(_list, _fld, _val) SET_POINTER(_list, _fld, _val, EMPTY)
+#define SET_MODIFYINET(_list, _fld, _val) SET_POINTER(_list, _fld, _val, inet_default)
+
 #define HISTORYDATECONTROL ",createdate,createby,createcode,createinet,expirydate"
 #define HISTORYDATECOUNT 5
 #define HISTORYDATECONTROLFIELDS \
@@ -384,7 +424,18 @@ enum cmd_values {
 	tv_t modifydate; \
 	char modifyby[TXT_SML+1]; \
 	char modifycode[TXT_MED+1]; \
-	char modifyinet[TXT_MED+1]
+	char modifyinet[TXT_MED+1]; \
+	bool buffers;
+#define MODIFYDATECONTROLPOINTERS \
+	tv_t createdate; \
+	char *createby; \
+	char *createcode; \
+	char *createinet; \
+	tv_t modifydate; \
+	char *modifyby; \
+	char *modifycode; \
+	char *modifyinet; \
+	bool pointers;
 
 #define MODIFYDATEINIT(_row, _cd, _by, _code, _inet) do { \
 		_row->createdate.tv_sec = (_cd)->tv_sec; \
@@ -397,6 +448,7 @@ enum cmd_values {
 		_row->modifyby[0] = '\0'; \
 		_row->modifycode[0] = '\0'; \
 		_row->modifyinet[0] = '\0'; \
+		_row->buffers = _row->buffers; \
 	} while (0)
 
 #define MODIFYUPDATE(_row, _cd, _by, _code, _inet) do { \
@@ -405,6 +457,30 @@ enum cmd_values {
 		STRNCPY(_row->modifyby, _by); \
 		STRNCPY(_row->modifycode, _code); \
 		STRNCPY(_row->modifyinet, _inet); \
+		_row->buffers = _row->buffers; \
+	} while (0)
+
+#define MODIFYDATEPOINTERS(_list, _row, _cd, _by, _code, _inet) do { \
+		_row->createdate.tv_sec = (_cd)->tv_sec; \
+		_row->createdate.tv_usec = (_cd)->tv_usec; \
+		SET_CREATEBY(_list, _row->createby, _by); \
+		SET_CREATECODE(_list, _row->createcode, _code); \
+		SET_CREATEINET(_list, _row->createinet, _inet); \
+		_row->modifydate.tv_sec = 0; \
+		_row->modifydate.tv_usec = 0; \
+		SET_MODIFYBY(_list, _row->modifyby, EMPTY); \
+		SET_MODIFYCODE(_list, _row->modifycode, EMPTY); \
+		SET_MODIFYINET(_list, _row->modifyinet, EMPTY); \
+		_row->pointers = _row->pointers; \
+	} while (0)
+
+#define MODIFYUPDATEPOINTERS(_list, _row, _cd, _by, _code, _inet) do { \
+		_row->modifydate.tv_sec = (_cd)->tv_sec; \
+		_row->modifydate.tv_usec = (_cd)->tv_usec; \
+		SET_MODIFYBY(_list, _row->modifyby, _by); \
+		SET_MODIFYCODE(_list, _row->modifycode, _code); \
+		SET_MODIFYINET(_list, _row->modifyinet, _inet); \
+		_row->pointers = _row->pointers; \
 	} while (0)
 
 #define SIMPLEDATECONTROL ",createdate,createby,createcode,createinet"
@@ -864,7 +940,7 @@ typedef struct sharesummary {
 	tv_t lastshare;
 	double lastdiffacc;
 	char complete[TXT_FLAG+1];
-	MODIFYDATECONTROLFIELDS;
+	MODIFYDATECONTROLPOINTERS;
 } SHARESUMMARY;
 
 /* After this many shares added, we need to update the DB record

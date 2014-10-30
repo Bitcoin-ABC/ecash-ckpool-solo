@@ -90,8 +90,18 @@ static pthread_cond_t sender_cond;
 static int accept_client(conn_instance_t *ci)
 {
 	client_instance_t *client, *old_client;
+	ckpool_t *ckp = ci->pi->ckp;
+	int fd, port, no_clients;
 	socklen_t address_len;
-	int fd, port;
+
+	ck_rlock(&ci->lock);
+	no_clients = HASH_COUNT(clients);
+	ck_runlock(&ci->lock);
+
+	if (ckp->maxclients && no_clients >= ckp->maxclients) {
+		LOGWARNING("Server full with %d clients", no_clients);
+		return 0;
+	}
 
 	client = ckzalloc(sizeof(client_instance_t));
 	address_len = sizeof(client->address);
@@ -167,18 +177,23 @@ static int drop_client(conn_instance_t *ci, client_instance_t *client)
 	return fd;
 }
 
+static void stratifier_drop_client(ckpool_t *ckp, int64_t id)
+{
+	char buf[256];
+
+	sprintf(buf, "dropclient=%ld", id);
+	send_proc(ckp->stratifier, buf);
+}
+
 /* Invalidate this instance. Remove them from the hashtables we look up
  * regularly but keep the instances in a linked list indefinitely in case we
  * still reference any of its members. */
 static void invalidate_client(ckpool_t *ckp, conn_instance_t *ci, client_instance_t *client)
 {
-	char buf[256];
-
 	drop_client(ci, client);
 	if (ckp->passthrough)
 		return;
-	sprintf(buf, "dropclient=%ld", client->id);
-	send_proc(ckp->stratifier, buf);
+	stratifier_drop_client(ckp, client->id);
 }
 
 static void send_client(conn_instance_t *ci, int64_t id, char *buf);
@@ -482,12 +497,16 @@ static void send_client(conn_instance_t *ci, int64_t id, char *buf)
 	ck_runlock(&ci->lock);
 
 	if (unlikely(fd == -1)) {
+		ckpool_t *ckp = ci->pi->ckp;
+
 		if (client) {
 			/* This shouldn't happen */
 			LOGWARNING("Client id %ld disconnected but fd already invalidated!", id);
-			invalidate_client(ci->pi->ckp, ci, client);
-		} else
+			invalidate_client(ckp, ci, client);
+		} else {
 			LOGINFO("Connector failed to find client id %ld to send to", id);
+			stratifier_drop_client(ckp, id);
+		}
 		free(buf);
 		return;
 	}

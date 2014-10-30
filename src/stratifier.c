@@ -175,6 +175,7 @@ static int64_t blockchange_id;
 static char lasthash[68], lastswaphash[68];
 
 struct json_params {
+	json_t *method;
 	json_t *params;
 	json_t *id_val;
 	int64_t client_id;
@@ -1217,11 +1218,22 @@ static void stratum_broadcast_message(const char *msg)
 
 /* Send a generic reconnect to all clients without parameters to make them
  * reconnect to the same server. */
-static void reconnect_clients(void)
+static void reconnect_clients(const char *cmd)
 {
+	char *port = strdupa(cmd), *url = NULL;
 	json_t *json_msg;
 
-	JSON_CPACK(json_msg, "{sosss[]}", "id", json_null(), "method", "client.reconnect",
+	strsep(&port, ":");
+	if (port)
+		url = strsep(&port, ",");
+	if (url && port) {
+		int port_no;
+
+		port_no = strtol(port, NULL, 10);
+		JSON_CPACK(json_msg, "{sosss[sii]}", "id", json_null(), "method", "client.reconnect",
+			"params", url, port_no, 0);
+	} else
+		JSON_CPACK(json_msg, "{sosss[]}", "id", json_null(), "method", "client.reconnect",
 		   "params");
 	stratum_broadcast(json_msg);
 }
@@ -1419,7 +1431,7 @@ retry:
 	} else if (cmdmatch(buf, "noblock")) {
 		block_reject(buf + 8);
 	} else if (cmdmatch(buf, "reconnect")) {
-		reconnect_clients();
+		reconnect_clients(buf);
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else {
@@ -2608,10 +2620,13 @@ static void update_client(stratum_instance_t *client, const int64_t client_id)
 	stratum_send_diff(client);
 }
 
-static json_params_t *create_json_params(const int64_t client_id, const json_t *params, const json_t *id_val, const char *address)
+static json_params_t
+*create_json_params(const int64_t client_id, json_t *method, const json_t *params,
+		    const json_t *id_val, const char *address)
 {
 	json_params_t *jp = ckalloc(sizeof(json_params_t));
 
+	jp->method = json_copy(method);
 	jp->params = json_deep_copy(params);
 	jp->id_val = json_deep_copy(id_val);
 	jp->client_id = client_id;
@@ -2697,10 +2712,7 @@ static void suggest_diff(stratum_instance_t *client, const char *method, json_t 
 	client->suggest_diff = sdiff;
 	if (client->diff == sdiff)
 		return;
-	if (sdiff < client->diff * 2 / 3)
-		client->diff = client->diff * 2 / 3;
-	else
-		client->diff = sdiff;
+	client->diff = sdiff;
 	stratum_send_diff(client);
 }
 
@@ -2765,7 +2777,7 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 	}
 
 	if (cmdmatch(method, "mining.auth") && client->subscribed) {
-		json_params_t *jp = create_json_params(client_id, params_val, id_val, address);
+		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val, address);
 
 		ckmsgq_add(sauthq, jp);
 		return;
@@ -2783,7 +2795,7 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 	}
 
 	if (cmdmatch(method, "mining.submit")) {
-		json_params_t *jp = create_json_params(client_id, params_val, id_val, address);
+		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val, address);
 
 		ckmsgq_add(sshareq, jp);
 		return;
@@ -2796,7 +2808,7 @@ static void parse_method(const int64_t client_id, json_t *id_val, json_t *method
 
 	/* Covers both get_transactions and get_txnhashes */
 	if (cmdmatch(method, "mining.get")) {
-		json_params_t *jp = create_json_params(client_id, method_val, id_val, address);
+		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val, address);
 
 		ckmsgq_add(stxnq, jp);
 		return;
@@ -2907,6 +2919,7 @@ static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 
 static void discard_json_params(json_params_t **jp)
 {
+	json_decref((*jp)->method);
 	json_decref((*jp)->params);
 	json_decref((*jp)->id_val);
 	free(*jp);
@@ -3095,7 +3108,8 @@ static json_t *txnhashes_by_jobid(int64_t id)
 
 static void send_transactions(ckpool_t *ckp, json_params_t *jp)
 {
-	const char *msg = json_string_value(jp->params);
+	const char *msg = json_string_value(jp->method),
+		*params = json_string_value(json_array_get(jp->params, 0));
 	stratum_instance_t *client;
 	json_t *val, *hashes;
 	int64_t job_id = 0;
@@ -3112,8 +3126,12 @@ static void send_transactions(ckpool_t *ckp, json_params_t *jp)
 
 		/* We don't actually send the transactions as that would use
 		 * up huge bandwidth, so we just return the number of
-		 * transactions :) */
-		sscanf(msg, "mining.get_transactions(%lx", &job_id);
+		 * transactions :) . Support both forms of encoding the
+		 * request in method name and as a parameter. */
+		if (params && strlen(params) > 0)
+			sscanf(params, "%lx", &job_id);
+		else
+			sscanf(msg, "mining.get_transactions(%lx", &job_id);
 		txns = transactions_by_jobid(job_id);
 		if (txns != -1) {
 			json_set_int(val, "result", txns);
@@ -3145,7 +3163,11 @@ static void send_transactions(ckpool_t *ckp, json_params_t *jp)
 		goto out_send;
 	}
 	client->last_txns = now_t;
-	sscanf(msg, "mining.get_txnhashes(%lx", &job_id);
+	if (!params || !strlen(params)) {
+		json_set_string(val, "error", "Invalid params");
+		goto out_send;
+	}
+	sscanf(params, "%lx", &job_id);
 	hashes = txnhashes_by_jobid(job_id);
 	if (hashes) {
 		json_object_set_new_nocheck(val, "result", hashes);

@@ -68,7 +68,7 @@ char *pqerrmsg(PGconn *conn)
 	} while (0)
 
 // MODIFY FIELDS
-#define MODIFYDATEFLDS(_res, _row, _data, _ok) do { \
+#define MODIFYDATEFLDPOINTERS(_list, _res, _row, _data, _ok) do { \
 		char *_fld; \
 		PQ_GET_FLD(_res, _row, "createdate", _fld, _ok); \
 		if (!_ok) \
@@ -77,15 +77,15 @@ char *pqerrmsg(PGconn *conn)
 		PQ_GET_FLD(_res, _row, "createby", _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_STR("createby", _fld, (_data)->createby); \
+		SET_CREATEBY(_list, (_data)->createby, _fld); \
 		PQ_GET_FLD(_res, _row, "createcode", _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_STR("createcode", _fld, (_data)->createcode); \
+		SET_CREATECODE(_list, (_data)->createcode, _fld); \
 		PQ_GET_FLD(_res, _row, "createinet", _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_STR("createinet", _fld, (_data)->createinet); \
+		SET_CREATEINET(_list, (_data)->createinet, _fld); \
 		PQ_GET_FLD(_res, _row, "modifydate", _fld, _ok); \
 		if (!_ok) \
 			break; \
@@ -93,15 +93,15 @@ char *pqerrmsg(PGconn *conn)
 		PQ_GET_FLD(_res, _row, "modifyby", _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_STR("modifyby", _fld, (_data)->modifyby); \
+		SET_MODIFYBY(_list, (_data)->modifyby, _fld); \
 		PQ_GET_FLD(_res, _row, "modifycode", _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_STR("modifycode", _fld, (_data)->modifycode); \
+		SET_MODIFYCODE(_list, (_data)->modifycode, _fld); \
 		PQ_GET_FLD(_res, _row, "modifyinet", _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_STR("modifyinet", _fld, (_data)->modifyinet); \
+		SET_MODIFYINET(_list, (_data)->modifyinet, _fld); \
 	} while (0)
 
 #define MODIFYDATEPARAMS(_params, _mod_pos, _row) do { \
@@ -2743,7 +2743,8 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 	}
 
 	// During startup, don't save 'new' sharesummaries, to reduce DB I/O
-	if (!startup_complete && row->complete[0] == SUMMARY_NEW)
+	// ... and also during normal processing
+	if (row->complete[0] == SUMMARY_NEW)
 		goto startupskip;
 
 	if (conn == NULL && !confirm_sharesummary) {
@@ -2752,7 +2753,7 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 	}
 
 	if (new || !(row->inserted)) {
-		MODIFYDATEINIT(row, cd, by, code, inet);
+		MODIFYDATEPOINTERS(sharesummary_free, row, cd, by, code, inet);
 
 		if (!confirm_sharesummary) {
 			par = 0;
@@ -2800,7 +2801,7 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 	} else {
 		bool stats_update = false;
 
-		MODIFYUPDATE(row, cd, by, code, inet);
+		MODIFYUPDATEPOINTERS(sharesummary_free, row, cd, by, code, inet);
 
 		if ((row->countlastupdate + SHARESUMMARY_UPDATE_EVERY) <
 		    (row->sharecount + row->errorcount))
@@ -3058,7 +3059,7 @@ bool sharesummary_fill(PGconn *conn)
 			break;
 		TXT_TO_STR("complete", field, row->complete);
 
-		MODIFYDATEFLDS(res, i, row, ok);
+		MODIFYDATEFLDPOINTERS(sharesummary_free, res, i, row, ok);
 		if (!ok)
 			break;
 

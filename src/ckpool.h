@@ -113,6 +113,8 @@ struct ckpool_instance {
 	int oldconnfd;
 	/* Should we inherit a running instance's socket and shut it down */
 	bool handover;
+	/* How many clients maximum to accept before rejecting further */
+	int maxclients;
 
 	/* Logger message queue NOTE: Unique per process */
 	ckmsgq_t *logger;

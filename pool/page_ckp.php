@@ -33,6 +33,7 @@ function dockp($data, $user)
  $pg .= '<td class=dr>Allocated</td>';
  $pg .= '<td class=dr>Store</td>';
  $pg .= '<td class=dr>RAM</td>';
+ $pg .= '<td class=dr>RAM2</td>';
  $pg .= '<td class=dr>Cull</td>';
  $pg .= "</tr>\n";
  if ($ans['STATUS'] == 'ok')
@@ -51,6 +52,7 @@ function dockp($data, $user)
 		$pg .= '<td class=dr>'.stnum($ans['allocated:'.$i]).'</td>';
 		$pg .= '<td class=dr>'.stnum($ans['store:'.$i]).'</td>';
 		$pg .= '<td class=dr>'.stnum($ans['ram:'.$i]).'</td>';
+		$pg .= '<td class=dr>'.stnum($ans['ram2:'.$i]).'</td>';
 		$pg .= '<td class=dr>'.stnum($ans['cull:'.$i]).'</td>';
 		$pg .= "</tr>\n";
 	}

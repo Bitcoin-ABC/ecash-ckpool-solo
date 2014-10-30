@@ -14,6 +14,102 @@ function stnum($num)
  return $b4.$fmt.$af;
 }
 #
+# ... Of course ... check the output and add the txin
+function calctx($ans, $count, $miner_sat, $diffacc_total)
+{
+ $pg = '<br><table cellpadding=0 cellspacing=0 border=0>';
+ $pg .= '<tr><td>';
+
+ $dust = getparam('dust', true);
+ if (nuem($dust) || $dust <= 0)
+	$dust = 10000;
+
+ $fee = getparam('fee', true);
+ if (nuem($fee) || $fee < 0)
+	$fee = 0;
+ $fee *= 100000000;
+
+ $adr = array();
+ $ers = '';
+ $unpaid = 0;
+ $change = $miner_sat;
+ $dust_amt = 0; # not included in $change
+ for ($i = 0; $i < $count; $i++)
+ {
+	$username = $ans['user:'.$i];
+	$diffacc_user = $ans['diffacc_user:'.$i];
+	$pay_sat = floor($miner_sat * $diffacc_user / $diffacc_total);
+	$payaddress = $ans['payaddress:'.$i];
+	if ($payaddress == 'none')
+	{
+		$len = strlen($username);
+		$c0 = substr($username, 0, 1);
+		if (($c0 == '1' || $c0 == '3') && $len > 26 && $len < 37)
+			$payaddress = $username;
+		else
+		{
+			if ($pay_sat > 0)
+			{
+				$dd = '';
+				if ($pay_sat < $dust)
+					$dd = ' (dust)';
+				$ers .= "No address for '$username'$dd<br>";
+			}
+			$unpaid += $pay_sat;
+			continue;
+		}
+	}
+	if (isset($adr[$payaddress]))
+		$adr[$payaddress] += $pay_sat;
+	else
+		$adr[$payaddress] = $pay_sat;
+
+	$change -= $pay_sat;
+ }
+
+ $txout = '';
+ $comma = '';
+ foreach ($adr as $payaddress => $pay_sat)
+ {
+	if ($pay_sat < $dust)
+		$dust_amt += $pay_sat;
+	else
+	{
+		$txout .= "$comma\"$payaddress\":".btcfmt($pay_sat);
+		$comma = ', ';
+	}
+ }
+
+ if ($change > 0 || $dust_amt > 0 || $change < $fee)
+ {
+	$pg .= "<span class=err>Dust limit = $dust = ".btcfmt($dust);
+	$pg .= ", Dust amount = $dust_amt = ".btcfmt($dust_amt);
+	$pg .= ",<br>Upaid = $unpaid = ".btcfmt($unpaid);
+	$pg .= ", Change = $change = ".btcfmt($change);
+	$pg .= ",<br>Fee = $fee = ".btcfmt($fee)."</span><br>";
+
+	if ($change < $fee)
+		$ers .= "Change ($change) is less than Fee ($fee)<br>";
+
+	if (($dust_amt + $change - $fee) > 0)
+	{
+		$txout .= "$comma\"&lt;changeaddress&gt;\":";
+		$txout .= btcfmt($dust_amt + $change - $fee);
+		$comma = ', ';
+	}
+ }
+
+ if (strlen($ers) > 0)
+	$pg .= "<span class=err>$ers</span><br>";
+
+ $txn = '[{"txid":"&lt;txid1&gt;","vout":&lt;n&gt;},';
+ $txn .= '{"txid":"&lt;txid2&gt;","vout":&lt;n&gt;}] ';
+ $txn .= '{'.$txout.'}<br>';
+
+ $pg .= $txn.'</td></tr></table>';
+ return $pg;
+}
+#
 function dopplns($data, $user)
 {
  global $send_sep;
@@ -23,13 +119,29 @@ function dopplns($data, $user)
  $blk = getparam('blk', true);
  if (nuem($blk))
  {
+	$tx = '';
+	# so can make a link
+	$blkuse = getparam('blkuse', true);
+	if (nuem($blkuse))
+		$blkuse = '';
+	else
+		$tx = 'y';
 	$pg = '<br>'.makeForm('pplns')."
-Block: <input type=text name=blk size=10 value=''>
+Block: <input type=text name=blk size=10 value='$blkuse'>
+&nbsp; Tx: <input type=text name=tx size=1 value='$tx'>
+&nbsp; Dust (Satoshi): <input type=text name=dust size=5 value='10000'>
+&nbsp; Fee (BTC): <input type=text name=fee size=5 value='0.0'>
 &nbsp;<input type=submit name=Calc value=Calc>
 </form>";
  }
  else
  {
+	$tx = getparam('tx', true);
+	if (nuem($tx) || substr($tx, 0, 1) != 'y')
+		$dotx = false;
+	else
+		$dotx = true;
+
 	$flds = array('height' => $blk, 'allow_aged' => 'Y');
 	$msg = msgEncode('pplns', 'pplns', $flds, $user);
 	$rep = sendsockreply('pplns', $msg);
@@ -42,9 +154,14 @@ Block: <input type=text name=blk size=10 value=''>
 	if ($ans['ERROR'] != null)
 		return '<font color=red size=+1><br>'.$ans['STATUS'].': '.$ans['ERROR'].'</font>';
 
+	$reward_sat = $ans['block_reward'];
+	$miner_sat = round($reward_sat * 0.991);
+	$ans['miner_sat'] = $miner_sat;
+
 	$data = array(	'Block' => 'block',
 			'Block Hash' => 'block_hash',
 			'Block Reward (Satoshis)' => 'block_reward',
+			'Miner Reward (Satoshis)' => 'miner_sat',
 			'PPLNS Wanted' => 'diff_want',
 			'PPLNS Used' => 'diffacc_total',
 			'Elapsed Seconds' => 'pplns_elapsed',
@@ -84,34 +201,28 @@ Block: <input type=text name=blk size=10 value=''>
 		$pg .= "</tr>\n";
 	}
 
-	$pg .= "</table><br><table callpadding=0 cellspacing=0 border=0>\n";
+	$pg .= "</table><br><table cellpadding=0 cellspacing=0 border=0>\n";
 	$pg .= '<tr class=title>';
 	$pg .= '<td class=dl>User</td>';
 	$pg .= '<td class=dr>Diff Accepted</td>';
 	$pg .= '<td class=dr>%</td>';
-	$pg .= '<td class=dr>Base BTC</td>';
 	$pg .= '<td class=dr>Avg Hashrate</td>';
-	$pg .= '<td class=dr>BTC -1.5%</td>';
+	$pg .= '<td class=dr>BTC -0.9%</td>';
 	$pg .= '<td class=dr>Address</td>';
 	$pg .= "</tr>\n";
 
 	$diffacc_total = $ans['diffacc_total'];
 	if ($diffacc_total == 0)
 		$diffacc_total = pow(10,15);
-	$reward = $ans['block_reward'] / pow(10,8);
 	$elapsed = $ans['pplns_elapsed'];
 	$count = $ans['rows'];
-	$tot_btc = 0;
 	$tot_pay = 0;
 	for ($i = 0; $i < $count; $i++)
 	{
 		$diffacc_user = $ans['diffacc_user:'.$i];
-		$diffacc_percent = number_format(100.0 * $diffacc_user / $diffacc_total, 2).'%';
-		$base_btc = $reward * $diffacc_user / $diffacc_total;
-		$diffacc_btc = number_format($base_btc, 8);
+		$diffacc_percent = number_format(100.0 * $diffacc_user / $diffacc_total, 3).'%';
 		$avg_hash = number_format($diffacc_user / $elapsed * pow(2,32), 0);
-		$pay_btc = $base_btc * 0.985;
-		$dsp_btc = number_format($pay_btc, 8);
+		$pay_sat = floor($miner_sat * $diffacc_user / $diffacc_total);
 		$payaddress = $ans['payaddress:'.$i];
 
 		if (($i % 2) == 0)
@@ -123,14 +234,12 @@ Block: <input type=text name=blk size=10 value=''>
 		$pg .= '<td class=dl>'.$ans['user:'.$i].'</td>';
 		$pg .= "<td class=dr>$diffacc_user</td>";
 		$pg .= "<td class=dr>$diffacc_percent</td>";
-		$pg .= "<td class=dr>$diffacc_btc</td>";
 		$pg .= "<td class=dr>$avg_hash</td>";
-		$pg .= "<td class=dr>$dsp_btc</td>";
+		$pg .= '<td class=dr>'.btcfmt($pay_sat).'</td>';
 		$pg .= "<td class=dr>$payaddress</td>";
 		$pg .= "</tr>\n";
 
-		$tot_btc += $base_btc;
-		$tot_pay += $pay_btc;
+		$tot_pay += $pay_sat;
 	}
 	if (($i % 2) == 0)
 		$row = 'even';
@@ -139,13 +248,14 @@ Block: <input type=text name=blk size=10 value=''>
 
 	$pg .= "<tr class=$row>";
 	$pg .= '<td class=dl colspan=3></td>';
-	$pg .= "<td class=dr>".number_format($tot_btc,8)."</td>";
 	$pg .= '<td class=dr></td>';
-	$pg .= '<td class=dr>'.number_format($tot_pay,8).'</td>';
+	$pg .= '<td class=dr>'.btcfmt($tot_pay).'</td>';
 	$pg .= '<td class=dr></td>';
 	$pg .= "</tr>\n";
-
 	$pg .= "</table>\n";
+
+	if ($dotx === true)
+		$pg .= calctx($ans, $count, $miner_sat, $diffacc_total);
  }
 
  return $pg;

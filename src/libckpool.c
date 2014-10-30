@@ -29,6 +29,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <math.h>
+#include <poll.h>
 
 #include "libckpool.h"
 #include "sha2.h"
@@ -704,17 +705,16 @@ out:
 	return sockd;
 }
 
+/* Emulate a select read wait for high fds that select doesn't support */
 int wait_read_select(int sockd, int timeout)
 {
-	tv_t tv_timeout;
-	fd_set readfs;
+	struct pollfd sfd;
 
-	tv_timeout.tv_sec = timeout;
-	tv_timeout.tv_usec = 0;
-
-	FD_ZERO(&readfs);
-	FD_SET(sockd, &readfs);
-	return select(sockd + 1, &readfs, NULL, NULL, &tv_timeout);
+	sfd.fd = sockd;
+	sfd.events = POLLIN;
+	sfd.revents = 0;
+	timeout *= 1000;
+	return poll(&sfd, 1, timeout);
 }
 
 int read_length(int sockd, void *buf, int len)
@@ -756,8 +756,8 @@ char *_recv_unix_msg(int sockd, const char *file, const char *func, const int li
 		goto out;
 	}
 	msglen = le32toh(msglen);
-	if (unlikely(msglen < 1)) {
-		LOGWARNING("Invalid message length zero sent to recv_unix_msg");
+	if (unlikely(msglen < 1 || msglen > 0x80000000)) {
+		LOGWARNING("Invalid message length %u sent to recv_unix_msg", msglen);
 		goto out;
 	}
 	ret = wait_read_select(sockd, 5);
@@ -768,7 +768,7 @@ char *_recv_unix_msg(int sockd, const char *file, const char *func, const int li
 	buf = ckzalloc(msglen + 1);
 	ret = read_length(sockd, buf, msglen);
 	if (unlikely(ret < (int)msglen)) {
-		LOGERR("Failed to read %d bytes in recv_unix_msg", msglen);
+		LOGERR("Failed to read %u bytes in recv_unix_msg", msglen);
 		dealloc(buf);
 	}
 out:
@@ -778,17 +778,16 @@ out:
 	return buf;
 }
 
+/* Emulate a select write wait for high fds that select doesn't support */
 int wait_write_select(int sockd, int timeout)
 {
-	tv_t tv_timeout;
-	fd_set writefds;
+	struct pollfd sfd;
 
-	tv_timeout.tv_sec = timeout;
-	tv_timeout.tv_usec = 0;
-
-	FD_ZERO(&writefds);
-	FD_SET(sockd, &writefds);
-	return select(sockd + 1, NULL, &writefds, NULL, &tv_timeout);
+	sfd.fd = sockd;
+	sfd.events = POLLOUT;
+	sfd.revents = 0;
+	timeout *= 1000;
+	return poll(&sfd, 1, timeout);
 }
 
 int write_length(int sockd, const void *buf, int len)
@@ -815,6 +814,10 @@ bool _send_unix_msg(int sockd, const char *buf, const char *file, const char *fu
 	bool retval = false;
 	int ret, ern;
 
+	if (unlikely(sockd < 0)) {
+		LOGWARNING("Attempting to send unix message to invalidated sockd %d", sockd);
+		goto out;
+	}
 	if (unlikely(!buf)) {
 		LOGWARNING("Null message sent to send_unix_msg");
 		goto out;

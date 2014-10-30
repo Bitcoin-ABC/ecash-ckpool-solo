@@ -3295,7 +3295,7 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 {
 	char tmp[1024], *buf;
 	size_t len, off;
-	uint64_t ram, tot = 0;
+	uint64_t ram, ram2, tot = 0;
 	K_LIST *klist;
 	int rows = 0;
 
@@ -3311,19 +3311,21 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	ram = sizeof(K_LIST) + _stores * sizeof(K_STORE) + \
 		klist->allocate * klist->item_mem_count * klist->siz + \
 		sizeof(K_TREE) * (klist->total - klist->count) * _trees; \
+	ram2 = klist->ram; \
 	snprintf(tmp, sizeof(tmp), \
 		 "name:%d=" #_obj "%cinitial:%d=%d%callocated:%d=%d%c" \
 		 "store:%d=%d%ctrees:%d=%d%cram:%d=%"PRIu64"%c" \
-		 "cull:%d=%d%c", \
+		 "ram2:%d=%"PRIu64"%ccull:%d=%d%c", \
 		 rows, FLDSEP, \
 		 rows, klist->allocate, FLDSEP, \
 		 rows, klist->total, FLDSEP, \
 		 rows, klist->total - klist->count, FLDSEP, \
 		 rows, _trees, FLDSEP, \
 		 rows, ram, FLDSEP, \
+		 rows, ram2, FLDSEP, \
 		 rows, klist->cull_count, FLDSEP); \
 	APPEND_REALLOC(buf, off, len, tmp); \
-	tot += ram; \
+	tot += ram + ram2; \
 	rows++;
 
 	USEINFO(users, 1, 2);

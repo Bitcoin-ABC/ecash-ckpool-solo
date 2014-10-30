@@ -48,6 +48,7 @@ typedef struct k_list {
 	void **data_memory;	// allocated item data memory buffers
 	void (*dsp_func)(K_ITEM *, FILE *); // optional data display to a file
 	int cull_count;
+	int ram;		// ram allocated for data pointers - code must manage it
 } K_LIST;
 
 /*

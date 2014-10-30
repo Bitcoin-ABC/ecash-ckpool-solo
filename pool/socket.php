@@ -14,9 +14,9 @@ function socktmo($socket, $factor)
  $usetmo = $tmo * $factor;
  $sec = floor($usetmo);
  $usec = floor(($usetmo - $sec) * 1000000);
- $tmoval = array('sec' => $sec, 'usec' => $use);
- socket_set_option($socket, SOL_SOCKET, SO_SNDTIMEO, $tmo);
- socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, $tmo);
+ $tmoval = array('sec' => $sec, 'usec' => $usec);
+ socket_set_option($socket, SOL_SOCKET, SO_SNDTIMEO, $tmoval);
+ socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, $tmoval);
 }
 #
 # Note that $port in AF_UNIX should be the socket filename
