@@ -1672,6 +1672,111 @@ static bool test_address(ckpool_t *ckp, const char *address)
 	return ret;
 }
 
+static const double nonces = 4294967296;
+
+static double dsps_from_key(json_t *val, const char *key)
+{
+	char *string, *endptr;
+	double ret = 0;
+
+	json_get_string(&string, val, key);
+	if (!string)
+		return ret;
+	ret = strtod(string, &endptr) / nonces;
+	if (endptr) {
+		switch (endptr[0]) {
+			case 'E':
+				ret *= (double)1000;
+			case 'P':
+				ret *= (double)1000;
+			case 'T':
+				ret *= (double)1000;
+			case 'G':
+				ret *= (double)1000;
+			case 'M':
+				ret *= (double)1000;
+			case 'K':
+				ret *= (double)1000;
+			default:
+				break;
+		}
+	}
+	free(string);
+	return ret;
+}
+
+static void read_userstats(ckpool_t *ckp, user_instance_t *instance)
+{
+	char s[512];
+	json_t *val;
+	FILE *fp;
+	int ret;
+
+	snprintf(s, 511, "%s/users/%s", ckp->logdir, instance->username);
+	fp = fopen(s, "re");
+	if (!fp) {
+		LOGINFO("User %s does not have a logfile to read", instance->username);
+		return;
+	}
+	memset(s, 0, 512);
+	ret = fread(s, 1, 511, fp);
+	fclose(fp);
+	if (ret < 1) {
+		LOGINFO("Failed to read user %s logfile", instance->username);
+		return;
+	}
+	val = json_loads(s, 0, NULL);
+	if (!val) {
+		LOGINFO("Failed to json decode user %s logfile: %s", instance->username, s);
+		return;
+	}
+
+	instance->dsps1 = dsps_from_key(val, "hashrate1m");
+	instance->dsps5 = dsps_from_key(val, "hashrate5m");
+	instance->dsps60 = dsps_from_key(val, "hashrate1hr");
+	instance->dsps1440 = dsps_from_key(val, "hashrate1d");
+	instance->dsps10080 = dsps_from_key(val, "hashrate7d");
+	LOGINFO("Successfully read user %s stats %f %f %f %f %f", instance->username,
+		instance->dsps1, instance->dsps5, instance->dsps60, instance->dsps1440,
+		instance->dsps10080);
+	json_decref(val);
+}
+
+static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
+{
+	char s[512];
+	json_t *val;
+	FILE *fp;
+	int ret;
+
+	snprintf(s, 511, "%s/workers/%s", ckp->logdir, worker->workername);
+	fp = fopen(s, "re");
+	if (!fp) {
+		LOGINFO("Worker %s does not have a logfile to read");
+		return;
+	}
+	memset(s, 0, 512);
+	ret = fread(s, 1, 511, fp);
+	fclose(fp);
+	if (ret < 1) {
+		LOGINFO("Failed to read worker %s logfile", worker->workername);
+		return;
+	}
+	val = json_loads(s, 0, NULL);
+	if (!val) {
+		LOGINFO("Failed to json decode worker %s logfile: %s", worker->workername, s);
+		return;
+	}
+	worker->dsps1 = dsps_from_key(val, "hashrate1m");
+	worker->dsps5 = dsps_from_key(val, "hashrate5m");
+	worker->dsps60 = dsps_from_key(val, "hashrate1d");
+	worker->dsps1440 = dsps_from_key(val, "hashrate1d");
+	LOGINFO("Successfully read worker %s stats %f %f %f %f", worker->workername,
+		worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440);
+	json_decref(val);
+}
+
+
 /* This simply strips off the first part of the workername and matches it to a
  * user or creates a new one. */
 static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
@@ -1700,6 +1805,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 
 		instance->id = user_instance_id++;
 		HASH_ADD_STR(user_instances, username, instance);
+		read_userstats(ckp, instance);
 	}
 	DL_FOREACH(instance->instances, tmp) {
 		if (!safecmp(workername, tmp->workername)) {
@@ -1714,6 +1820,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 		client->worker_instance->workername = strdup(workername);
 		client->worker_instance->instance = instance;
 		DL_APPEND(instance->worker_instances, client->worker_instance);
+		read_workerstats(ckp, client->worker_instance);
 	}
 	DL_APPEND(instance->instances, client);
 	ck_wunlock(&instance_lock);
@@ -3221,8 +3328,6 @@ out:
 	discard_json_params(&jp);
 }
 
-static const double nonces = 4294967296;
-
 /* Called every 20 seconds, we send the updated stats to ckdb of those users
  * who have gone 10 minutes between updates. This ends up staggering stats to
  * avoid floods of stat data coming at once. */
@@ -3436,13 +3541,13 @@ static void *statsupdate(void *arg)
 				ghs = worker->dsps1 * nonces;
 				suffix_string(ghs, suffix1, 16, 0);
 
-				ghs = worker->dsps5 * nonces / bias5;
+				ghs = worker->dsps5 * nonces;
 				suffix_string(ghs, suffix5, 16, 0);
 
-				ghs = worker->dsps60 * nonces / bias60;
+				ghs = worker->dsps60 * nonces;
 				suffix_string(ghs, suffix60, 16, 0);
 
-				ghs = worker->dsps1440 * nonces / bias1440;
+				ghs = worker->dsps1440 * nonces;
 				suffix_string(ghs, suffix1440, 16, 0);
 
 				JSON_CPACK(val, "{ss,ss,ss,ss}",
@@ -3477,14 +3582,15 @@ static void *statsupdate(void *arg)
 			ghs = instance->dsps1 * nonces;
 			suffix_string(ghs, suffix1, 16, 0);
 
-			ghs = instance->dsps5 * nonces / bias5;
+			ghs = instance->dsps5 * nonces;
 			suffix_string(ghs, suffix5, 16, 0);
 
-			ghs = instance->dsps60 * nonces / bias60;
+			ghs = instance->dsps60 * nonces;
 			suffix_string(ghs, suffix60, 16, 0);
 
-			ghs = instance->dsps1440 * nonces / bias1440;
+			ghs = instance->dsps1440 * nonces;
 			suffix_string(ghs, suffix1440, 16, 0);
+
 			ghs = instance->dsps10080 * nonces;
 			suffix_string(ghs, suffix10080, 16, 0);
 
