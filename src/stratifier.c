@@ -1731,6 +1731,7 @@ static void read_userstats(ckpool_t *ckp, user_instance_t *instance)
 		return;
 	}
 
+	tv_time(&instance->last_share);
 	instance->dsps1 = dsps_from_key(val, "hashrate1m");
 	instance->dsps5 = dsps_from_key(val, "hashrate5m");
 	instance->dsps60 = dsps_from_key(val, "hashrate1hr");
@@ -1752,7 +1753,7 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 	snprintf(s, 511, "%s/workers/%s", ckp->logdir, worker->workername);
 	fp = fopen(s, "re");
 	if (!fp) {
-		LOGINFO("Worker %s does not have a logfile to read");
+		LOGINFO("Worker %s does not have a logfile to read", worker->workername);
 		return;
 	}
 	memset(s, 0, 512);
@@ -1767,6 +1768,8 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 		LOGINFO("Failed to json decode worker %s logfile: %s", worker->workername, s);
 		return;
 	}
+
+	tv_time(&worker->last_share);
 	worker->dsps1 = dsps_from_key(val, "hashrate1m");
 	worker->dsps5 = dsps_from_key(val, "hashrate5m");
 	worker->dsps60 = dsps_from_key(val, "hashrate1d");
