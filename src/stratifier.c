@@ -790,24 +790,39 @@ static void send_generator(ckpool_t *ckp, const char *msg, int prio)
 		gen_priority = 0;
 }
 
+struct update_req {
+	pthread_t *pth;
+	ckpool_t *ckp;
+	int prio;
+};
+
+static void broadcast_ping(void);
+
 /* This function assumes it will only receive a valid json gbt base template
  * since checking should have been done earlier, and creates the base template
  * for generating work templates. */
-static void update_base(ckpool_t *ckp, int prio)
+static void *do_update(void *arg)
 {
+	struct update_req *ur = (struct update_req *)arg;
+	ckpool_t *ckp = ur->ckp;
 	bool new_block = false;
+	int prio = ur->prio;
+	bool ret = false;
 	workbase_t *wb;
 	json_t *val;
 	char *buf;
 
+	pthread_detach(pthread_self());
+	rename_proc("updater");
+
 	buf = send_recv_generator(ckp, "getbase", prio);
 	if (unlikely(!buf)) {
 		LOGWARNING("Failed to get base from generator in update_base");
-		return;
+		goto out;
 	}
 	if (unlikely(cmdmatch(buf, "failed"))) {
 		LOGWARNING("Generator returned failure in update_base");
-		return;
+		goto out;
 	}
 
 	wb = ckzalloc(sizeof(workbase_t));
@@ -855,6 +870,29 @@ static void update_base(ckpool_t *ckp, int prio)
 		stratum_broadcast_updates(new_block);
 	else
 		stratum_broadcast_update(new_block);
+	ret = true;
+	LOGINFO("Broadcasted updated stratum base");
+out:
+	/* Send a ping to miners if we fail to get a base to keep them
+	 * connected while bitcoind recovers(?) */
+	if (!ret) {
+		LOGWARNING("Broadcasted ping due to failed stratum base update");
+		broadcast_ping();
+	}
+	free(ur->pth);
+	free(ur);
+	return NULL;
+}
+
+static void update_base(ckpool_t *ckp, int prio)
+{
+	struct update_req *ur = ckalloc(sizeof(struct update_req));
+	pthread_t *pth = ckalloc(sizeof(pthread_t));
+
+	ur->pth = pth;
+	ur->ckp = ckp;
+	ur->prio = prio;
+	create_pthread(pth, do_update, ur);
 }
 
 static void drop_allclients(ckpool_t *ckp)
@@ -2712,7 +2750,10 @@ static void suggest_diff(stratum_instance_t *client, const char *method, json_t 
 	client->suggest_diff = sdiff;
 	if (client->diff == sdiff)
 		return;
-	client->diff = sdiff;
+	if (sdiff < client->ckp->mindiff)
+		client->diff = client->ckp->mindiff;
+	else
+		client->diff = sdiff;
 	stratum_send_diff(client);
 }
 

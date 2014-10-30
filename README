@@ -256,3 +256,6 @@ and 3334 in proxy mode.
 maximum.
 
 "logdir" : Which directory to store pool and client logs. Default "logs"
+
+"maxclients" : Optional upper limit on the number of clients ckpool will
+accept before rejecting further clients.

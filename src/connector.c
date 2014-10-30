@@ -293,12 +293,13 @@ void *receiver(void *arg)
 {
 	conn_instance_t *ci = (conn_instance_t *)arg;
 	client_instance_t *client, *tmp;
-	struct pollfd fds[65536];
-	int ret, nfds, i;
-	bool update;
+	int ret, nfds, i, maxfds = 1;
+	bool update, maxconn = true;
+	struct pollfd *fds;
 
 	rename_proc("creceiver");
 
+	fds = ckalloc(sizeof(struct pollfd));
 	/* First fd is reserved for the accepting socket */
 	fds[0].fd = ci->serverfd;
 	fds[0].events = POLLIN;
@@ -313,6 +314,14 @@ rebuild_fds:
 			LOGWARNING("Client id %d is still in fdclients hashtable with invalidated fd!",
 				   client->id);
 			continue;
+		}
+		if (nfds >= maxfds) {
+			maxfds = nfds + 1;
+			fds = realloc(fds, sizeof(struct pollfd) * maxfds);
+			if (unlikely(!fds)) {
+				LOGEMERG("FATAL: Failed to realloc fds in receiver!");
+				goto out;
+			}
 		}
 		fds[nfds].fd = client->fd;
 		fds[nfds].events = POLLIN;
@@ -370,8 +379,17 @@ repoll:
 
 	if (update)
 		goto rebuild_fds;
+	else if (unlikely(maxconn)) {
+		/* When we first start we listen to as many connections as
+		 * possible. Once we stop receiving connections we drop the
+		 * listen to the minimum to effectively ratelimit how fast we
+		 * can receive connections. */
+		maxconn = false;
+		listen(ci->serverfd, 0);
+	}
 	goto repoll;
 out:
+	free(fds);
 	return NULL;
 }
 
@@ -738,7 +756,7 @@ int connector(proc_instance_t *pi)
 	if (tries)
 		LOGWARNING("Connector successfully bound to socket");
 
-	ret = listen(sockd, 10);
+	ret = listen(sockd, SOMAXCONN);
 	if (ret < 0) {
 		LOGERR("Connector failed to listen on socket");
 		Close(sockd);
