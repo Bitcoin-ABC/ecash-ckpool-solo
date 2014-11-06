@@ -11,7 +11,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <sys/poll.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <string.h>
 #include <unistd.h>
@@ -30,6 +30,8 @@ struct connector_instance {
 	int serverfd;
 	int nfds;
 	bool accept;
+	pthread_t pth_sender;
+	pthread_t pth_receiver;
 };
 
 typedef struct connector_instance conn_instance_t;
@@ -38,9 +40,6 @@ struct client_instance {
 	/* For clients hashtable */
 	UT_hash_handle hh;
 	int64_t id;
-
-	/* For fdclients hashtable */
-	UT_hash_handle fdhh;
 	int fd;
 
 	/* For dead_clients list */
@@ -59,8 +58,6 @@ typedef struct client_instance client_instance_t;
 
 /* For the hashtable of all clients */
 static client_instance_t *clients;
-/* A hashtable of the clients sorted by fd */
-static client_instance_t *fdclients;
 /* Linked list of dead clients no longer in use but may still have references */
 static client_instance_t *dead_clients;
 
@@ -87,10 +84,11 @@ static pthread_cond_t sender_cond;
 
 /* Accepts incoming connections on the server socket and generates client
  * instances */
-static int accept_client(conn_instance_t *ci)
+static int accept_client(conn_instance_t *ci, int epfd)
 {
-	client_instance_t *client, *old_client;
 	ckpool_t *ckp = ci->pi->ckp;
+	client_instance_t *client;
+	struct epoll_event event;
 	int fd, port, no_clients;
 	socklen_t address_len;
 
@@ -98,7 +96,7 @@ static int accept_client(conn_instance_t *ci)
 	no_clients = HASH_COUNT(clients);
 	ck_runlock(&ci->lock);
 
-	if (ckp->maxclients && no_clients >= ckp->maxclients) {
+	if (unlikely(ckp->maxclients && no_clients >= ckp->maxclients)) {
 		LOGWARNING("Server full with %d clients", no_clients);
 		return 0;
 	}
@@ -143,14 +141,21 @@ static int accept_client(conn_instance_t *ci)
 	keep_sockalive(fd);
 	nolinger_socket(fd);
 
-	LOGINFO("Connected new client %d on socket %d from %s:%d", ci->nfds, fd, client->address_name, port);
+	LOGINFO("Connected new client %d on socket %d to %d active clients from %s:%d",
+		ci->nfds, fd, no_clients, client->address_name, port);
 
 	client->fd = fd;
+	event.data.ptr = client;
+	event.events = EPOLLIN;
+	if (unlikely(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) < 0)) {
+		LOGERR("Failed to epoll_ctl add in accept_client");
+		free(client);
+		return 0;
+	}
 
 	ck_wlock(&ci->lock);
 	client->id = client_id++;
 	HASH_ADD_I64(clients, id, client);
-	HASH_REPLACE(fdhh, fdclients, fd, SOI, client, old_client);
 	ci->nfds++;
 	ck_wunlock(&ci->lock);
 
@@ -166,7 +171,6 @@ static int drop_client(conn_instance_t *ci, client_instance_t *client)
 	if (fd != -1) {
 		Close(client->fd);
 		HASH_DEL(clients, client);
-		HASH_DELETE(fdhh, fdclients, client);
 		LL_PREPEND(dead_clients, client);
 	}
 	ck_wunlock(&ci->lock);
@@ -292,104 +296,64 @@ reparse:
 void *receiver(void *arg)
 {
 	conn_instance_t *ci = (conn_instance_t *)arg;
-	client_instance_t *client, *tmp;
-	int ret, nfds, i, maxfds = 1;
-	bool update, maxconn = true;
-	struct pollfd *fds;
+	struct epoll_event event;
+	bool maxconn = true;
+	int ret, epfd;
 
 	rename_proc("creceiver");
 
-	fds = ckalloc(sizeof(struct pollfd));
-	/* First fd is reserved for the accepting socket */
-	fds[0].fd = ci->serverfd;
-	fds[0].events = POLLIN;
-	fds[0].revents = 0;
-rebuild_fds:
-	update = false;
-	nfds = 1;
+	epfd = epoll_create1(EPOLL_CLOEXEC);
+	if (epfd < 0) {
+		LOGEMERG("FATAL: Failed to create epoll in receiver");
+		return NULL;
+	}
+	event.data.fd = ci->serverfd;
+	event.events = EPOLLIN;
+	ret = epoll_ctl(epfd, EPOLL_CTL_ADD, ci->serverfd, &event);
+	if (ret < 0) {
+		LOGEMERG("FATAL: Failed to add epfd %d to epoll_ctl", epfd);
+		return NULL;
+	}
 
-	ck_rlock(&ci->lock);
-	HASH_ITER(fdhh, fdclients, client, tmp) {
-		if (unlikely(client->fd == -1)) {
-			LOGWARNING("Client id %d is still in fdclients hashtable with invalidated fd!",
-				   client->id);
-			continue;
+	while (42) {
+		client_instance_t *client;
+
+		while (unlikely(!ci->accept))
+			cksleep_ms(100);
+		ret = epoll_wait(epfd, &event, 1, 1000);
+		if (unlikely(ret == -1)) {
+			LOGEMERG("FATAL: Failed to epoll_wait in receiver");
+			break;
 		}
-		if (nfds >= maxfds) {
-			maxfds = nfds + 1;
-			fds = realloc(fds, sizeof(struct pollfd) * maxfds);
-			if (unlikely(!fds)) {
-				LOGEMERG("FATAL: Failed to realloc fds in receiver!");
-				goto out;
+		if (unlikely(!ret)) {
+			if (unlikely(maxconn)) {
+				/* When we first start we listen to as many connections as
+				* possible. Once we stop receiving connections we drop the
+				* listen to the minimum to effectively ratelimit how fast we
+				* can receive connections. */
+				LOGDEBUG("Dropping listen backlog to 0");
+				maxconn = false;
+				listen(ci->serverfd, 0);
 			}
-		}
-		fds[nfds].fd = client->fd;
-		fds[nfds].events = POLLIN;
-		fds[nfds].revents = 0;
-		nfds++;
-	}
-	ck_runlock(&ci->lock);
-
-repoll:
-	while (!ci->accept)
-		cksleep_ms(100);
-
-	ret = poll(fds, nfds, 1000);
-	if (unlikely(ret < 0)) {
-		LOGERR("Failed to poll in receiver");
-		goto out;
-	}
-
-	for (i = 0; i < nfds && ret > 0; i++) {
-		int fd, accepted;
-
-		if (!fds[i].revents)
-			continue;
-
-		/* Reset for the next poll pass */
-		fds[i].events = POLLIN;
-		fds[i].revents = 0;
-		--ret;
-
-		/* Is this the listening server socket? */
-		if (i == 0) {
-			accepted = accept_client(ci);
-			if (unlikely(accepted < 0))
-				goto out;
-			if (accepted)
-				update = true;
 			continue;
 		}
-
-		client = NULL;
-		fd = fds[i].fd;
-
-		ck_rlock(&ci->lock);
-		HASH_FIND(fdhh, fdclients, &fd, SOI, client);
-		ck_runlock(&ci->lock);
-
-		if (!client) {
-			/* Probably already removed, remove lazily */
-			LOGDEBUG("Failed to find nfd client %d with polled fd %d in hashtable",
-				 i, fd);
-			update = true;
-		} else
-			parse_client_msg(ci, client);
+		if (event.data.fd == ci->serverfd) {
+			ret = accept_client(ci, epfd);
+			if (unlikely(ret < 0)) {
+				LOGEMERG("FATAL: Failed to accept_client in receiver");
+				break;
+			}
+			continue;
+		}
+		client = event.data.ptr;
+		if ((event.events & EPOLLERR) || (event.events & EPOLLHUP)) {
+			/* Client disconnected */
+			LOGDEBUG("Client fd %d HUP in epoll", client->fd);
+			invalidate_client(ci->pi->ckp, ci, client);
+			continue;
+		}
+		parse_client_msg(ci, client);
 	}
-
-	if (update)
-		goto rebuild_fds;
-	else if (unlikely(maxconn)) {
-		/* When we first start we listen to as many connections as
-		 * possible. Once we stop receiving connections we drop the
-		 * listen to the minimum to effectively ratelimit how fast we
-		 * can receive connections. */
-		maxconn = false;
-		listen(ci->serverfd, 0);
-	}
-	goto repoll;
-out:
-	free(fds);
 	return NULL;
 }
 
@@ -582,6 +546,17 @@ static int connector_loop(proc_instance_t *pi, conn_instance_t *ci)
 	LOGWARNING("%s connector ready", ckp->name);
 
 retry:
+	if (unlikely(!pthread_tryjoin_np(ci->pth_sender, NULL))) {
+		LOGEMERG("Connector sender thread shutdown, exiting");
+		ret = 1;
+		goto out;
+	}
+	if (unlikely(!pthread_tryjoin_np(ci->pth_receiver, NULL))) {
+		LOGEMERG("Connector receiver thread shutdown, exiting");
+		ret = 1;
+		goto out;
+	}
+
 	Close(sockd);
 	sockd = accept(us->sockd, NULL, NULL);
 	if (sockd < 0) {
@@ -693,7 +668,6 @@ out:
 
 int connector(proc_instance_t *pi)
 {
-	pthread_t pth_sender, pth_receiver;
 	char *url = NULL, *port = NULL;
 	ckpool_t *ckp = pi->ckp;
 	int sockd, ret = 0;
@@ -770,8 +744,8 @@ int connector(proc_instance_t *pi)
 	ci.nfds = 0;
 	mutex_init(&sender_lock);
 	cond_init(&sender_cond);
-	create_pthread(&pth_sender, sender, &ci);
-	create_pthread(&pth_receiver, receiver, &ci);
+	create_pthread(&ci.pth_sender, sender, &ci);
+	create_pthread(&ci.pth_receiver, receiver, &ci);
 
 	ret = connector_loop(pi, &ci);
 out:

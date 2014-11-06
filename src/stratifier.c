@@ -871,12 +871,12 @@ static void *do_update(void *arg)
 	else
 		stratum_broadcast_update(new_block);
 	ret = true;
-	LOGINFO("Broadcasted updated stratum base");
+	LOGINFO("Broadcast updated stratum base");
 out:
 	/* Send a ping to miners if we fail to get a base to keep them
 	 * connected while bitcoind recovers(?) */
 	if (!ret) {
-		LOGWARNING("Broadcasted ping due to failed stratum base update");
+		LOGWARNING("Broadcast ping due to failed stratum base update");
 		broadcast_ping();
 	}
 	free(ur->pth);
@@ -1136,15 +1136,6 @@ out:
 	return ret;
 }
 
-static void stratum_add_recvd(json_t *val)
-{
-	smsg_t *msg;
-
-	msg = ckzalloc(sizeof(smsg_t));
-	msg->json_msg = val;
-	ckmsgq_add(srecvs, msg);
-}
-
 /* For creating a list of sends without locking that can then be concatenated
  * to the stratum_sends list. Minimises locking and avoids taking recursive
  * locks. */
@@ -1179,13 +1170,13 @@ static void stratum_broadcast(json_t *val)
 	if (!bulk_send)
 		return;
 
-	mutex_lock(&ssends->lock);
+	mutex_lock(ssends->lock);
 	if (ssends->msgs)
 		DL_CONCAT(ssends->msgs, bulk_send);
 	else
 		ssends->msgs = bulk_send;
-	pthread_cond_signal(&ssends->cond);
-	mutex_unlock(&ssends->lock);
+	pthread_cond_signal(ssends->cond);
+	mutex_unlock(ssends->lock);
 }
 
 static void stratum_add_send(json_t *val, int64_t client_id)
@@ -1375,9 +1366,9 @@ static void broadcast_ping(void)
 {
 	json_t *json_msg;
 
-	JSON_CPACK(json_msg, "{s:[],s:o,s:s}",
+	JSON_CPACK(json_msg, "{s:[],s:i,s:s}",
 		   "params",
-		   "id", json_null(),
+		   "id", 42,
 		   "method", "mining.ping");
 
 	stratum_broadcast(json_msg);
@@ -1473,12 +1464,9 @@ retry:
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else {
-		json_t *val = json_loads(buf, 0, NULL);
-
-		if (!val) {
-			LOGWARNING("Received unrecognised message: %s", buf);
-		}  else
-			stratum_add_recvd(val);
+		/* The srecv_process frees the buf heap ram */
+		ckmsgq_add(srecvs, buf);
+		buf = NULL;
 	}
 	goto retry;
 
@@ -2977,6 +2965,15 @@ static void parse_instance_msg(smsg_t *msg)
 
 	method = json_object_get(val, "method");
 	if (unlikely(!method)) {
+		json_t *res_val = json_object_get(val, "result");
+
+		/* Is this a spurious result or ping response? */
+		if (res_val) {
+			const char *result = json_string_value(res_val);
+
+			LOGDEBUG("Received spurious response %s", result ? result : "");
+			goto out;
+		}
 		send_json_err(client_id, id_val, "-3:method not found");
 		goto out;
 	}
@@ -2995,21 +2992,25 @@ out:
 	free(msg);
 }
 
-static void srecv_process(ckpool_t *ckp, smsg_t *msg)
+static void srecv_process(ckpool_t *ckp, char *buf)
 {
 	stratum_instance_t *instance;
+	smsg_t *msg;
 	json_t *val;
 
+	val = json_loads(buf, 0, NULL);
+	if (unlikely(!val)) {
+		LOGWARNING("Received unrecognised non-json message: %s", buf);
+		goto out;
+	}
+	msg = ckzalloc(sizeof(smsg_t));
+	msg->json_msg = val;
 	val = json_object_get(msg->json_msg, "client_id");
 	if (unlikely(!val)) {
-		char *s;
-
-		s = json_dumps(msg->json_msg, 0);
-		LOGWARNING("Failed to extract client_id from connector json smsg %s", s);
-		free(s);
+		LOGWARNING("Failed to extract client_id from connector json smsg %s", buf);
 		json_decref(msg->json_msg);
 		free(msg);
-		return;
+		goto out;
 	}
 
 	msg->client_id = json_integer_value(val);
@@ -3017,14 +3018,10 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 
 	val = json_object_get(msg->json_msg, "address");
 	if (unlikely(!val)) {
-		char *s;
-
-		s = json_dumps(msg->json_msg, 0);
-		LOGWARNING("Failed to extract address from connector json smsg %s", s);
-		free(s);
+		LOGWARNING("Failed to extract address from connector json smsg %s", buf);
 		json_decref(msg->json_msg);
 		free(msg);
-		return;
+		goto out;
 	}
 	strcpy(msg->address, json_string_value(val));
 	json_object_clear(val);
@@ -3039,7 +3036,8 @@ static void srecv_process(ckpool_t *ckp, smsg_t *msg)
 	ck_wunlock(&instance_lock);
 
 	parse_instance_msg(msg);
-
+out:
+	free(buf);
 }
 
 static void discard_stratum_msg(smsg_t **msg)
@@ -3709,7 +3707,7 @@ int stratifier(proc_instance_t *pi)
 {
 	pthread_t pth_blockupdate, pth_statsupdate, pth_heartbeat;
 	ckpool_t *ckp = pi->ckp;
-	int ret = 1;
+	int ret = 1, threads;
 	char *buf;
 
 	LOGWARNING("%s stratifier starting", ckp->name);
@@ -3752,8 +3750,12 @@ int stratifier(proc_instance_t *pi)
 
 	mutex_init(&ckdb_lock);
 	ssends = create_ckmsgq(ckp, "ssender", &ssend_process);
-	srecvs = create_ckmsgq(ckp, "sreceiver", &srecv_process);
-	sshareq = create_ckmsgq(ckp, "sprocessor", &sshare_process);
+	/* Create half as many share processing threads as there are CPUs */
+	threads = sysconf(_SC_NPROCESSORS_ONLN) / 2 ? : 1;
+	sshareq = create_ckmsgqs(ckp, "sprocessor", &sshare_process, threads);
+	/* Create 1/4 as many stratum processing threads as there are CPUs */
+	threads = threads / 2 ? : 1;
+	srecvs = create_ckmsgqs(ckp, "sreceiver", &srecv_process, threads);
 	sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
 	ckdbq = create_ckmsgq(ckp, "ckdbqueue", &ckdbq_process);
 	stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);

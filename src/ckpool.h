@@ -34,8 +34,8 @@ struct ckmsgq {
 	ckpool_t *ckp;
 	char name[16];
 	pthread_t pth;
-	pthread_mutex_t lock;
-	pthread_cond_t cond;
+	pthread_mutex_t *lock;
+	pthread_cond_t *cond;
 	ckmsg_t *msgs;
 	void (*func)(ckpool_t *, void *);
 };
@@ -184,6 +184,7 @@ struct ckpool_instance {
 #endif
 
 ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func);
+ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, int count);
 void ckmsgq_add(ckmsgq_t *ckmsgq, void *data);
 bool ckmsgq_empty(ckmsgq_t *ckmsgq);
 

@@ -440,13 +440,14 @@ void block_socket(int fd)
 	fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 }
 
-void _Close(int *fd)
+void _close(int *fd, const char *file, const char *func, const int line)
 {
 	if (*fd < 0)
 		return;
 	LOGDEBUG("Closing file handle %d", *fd);
 	if (unlikely(close(*fd)))
-		LOGWARNING("Close of fd %d failed with errno %d:%s", *fd, errno, strerror(errno));
+		LOGWARNING("Close of fd %d failed with errno %d:%s from %s %s:%d",
+			   *fd, errno, strerror(errno), file, func, line);
 	*fd = -1;
 }
 
@@ -969,7 +970,6 @@ int _get_fd(int sockd, const char *file, const char *func, const int line)
 		goto out;
 	}
 out:
-	Close(sockd);
 	cm = (int *)CMSG_DATA(cmptr);
 	newfd = *cm;
 	free(cmptr);

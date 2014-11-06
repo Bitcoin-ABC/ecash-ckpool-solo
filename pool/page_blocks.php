@@ -69,12 +69,23 @@ function doblocks($data, $user)
 		else
 			$row = 'odd';
 
+		$hi = $ans['height:'.$i];
+		$hifld = "$blink$hi>$hi</a>";
+
 		$ex = '';
 		$stat = $ans['status:'.$i];
 		if ($stat == 'Orphan')
 			$ex = 's';
 		if ($stat == '1-Confirm')
-			$stat = 'Conf';
+		{
+			if (isset($data['info']['lastheight']))
+			{
+				$conf = 1 + $data['info']['lastheight'] - $hi;
+				$stat = '+'.$conf.' Confirms';
+			}
+			else
+				$stat = 'Conf';
+		}
 
 		$stara = '';
 		$starp = '';
@@ -85,9 +96,6 @@ function doblocks($data, $user)
 				$stara = '<span class=st1>*</span>';
 				$starp = '<span class=st0>*</span>';
 			}
-
-		$hi = $ans['height:'.$i];
-		$hifld = "$blink$hi>$hi</a>";
 
 		$diffacc = $ans['diffacc:'.$i];
 		$acc = number_format($diffacc, 0);

@@ -115,16 +115,16 @@ static void *ckmsg_queue(void *arg)
 		tv_t now;
 		ts_t abs;
 
-		mutex_lock(&ckmsgq->lock);
+		mutex_lock(ckmsgq->lock);
 		tv_time(&now);
 		tv_to_ts(&abs, &now);
 		abs.tv_sec++;
 		if (!ckmsgq->msgs)
-			pthread_cond_timedwait(&ckmsgq->cond, &ckmsgq->lock, &abs);
+			pthread_cond_timedwait(ckmsgq->cond, ckmsgq->lock, &abs);
 		msg = ckmsgq->msgs;
 		if (msg)
 			DL_DELETE(ckmsgq->msgs, msg);
-		mutex_unlock(&ckmsgq->lock);
+		mutex_unlock(ckmsgq->lock);
 
 		if (!msg)
 			continue;
@@ -141,9 +141,35 @@ ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func)
 	strncpy(ckmsgq->name, name, 15);
 	ckmsgq->func = func;
 	ckmsgq->ckp = ckp;
-	mutex_init(&ckmsgq->lock);
-	cond_init(&ckmsgq->cond);
+	ckmsgq->lock = ckalloc(sizeof(pthread_mutex_t));
+	ckmsgq->cond = ckalloc(sizeof(pthread_cond_t));
+	mutex_init(ckmsgq->lock);
+	cond_init(ckmsgq->cond);
 	create_pthread(&ckmsgq->pth, ckmsg_queue, ckmsgq);
+
+	return ckmsgq;
+}
+
+ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, int count)
+{
+	ckmsgq_t *ckmsgq = ckzalloc(sizeof(ckmsgq_t) * count);
+	pthread_mutex_t *lock;
+	pthread_cond_t *cond;
+	int i;
+
+	lock = ckalloc(sizeof(pthread_mutex_t));
+	cond = ckalloc(sizeof(pthread_cond_t));
+	mutex_init(lock);
+	cond_init(cond);
+
+	for (i = 0; i < count; i++) {
+		snprintf(ckmsgq[i].name, 15, "%.8s%x", name, i);
+		ckmsgq[i].func = func;
+		ckmsgq[i].ckp = ckp;
+		ckmsgq[i].lock = lock;
+		ckmsgq[i].cond = cond;
+		create_pthread(&ckmsgq[i].pth, ckmsg_queue, &ckmsgq[i]);
+	}
 
 	return ckmsgq;
 }
@@ -156,10 +182,10 @@ void ckmsgq_add(ckmsgq_t *ckmsgq, void *data)
 
 	msg->data = data;
 
-	mutex_lock(&ckmsgq->lock);
+	mutex_lock(ckmsgq->lock);
 	DL_APPEND(ckmsgq->msgs, msg);
-	pthread_cond_signal(&ckmsgq->cond);
-	mutex_unlock(&ckmsgq->lock);
+	pthread_cond_signal(ckmsgq->cond);
+	mutex_unlock(ckmsgq->lock);
 }
 
 /* Return whether there are any messages queued in the ckmsgq linked list. */
@@ -167,10 +193,10 @@ bool ckmsgq_empty(ckmsgq_t *ckmsgq)
 {
 	bool ret = true;
 
-	mutex_lock(&ckmsgq->lock);
+	mutex_lock(ckmsgq->lock);
 	if (ckmsgq->msgs)
 		ret = (ckmsgq->msgs->next == ckmsgq->msgs->prev);
-	mutex_unlock(&ckmsgq->lock);
+	mutex_unlock(ckmsgq->lock);
 
 	return ret;
 }

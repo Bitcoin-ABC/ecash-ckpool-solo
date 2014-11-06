@@ -426,8 +426,9 @@ void keep_sockalive(int fd);
 void nolinger_socket(int fd);
 void noblock_socket(int fd);
 void block_socket(int fd);
-void _Close(int *fd);
-#define Close(FD) _Close(&FD)
+void _close(int *fd, const char *file, const char *func, const int line);
+#define _Close(FD) _close(FD, __FILE__, __func__, __LINE__)
+#define Close(FD) _close(&FD, __FILE__, __func__, __LINE__)
 int bind_socket(char *url, char *port);
 int connect_socket(char *url, char *port);
 int write_socket(int fd, const void *buf, size_t nbyte);
