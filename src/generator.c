@@ -122,9 +122,13 @@ struct proxy_instance {
 
 typedef struct proxy_instance proxy_instance_t;
 
-static int proxy_notify_id;	// Globally increasing notify id
+/* Private data for the generator */
+struct generator_data {
+	int proxy_notify_id;	// Globally increasing notify id
+	ckmsgq_t *srvchk;	// Server check message queue
+};
 
-static ckmsgq_t *srvchk;	// Server check message queue
+typedef struct generator_data gdata_t;
 
 static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 {
@@ -238,6 +242,7 @@ static int gen_loop(proc_instance_t *pi)
 	bool reconnecting = false;
 	unixsock_t *us = &pi->us;
 	ckpool_t *ckp = pi->ckp;
+	gdata_t *gdata = ckp->data;
 	bool started = false;
 	char *buf = NULL;
 	connsock_t *cs;
@@ -261,7 +266,7 @@ reconnect:
 	}
 
 retry:
-	ckmsgq_add(srvchk, si);
+	ckmsgq_add(gdata->srvchk, si);
 
 	do {
 		selret = wait_read_select(us->sockd, 5);
@@ -681,6 +686,7 @@ static bool parse_notify(proxy_instance_t *proxi, json_t *val)
 {
 	const char *prev_hash, *bbversion, *nbit, *ntime;
 	char *job_id, *coinbase1, *coinbase2;
+	gdata_t *gdata = proxi->ckp->data;
 	bool clean, ret = false;
 	notify_instance_t *ni;
 	int merkles, i;
@@ -740,7 +746,7 @@ static bool parse_notify(proxy_instance_t *proxi, json_t *val)
 	ni->notify_time = time(NULL);
 
 	mutex_lock(&proxi->notify_lock);
-	ni->id = proxy_notify_id++;
+	ni->id = gdata->proxy_notify_id++;
 	HASH_ADD_INT(proxi->notify_instances, id, ni);
 	proxi->current_notify = ni;
 	mutex_unlock(&proxi->notify_lock);
@@ -1448,6 +1454,7 @@ static int proxy_loop(proc_instance_t *pi)
 	bool reconnecting = false;
 	unixsock_t *us = &pi->us;
 	ckpool_t *ckp = pi->ckp;
+	gdata_t *gdata = ckp->data;
 	char *buf = NULL;
 
 reconnect:
@@ -1474,7 +1481,7 @@ reconnect:
 	}
 
 retry:
-	ckmsgq_add(srvchk, proxi->si);
+	ckmsgq_add(gdata->srvchk, proxi->si);
 
 	do {
 		selret = wait_read_select(us->sockd, 5);
@@ -1725,16 +1732,19 @@ static void server_watchdog(ckpool_t *ckp, server_instance_t *cursi)
 int generator(proc_instance_t *pi)
 {
 	ckpool_t *ckp = pi->ckp;
+	gdata_t *gdata;
 	int ret;
 
 	LOGWARNING("%s generator starting", ckp->name);
-
-	srvchk = create_ckmsgq(ckp, "srvchk", &server_watchdog);
+	gdata = ckzalloc(sizeof(gdata_t));
+	ckp->data = gdata;
+	gdata->srvchk = create_ckmsgq(ckp, "srvchk", &server_watchdog);
 
 	if (ckp->proxy)
 		ret = proxy_mode(ckp, pi);
 	else
 		ret = server_mode(ckp, pi);
 
+	dealloc(ckp->data);
 	return process_exit(ckp, pi, ret);
 }
