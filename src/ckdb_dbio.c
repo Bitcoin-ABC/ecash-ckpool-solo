@@ -310,7 +310,6 @@ bool users_pass_email(PGconn *conn, K_ITEM *u_item, char *oldhash,
 {
 	ExecStatusType rescode;
 	bool conned = false;
-	K_TREE_CTX ctx[1];
 	PGresult *res;
 	K_ITEM *item;
 	USERS *row, *users;
@@ -428,8 +427,8 @@ unparam:
 	if (!ok)
 		k_add_head(users_free, item);
 	else {
-		users_root = remove_from_ktree(users_root, u_item, cmp_users, ctx);
-		userid_root = remove_from_ktree(userid_root, u_item, cmp_userid, ctx);
+		users_root = remove_from_ktree(users_root, u_item, cmp_users);
+		userid_root = remove_from_ktree(userid_root, u_item, cmp_userid);
 		copy_tv(&(users->expirydate), cd);
 		users_root = add_to_ktree(users_root, u_item, cmp_users);
 		userid_root = add_to_ktree(userid_root, u_item, cmp_userid);
@@ -684,7 +683,6 @@ bool useratts_item_add(PGconn *conn, K_ITEM *ua_item, tv_t *cd, bool begun)
 {
 	ExecStatusType rescode;
 	bool conned = false;
-	K_TREE_CTX ctx[1];
 	PGresult *res;
 	K_ITEM *old_item;
 	USERATTS *old_useratts, *useratts;
@@ -789,7 +787,7 @@ unparam:
 	if (ok) {
 		// Update it
 		if (old_item) {
-			useratts_root = remove_from_ktree(useratts_root, old_item, cmp_useratts, ctx);
+			useratts_root = remove_from_ktree(useratts_root, old_item, cmp_useratts);
 			copy_tv(&(old_useratts->expirydate), cd);
 			useratts_root = add_to_ktree(useratts_root, old_item, cmp_useratts);
 		}
@@ -879,7 +877,6 @@ bool useratts_item_expire(PGconn *conn, K_ITEM *ua_item, tv_t *cd)
 {
 	ExecStatusType rescode;
 	bool conned = false;
-	K_TREE_CTX ctx[1];
 	PGresult *res;
 	K_ITEM *item;
 	USERATTS *useratts;
@@ -934,7 +931,7 @@ unparam:
 
 	K_WLOCK(useratts_free);
 	if (ok && item) {
-		useratts_root = remove_from_ktree(useratts_root, item, cmp_useratts, ctx);
+		useratts_root = remove_from_ktree(useratts_root, item, cmp_useratts);
 		copy_tv(&(useratts->expirydate), cd);
 		useratts_root = add_to_ktree(useratts_root, item, cmp_useratts);
 	}
@@ -1424,7 +1421,9 @@ bool workers_fill(PGconn *conn)
 	return ok;
 }
 
-// Whatever the current paymentaddresses are, replace them with this one
+/* Whatever the current paymentaddresses are, replace them with this one
+ * Code allows for zero, one or more current payment address
+ *  even though there currently can only be zero or one */
 K_ITEM *paymentaddresses_set(PGconn *conn, int64_t userid, char *payaddress,
 				char *by, char *code, char *inet, tv_t *cd,
 				K_TREE *trf_root)
@@ -1432,7 +1431,7 @@ K_ITEM *paymentaddresses_set(PGconn *conn, int64_t userid, char *payaddress,
 	ExecStatusType rescode;
 	bool conned = false;
 	PGresult *res;
-	K_TREE_CTX ctx[1], ctx2[1];
+	K_TREE_CTX ctx[1];
 	K_ITEM *item, *old, *this, look;
 	PAYMENTADDRESSES *row, pa, *thispa;
 	char *upd, *ins;
@@ -1529,12 +1528,13 @@ unitem:
 	if (!ok)
 		k_add_head(paymentaddresses_free, item);
 	else {
-		// Remove from ram, old (unneeded) records
+		// Change the expiry on all the old ones
 		pa.userid = userid;
 		pa.expirydate.tv_sec = DATE_S_EOT;
 		pa.payaddress[0] = '\0';
 		INIT_PAYMENTADDRESSES(&look);
 		look.data = (void *)(&pa);
+		// Tree order is expirydate desc
 		old = find_after_in_ktree(paymentaddresses_root, &look,
 					  cmp_paymentaddresses, ctx);
 		while (old) {
@@ -1543,9 +1543,15 @@ unitem:
 			if (thispa->userid != userid)
 				break;
 			old = next_in_ktree(ctx);
-			paymentaddresses_root = remove_from_ktree(paymentaddresses_root, this,
-								  cmp_paymentaddresses, ctx2);
-			k_add_head(paymentaddresses_free, this);
+			/* Tree remove+add below doesn't matter since
+			 * this test will avoid reprocessing */
+			if (CURRENT(&(thispa->expirydate))) {
+				paymentaddresses_root = remove_from_ktree(paymentaddresses_root, this,
+									  cmp_paymentaddresses);
+				copy_tv(&(thispa->expirydate), cd);
+				paymentaddresses_root = add_to_ktree(paymentaddresses_root, this,
+								     cmp_paymentaddresses);
+			}
 		}
 		paymentaddresses_root = add_to_ktree(paymentaddresses_root, item,
 						     cmp_paymentaddresses);
@@ -1565,8 +1571,7 @@ bool paymentaddresses_fill(PGconn *conn)
 	PGresult *res;
 	K_ITEM *item;
 	PAYMENTADDRESSES *row;
-	char *params[1];
-	int n, i, par = 0;
+	int n, i;
 	char *field;
 	char *sel;
 	int fields = 4;
@@ -1577,11 +1582,8 @@ bool paymentaddresses_fill(PGconn *conn)
 	sel = "select "
 		"paymentaddressid,userid,payaddress,payratio"
 		HISTORYDATECONTROL
-		" from paymentaddresses where expirydate=$1";
-	par = 0;
-	params[par++] = tv_to_buf((tv_t *)(&default_expiry), NULL, 0);
-	PARCHK(par, params);
-	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
+		" from paymentaddresses";
+	res = PQexec(conn, sel, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
 		PGLOGERR("Select", rescode, conn);
@@ -1933,7 +1935,7 @@ nostart:
 		// Discard it
 		if (old_item) {
 			optioncontrol_root = remove_from_ktree(optioncontrol_root, old_item,
-							       cmp_optioncontrol, ctx);
+							       cmp_optioncontrol);
 			k_add_head(optioncontrol_free, old_item);
 		}
 		optioncontrol_root = add_to_ktree(optioncontrol_root, oc_item, cmp_optioncontrol);
@@ -2141,7 +2143,9 @@ int64_t workinfo_add(PGconn *conn, char *workinfoidstr, char *poolinstance,
 	K_WLOCK(workinfo_free);
 	if (find_in_ktree(workinfo_root, item, cmp_workinfo, ctx)) {
 		free(row->transactiontree);
+		row->transactiontree = NULL;
 		free(row->merklehash);
+		row->merklehash = NULL;
 		workinfoid = row->workinfoid;
 		k_add_head(workinfo_free, item);
 		K_WUNLOCK(workinfo_free);
@@ -2204,7 +2208,9 @@ unparam:
 	K_WLOCK(workinfo_free);
 	if (workinfoid == -1) {
 		free(row->transactiontree);
+		row->transactiontree = NULL;
 		free(row->merklehash);
+		row->merklehash = NULL;
 		k_add_head(workinfo_free, item);
 	} else {
 		if (row->transactiontree && *(row->transactiontree)) {
@@ -2240,7 +2246,7 @@ bool workinfo_fill(PGconn *conn)
 	PGresult *res;
 	K_ITEM *item;
 	WORKINFO *row;
-	char *params[1];
+	char *params[3];
 	int n, i, par = 0;
 	char *field;
 	char *sel;
@@ -2257,9 +2263,13 @@ bool workinfo_fill(PGconn *conn)
 		"workinfoid,poolinstance,merklehash,prevhash,"
 		"coinbase1,coinbase2,version,bits,ntime,reward"
 		HISTORYDATECONTROL
-		" from workinfo where expirydate=$1";
+		" from workinfo where expirydate=$1 and"
+		" ((workinfoid>=$2 and workinfoid<=$3) or"
+		"  workinfoid in (select workinfoid from blocks) )";
 	par = 0;
 	params[par++] = tv_to_buf((tv_t *)(&default_expiry), NULL, 0);
+	params[par++] = bigint_to_buf(dbload_workinfoid_start, NULL, 0);
+	params[par++] = bigint_to_buf(dbload_workinfoid_finish, NULL, 0);
 	PARCHK(par, params);
 	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
 	rescode = PQresultStatus(res);
@@ -2915,8 +2925,9 @@ bool sharesummary_fill(PGconn *conn)
 	ExecStatusType rescode;
 	PGresult *res;
 	K_ITEM *item;
-	int n, i;
+	int n, i, par = 0;
 	SHARESUMMARY *row;
+	char *params[2];
 	char *field;
 	char *sel;
 	int fields = 19;
@@ -2931,8 +2942,12 @@ bool sharesummary_fill(PGconn *conn)
 		"sharecount,errorcount,firstshare,lastshare,"
 		"lastdiffacc,complete"
 		MODIFYDATECONTROL
-		" from sharesummary";
-	res = PQexec(conn, sel, CKPQ_READ);
+		" from sharesummary where workinfoid>=$1 and workinfoid<=$2";
+	par = 0;
+	params[par++] = bigint_to_buf(dbload_workinfoid_start, NULL, 0);
+	params[par++] = bigint_to_buf(dbload_workinfoid_finish, NULL, 0);
+	PARCHK(par, params);
+	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
 		PGLOGERR("Select", rescode, conn);
@@ -3118,7 +3133,6 @@ bool blocks_stats(PGconn *conn, int32_t height, char *blockhash,
 	ExecStatusType rescode;
 	bool conned = false;
 	PGresult *res = NULL;
-	K_TREE_CTX ctx[1];
 	K_ITEM *b_item, *old_b_item;
 	BLOCKS *row, *oldblocks;
 	char hash_dsp[16+1];
@@ -3243,7 +3257,7 @@ unparam:
 		k_add_head(blocks_free, b_item);
 	else {
 		if (update_old) {
-			blocks_root = remove_from_ktree(blocks_root, old_b_item, cmp_blocks, ctx);
+			blocks_root = remove_from_ktree(blocks_root, old_b_item, cmp_blocks);
 			copy_tv(&(oldblocks->expirydate), cd);
 			blocks_root = add_to_ktree(blocks_root, old_b_item, cmp_blocks);
 		}
@@ -3265,7 +3279,6 @@ bool blocks_add(PGconn *conn, char *height, char *blockhash,
 	ExecStatusType rescode;
 	bool conned = false;
 	PGresult *res = NULL;
-	K_TREE_CTX ctx[1];
 	K_ITEM *b_item, *u_item, *old_b_item;
 	char cd_buf[DATE_BUFSIZ];
 	char hash_dsp[16+1];
@@ -3546,7 +3559,7 @@ flail:
 		k_add_head(blocks_free, b_item);
 	else {
 		if (update_old) {
-			blocks_root = remove_from_ktree(blocks_root, old_b_item, cmp_blocks, ctx);
+			blocks_root = remove_from_ktree(blocks_root, old_b_item, cmp_blocks);
 			copy_tv(&(oldblocks->expirydate), cd);
 			blocks_root = add_to_ktree(blocks_root, old_b_item, cmp_blocks);
 		}

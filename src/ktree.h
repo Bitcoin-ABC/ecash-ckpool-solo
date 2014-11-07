@@ -70,7 +70,8 @@ extern K_ITEM *_find_after_in_ktree(K_TREE *ktree, K_ITEM *data, cmp_t (*cmp_fun
 extern K_ITEM *_find_before_in_ktree(K_TREE *ktree, K_ITEM *data, cmp_t (*cmp_funct)(K_ITEM *, K_ITEM *), K_TREE_CTX *ctx, KTREE_FFL_ARGS);
 #define find_before_in_ktree(_ktree, _data, _cmp_funct, _ctx) _find_before_in_ktree(_ktree, _data, _cmp_funct, _ctx, KLIST_FFL_HERE)
 extern K_TREE *_remove_from_ktree(K_TREE *root, K_ITEM *data, cmp_t (*cmp_funct)(K_ITEM *, K_ITEM *), K_TREE_CTX *ctx, KTREE_FFL_ARGS);
-#define remove_from_ktree(_root, _data, _cmp_funct, _ctx) _remove_from_ktree(_root, _data, _cmp_funct, _ctx, KLIST_FFL_HERE)
+extern K_TREE *_remove_from_ktree_free(K_TREE *root, K_ITEM *data, cmp_t (*cmp_funct)(K_ITEM *, K_ITEM *), KTREE_FFL_ARGS);
+#define remove_from_ktree(_root, _data, _cmp_funct) _remove_from_ktree_free(_root, _data, _cmp_funct, KLIST_FFL_HERE)
 extern K_TREE *_free_ktree(K_TREE *root, void (*free_funct)(void *), KTREE_FFL_ARGS);
 #define free_ktree(_root, _free_funct) _free_ktree(_root, _free_funct, KLIST_FFL_HERE)
 

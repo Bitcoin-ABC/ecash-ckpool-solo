@@ -52,7 +52,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.2"
-#define CKDB_VERSION DB_VERSION"-0.572"
+#define CKDB_VERSION DB_VERSION"-0.602"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -224,6 +224,11 @@ extern int64_t confirm_last_workinfoid;
 /* Stop the reload 11min after the 'last' workinfoid+1 appears
  * ckpool uses 10min - but add 1min to be sure */
 #define WORKINFO_AGE 660
+
+/* Allow defining the workinfoid range used in the db load of
+ * workinfo and sharesummary */
+extern int64_t dbload_workinfoid_start;
+extern int64_t dbload_workinfoid_finish;
 
 // DB users,workers,auth load is complete
 extern bool db_auths_complete;
@@ -998,8 +1003,8 @@ typedef struct blocks {
 // 42 doesn't actually mean '42' it means matured
 #define BLOCKS_42 'F'
 #define BLOCKS_42_STR "F"
-// Current block maturity is ... 100
-#define BLOCKS_42_VALUE 100
+// Current block maturity is ...
+#define BLOCKS_42_VALUE 101
 #define BLOCKS_ORPHAN 'O'
 #define BLOCKS_ORPHAN_STR "O"
 /* Block height difference required before checking if it's orphaned

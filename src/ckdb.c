@@ -150,6 +150,11 @@
  *	and a warning is displayed if there were any matching shares
  */
 
+static bool socketer_using_data;
+static bool summariser_using_data;
+static bool logger_using_data;
+static bool listener_using_data;
+
 char *EMPTY = "";
 
 static char *db_name;
@@ -256,6 +261,11 @@ int64_t confirm_last_workinfoid;
 static tv_t confirm_finish;
 
 static tv_t reload_timestamp;
+
+/* Allow overriding the workinfoid range used in the db load of
+ * workinfo and sharesummary */
+int64_t dbload_workinfoid_start = -1;
+int64_t dbload_workinfoid_finish = MAXID;
 
 // DB users,workers,auth load is complete
 bool db_auths_complete = false;
@@ -484,12 +494,12 @@ void logmsg(int loglevel, const char *fmt, ...)
 
 	now_t = time(NULL);
 	localtime_r(&now_t, &tm);
-	minoff = timezone / 60;
+	minoff = tm.tm_gmtoff / 60;
 	if (minoff < 0) {
-		tzch = '+';
+		tzch = '-';
 		minoff *= -1;
 	} else
-		tzch = '-';
+		tzch = '+';
 	hroff = minoff / 60;
 	if (minoff % 60) {
 		snprintf(tzinfo, sizeof(tzinfo),
@@ -678,13 +688,24 @@ matane:
 	return ok;
 }
 
+/* Load blocks first to allow data range settings to know
+ * the blocks info for setting limits for tables in getdata3()
+ */
 static bool getdata2()
+{
+	PGconn *conn = dbconnect();
+	bool ok = blocks_fill(conn);
+
+	PQfinish(conn);
+
+	return ok;
+}
+
+static bool getdata3()
 {
 	PGconn *conn = dbconnect();
 	bool ok = true;
 
-	if (!(ok = blocks_fill(conn)) || everyone_die)
-		goto sukamudai;
 	if (!confirm_sharesummary) {
 		if (!(ok = paymentaddresses_fill(conn)) || everyone_die)
 			goto sukamudai;
@@ -979,6 +1000,149 @@ static void alloc_storage()
 	workerstatus_root = new_ktree();
 }
 
+static void free_workinfo_data(K_ITEM *item)
+{
+	WORKINFO *workinfo;
+
+	DATA_WORKINFO(workinfo, item);
+	if (workinfo->transactiontree)
+		free(workinfo->transactiontree);
+	if (workinfo->merklehash)
+		free(workinfo->merklehash);
+}
+
+static void free_sharesummary_data(K_ITEM *item)
+{
+	SHARESUMMARY *sharesummary;
+
+	DATA_SHARESUMMARY(sharesummary, item);
+	SET_CREATEBY(sharesummary_free, sharesummary->createby, EMPTY);
+	SET_CREATECODE(sharesummary_free, sharesummary->createcode, EMPTY);
+	SET_CREATEINET(sharesummary_free, sharesummary->createinet, EMPTY);
+	SET_MODIFYBY(sharesummary_free, sharesummary->modifyby, EMPTY);
+	SET_MODIFYCODE(sharesummary_free, sharesummary->modifycode, EMPTY);
+	SET_MODIFYINET(sharesummary_free, sharesummary->modifyinet, EMPTY);
+}
+
+static void free_optioncontrol_data(K_ITEM *item)
+{
+	OPTIONCONTROL *optioncontrol;
+
+	DATA_OPTIONCONTROL(optioncontrol, item);
+	if (optioncontrol->optionvalue)
+		free(optioncontrol->optionvalue);
+}
+
+
+#define FREE_TREE(_tree) \
+	if (_tree ## _root) \
+		_tree ## _root = free_ktree(_tree ## _root, NULL) \
+
+#define FREE_STORE(_list) \
+	if (_list ## _store) \
+		_list ## _store = k_free_store(_list ## _store) \
+
+#define FREE_LIST(_list) \
+	if (_list ## _free) \
+		_list ## _free = k_free_list(_list ## _free) \
+
+#define FREE_ALL(_list) FREE_TREE(_list); FREE_STORE(_list); FREE_LIST(_list)
+
+#define FREE_LISTS(_list) FREE_STORE(_list); FREE_LIST(_list)
+
+static void dealloc_storage()
+{
+	K_ITEM *item;
+
+	FREE_LISTS(logqueue);
+	FREE_ALL(workerstatus);
+
+	FREE_TREE(userstats_workerstatus);
+	FREE_TREE(userstats_statsdate);
+	if (userstats_summ)
+		 userstats_summ = k_free_store(userstats_summ);
+	FREE_STORE(userstats_eos);
+	FREE_ALL(userstats);
+
+	FREE_ALL(poolstats);
+	FREE_ALL(auths);
+	FREE_ALL(miningpayouts);
+	FREE_ALL(blocks);
+
+	FREE_TREE(sharesummary_workinfoid);
+	FREE_TREE(sharesummary);
+	if (sharesummary_store) {
+		item = sharesummary_store->head;
+		while (item) {
+			free_sharesummary_data(item);
+			item = item->next;
+		}
+		FREE_STORE(sharesummary);
+	}
+	if (sharesummary_free) {
+		item = sharesummary_free->head;
+		while (item) {
+			free_sharesummary_data(item);
+			item = item->next;
+		}
+		FREE_LIST(sharesummary);
+	}
+
+	FREE_ALL(shareerrors);
+	FREE_ALL(shares);
+
+	FREE_TREE(workinfo_height);
+	FREE_TREE(workinfo);
+	if (workinfo_store) {
+		item = workinfo_store->head;
+		while (item) {
+			free_workinfo_data(item);
+			item = item->next;
+		}
+		FREE_STORE(workinfo);
+	}
+	if (workinfo_free) {
+		item = workinfo_free->head;
+		while (item) {
+			free_workinfo_data(item);
+			item = item->next;
+		}
+		FREE_LIST(workinfo);
+	}
+
+	FREE_LISTS(idcontrol);
+	FREE_ALL(payments);
+	FREE_ALL(paymentaddresses);
+	FREE_ALL(workers);
+
+	FREE_TREE(optioncontrol);
+	if (optioncontrol_store) {
+		item = optioncontrol_store->head;
+		while (item) {
+			free_optioncontrol_data(item);
+			item = item->next;
+		}
+		FREE_STORE(optioncontrol);
+	}
+	if (optioncontrol_free) {
+		item = optioncontrol_free->head;
+		while (item) {
+			free_optioncontrol_data(item);
+			item = item->next;
+		}
+		FREE_LIST(optioncontrol);
+	}
+
+	FREE_ALL(useratts);
+
+	FREE_TREE(userid);
+	FREE_ALL(users);
+
+	FREE_LIST(transfer);
+	FREE_LISTS(heartbeatqueue);
+	FREE_LISTS(workqueue);
+}
+
 static bool setup_data()
 {
 	K_TREE_CTX ctx[1];
@@ -999,6 +1163,14 @@ static bool setup_data()
 	cksem_post(&socketer_sem);
 
 	if (!getdata2() || everyone_die)
+		return false;
+
+	if (dbload_workinfoid_start != -1) {
+		LOGWARNING("WARNING: dbload starting at workinfoid %"PRId64,
+			   dbload_workinfoid_start);
+	}
+
+	if (!getdata3() || everyone_die)
 		return false;
 
 	db_load_complete = true;
@@ -1434,7 +1606,7 @@ static void summarise_poolstats()
 // TODO: consider limiting how much/how long this processes each time
 static void summarise_userstats()
 {
-	K_TREE_CTX ctx[1], ctx2[1];
+	K_TREE_CTX ctx[1];
 	K_ITEM *first, *last, *new, *next, *tmp;
 	USERSTATS *userstats, *us_first, *us_last, *us_next;
 	double statrange, factor;
@@ -1503,9 +1675,9 @@ static void summarise_userstats()
 		DATA_USERSTATS(userstats, new);
 		memcpy(userstats, us_first, sizeof(USERSTATS));
 
-		userstats_root = remove_from_ktree(userstats_root, first, cmp_userstats, ctx2);
+		userstats_root = remove_from_ktree(userstats_root, first, cmp_userstats);
 		userstats_statsdate_root = remove_from_ktree(userstats_statsdate_root, first,
-							     cmp_userstats_statsdate, ctx2);
+							     cmp_userstats_statsdate);
 		k_unlink_item(userstats_store, first);
 		k_add_head(userstats_summ, first);
 
@@ -1530,9 +1702,9 @@ static void summarise_userstats()
 					userstats->elapsed = us_next->elapsed;
 				userstats->summarycount += us_next->summarycount;
 
-				userstats_root = remove_from_ktree(userstats_root, next, cmp_userstats, ctx2);
+				userstats_root = remove_from_ktree(userstats_root, next, cmp_userstats);
 				userstats_statsdate_root = remove_from_ktree(userstats_statsdate_root, next,
-									     cmp_userstats_statsdate, ctx2);
+									     cmp_userstats_statsdate);
 				k_unlink_item(userstats_store, next);
 				k_add_head(userstats_summ, next);
 			}
@@ -1621,6 +1793,8 @@ static void summarise_userstats()
 
 static void *summariser(__maybe_unused void *arg)
 {
+	int i;
+
 	pthread_detach(pthread_self());
 
 	rename_proc("db_summariser");
@@ -1628,22 +1802,42 @@ static void *summariser(__maybe_unused void *arg)
 	while (!everyone_die && !db_load_complete)
 		cksleep_ms(42);
 
+	summariser_using_data = true;
+
 	while (!everyone_die) {
-		sleep(5);
-		if (!everyone_die) {
+		for (i = 0; i < 5; i++) {
+			if (!everyone_die)
+				sleep(1);
+		}
+		if (everyone_die)
+			break;
+		else {
 			if (startup_complete)
 				check_blocks();
-			summarise_blocks();
+			if (!everyone_die)
+				summarise_blocks();
 		}
 
-		sleep(4);
-		if (!everyone_die)
+		for (i = 0; i < 4; i++) {
+			if (!everyone_die)
+				sleep(1);
+		}
+		if (everyone_die)
+			break;
+		else
 			summarise_poolstats();
 
-		sleep(4);
-		if (!everyone_die)
+		for (i = 0; i < 4; i++) {
+			if (!everyone_die)
+				sleep(1);
+		}
+		if (everyone_die)
+			break;
+		else
 			summarise_userstats();
 	}
+
+	summariser_using_data = false;
 
 	return NULL;
 }
@@ -1659,6 +1853,8 @@ static void *logger(__maybe_unused void *arg)
 
 	snprintf(buf, sizeof(buf), "db%s_logger", dbcode);
 	rename_proc(buf);
+
+	logger_using_data = true;
 
 	setnow(&now);
 	snprintf(buf, sizeof(buf), "logstart.%ld,%ld",
@@ -1691,11 +1887,18 @@ static void *logger(__maybe_unused void *arg)
 				   logqueue_store->count,
 				   now.tv_sec, now.tv_usec);
 	LOGFILE(buf);
-	while((lq_item = k_unlink_head(logqueue_store))) {
+	if (logqueue_store->count)
+		LOGERR("%s", buf);
+	lq_item = logqueue_store->head;
+	while (lq_item) {
 		DATA_LOGQUEUE(lq, lq_item);
 		LOGFILE(lq->msg);
+		free(lq->msg);
+		lq_item = lq_item->next;
 	}
 	K_WUNLOCK(logqueue_free);
+
+	logger_using_data = false;
 
 	setnow(&now);
 	snprintf(buf, sizeof(buf), "logstop.%ld,%ld",
@@ -1751,6 +1954,8 @@ static void *socketer(__maybe_unused void *arg)
 
 	while (!everyone_die && !db_auths_complete)
 		cksem_mswait(&socketer_sem, 420);
+
+	socketer_using_data = true;
 
 	want_first = true;
 	while (!everyone_die) {
@@ -2101,6 +2306,8 @@ static void *socketer(__maybe_unused void *arg)
 		}
 	}
 
+	socketer_using_data = false;
+
 	if (buf)
 		dealloc(buf);
 	// TODO: if anyone cares, free all the dup buffers :P
@@ -2447,6 +2654,8 @@ static void *listener(void *arg)
 
 	rename_proc("db_listener");
 
+	listener_using_data = true;
+
 	if (!setup_data()) {
 		if (!everyone_die) {
 			LOGEMERG("ABORTING");
@@ -2501,6 +2710,8 @@ static void *listener(void *arg)
 			mutex_unlock(&wq_waitlock);
 		}
 	}
+
+	listener_using_data = false;
 
 	if (conn)
 		PQfinish(conn);
@@ -2834,8 +3045,17 @@ static void confirm_reload()
 				   __func__, workinfo->workinfoid);
 		}
 	} else {
-		start.tv_sec = start.tv_usec = 0;
-		LOGWARNING("%s() no start workinfo found ... using time 0", __func__);
+		if (confirm_first_workinfoid == 0) {
+			start.tv_sec = start.tv_usec = 0;
+			LOGWARNING("%s() no start workinfo found ... "
+				   "using time 0", __func__);
+		} else {
+			// Abort, otherwise reload will reload all log files
+			LOGERR("%s(): Start workinfoid doesn't exist, "
+			       "use 0 to mean from the beginning of time",
+			       __func__);
+			return;
+		}
 	}
 
 	/* Find the workinfo after confirm_last_workinfoid-1
@@ -2995,6 +3215,8 @@ static void confirm_summaries()
 					return;
 				}
 				free(range);
+				dbload_workinfoid_start = confirm_range_start - 1;
+				dbload_workinfoid_finish = confirm_range_finish + 1;
 				break;
 			case 'w':
 				confirm_range_start = atoll(confirm_range+1);
@@ -3023,6 +3245,11 @@ static void confirm_summaries()
 
 	if (!getdata2()) {
 		LOGEMERG("%s() ABORTING from getdata2()", __func__);
+		return;
+	}
+
+	if (!getdata3()) {
+		LOGEMERG("%s() ABORTING from getdata3()", __func__);
 		return;
 	}
 
@@ -3071,6 +3298,7 @@ static struct option long_options[] = {
 	{ "dbuser",		required_argument,	0,	'u' },
 	{ "btc-user",		required_argument,	0,	'U' },
 	{ "version",		no_argument,		0,	'v' },
+	{ "workinfoid",		required_argument,	0,	'w' },
 	{ "confirm",		no_argument,		0,	'y' },
 	{ "confirmrange",	required_argument,	0,	'Y' },
 	{ 0, 0, 0, 0 }
@@ -3103,7 +3331,7 @@ int main(int argc, char **argv)
 	memset(&ckp, 0, sizeof(ckp));
 	ckp.loglevel = LOG_NOTICE;
 
-	while ((c = getopt_long(argc, argv, "c:d:hkl:n:p:P:r:R:s:S:t:u:U:vyY:", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "c:d:hkl:n:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
 		switch(c) {
 			case 'c':
 				ckp.config = strdup(optarg);
@@ -3189,6 +3417,18 @@ int main(int argc, char **argv)
 				break;
 			case 'v':
 				exit(0);
+			case 'w':
+				// Don't use this :)
+				{
+					int64_t start = atoll(optarg);
+					if (start < 0) {
+						quit(1, "Invalid workinfoid start"
+						     " %"PRId64" - must be >= 0",
+						     start);
+					}
+					dbload_workinfoid_start = start;
+				}
+				break;
 			case 'y':
 				confirm_sharesummary = true;
 				break;
@@ -3269,6 +3509,7 @@ int main(int argc, char **argv)
 	if (confirm_sharesummary) {
 		// TODO: add a system lock to stop running 2 at once?
 		confirm_summaries();
+		everyone_die = true;
 	} else {
 		ckp.main.sockname = strdup("listener");
 		write_namepid(&ckp.main);
@@ -3285,6 +3526,36 @@ int main(int argc, char **argv)
 		/* Shutdown from here if the listener is sent a shutdown message */
 		join_pthread(ckp.pth_listener);
 	}
+
+	time_t start, trigger, curr;
+	char *msg = NULL;
+
+	trigger = start = time(NULL);
+	while (socketer_using_data || summariser_using_data ||
+		logger_using_data || listener_using_data) {
+		msg = NULL;
+		curr = time(NULL);
+		if (curr - start > 4) {
+			if (curr - trigger > 4) {
+				msg = "Shutdown initial delay";
+			} else if (curr - trigger > 2) {
+				msg = "Shutdown delay";
+			}
+		}
+		if (msg) {
+			trigger = curr;
+			printf("%s %ds due to%s%s%s%s\n",
+				msg, (int)(curr - start),
+				socketer_using_data ? " socketer" : EMPTY,
+				summariser_using_data ? " summariser" : EMPTY,
+				logger_using_data ? " logger" : EMPTY,
+				listener_using_data ? " listener" : EMPTY);
+			fflush(stdout);
+		}
+		sleep(1);
+	}
+
+	dealloc_storage();
 
 	clean_up(&ckp);
 

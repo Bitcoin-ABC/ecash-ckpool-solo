@@ -2849,8 +2849,10 @@ rollback:
 		PQfinish(conn);
 	if (reason) {
 		if (oc_item) {
-			if (optioncontrol->optionvalue)
+			if (optioncontrol->optionvalue) {
 				free(optioncontrol->optionvalue);
+				optioncontrol->optionvalue = NULL;
+			}
 			K_WLOCK(optioncontrol_free);
 			k_add_head(optioncontrol_free, oc_item);
 			K_WUNLOCK(optioncontrol_free);

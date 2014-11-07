@@ -947,6 +947,18 @@ DBG("@remove after balance=%f :(\n", cmp);
 	return root;
 }
 
+K_TREE *_remove_from_ktree_free(K_TREE *root, K_ITEM *data, cmp_t (*cmp_funct)(K_ITEM *, K_ITEM *), KTREE_FFL_ARGS)
+{
+	K_TREE_CTX ctx[1];
+
+	root = _remove_from_ktree(root, data, cmp_funct, ctx, KTREE_FFL_PASS);
+
+	if (*ctx)
+		free(*ctx);
+
+	return root;
+}
+
 static void free_ktree_sub(K_TREE *ktree, void (*free_funct)(void *))
 {
 	if (ktree != NULL && ktree != nil)

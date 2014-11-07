@@ -739,13 +739,13 @@ int read_length(int sockd, void *buf, int len)
 /* Use a standard message across the unix sockets:
  * 4 byte length of message as little endian encoded uint32_t followed by the
  * string. Return NULL in case of failure. */
-char *_recv_unix_msg(int sockd, const char *file, const char *func, const int line)
+char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, const char *func, const int line)
 {
 	char *buf = NULL;
 	uint32_t msglen;
 	int ret;
 
-	ret = wait_read_select(sockd, 30);
+	ret = wait_read_select(sockd, timeout1);
 	if (unlikely(ret < 1)) {
 		LOGERR("Select1 failed in recv_unix_msg");
 		goto out;
@@ -761,7 +761,7 @@ char *_recv_unix_msg(int sockd, const char *file, const char *func, const int li
 		LOGWARNING("Invalid message length %u sent to recv_unix_msg", msglen);
 		goto out;
 	}
-	ret = wait_read_select(sockd, 5);
+	ret = wait_read_select(sockd, timeout2);
 	if (unlikely(ret < 1)) {
 		LOGERR("Select2 failed in recv_unix_msg");
 		goto out;

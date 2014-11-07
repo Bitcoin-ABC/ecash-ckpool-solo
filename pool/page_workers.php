@@ -15,9 +15,14 @@ function worktitle($data, $user)
  return $pg;
 }
 #
+function workhashorder($a, $b)
+{
+ return $b['w_uhr'] - $a['w_uhr'];
+}
+#
 function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 			&$totinvalid, &$totrate, &$blockacc,
-			&$blockreward, $old = false)
+			&$blockreward, $old = false, $srt = false)
 {
  $ans = getWorkers($user);
 
@@ -28,10 +33,35 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 		$blockacc = $ans['blockacc'];
 	if (isset($ans['blockreward']))
 		$blockreward = $ans['blockreward'];
+	$all = array();
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
 	{
 		$lst = $ans['STAMP'] - $ans['w_lastshare:'.$i];
+		if ($old !== false && $lst > $old)
+			continue;
+
+		if ($ans['w_elapsed:'.$i] > 3600)
+			$uhr = $ans['w_hashrate1hr:'.$i];
+		else
+			$uhr = $ans['w_hashrate5m:'.$i];
+
+		$all[] = array('workername' => $ans['workername:'.$i],
+				'w_lastshare' => $ans['w_lastshare:'.$i],
+				'w_lastdiff' => $ans['w_lastdiff:'.$i],
+				'w_shareacc' => $ans['w_shareacc:'.$i],
+				'w_diffacc' => $ans['w_diffacc:'.$i],
+				'w_diffinv' => $ans['w_diffinv:'.$i],
+				'w_lastdiff' => $ans['w_lastdiff:'.$i],
+				'w_uhr' => $uhr);
+	}
+
+	if ($srt)
+		usort($all, 'workhashorder');
+
+	for ($i = 0; $i < $count; $i++)
+	{
+		$lst = $ans['STAMP'] - $all[$i]['w_lastshare'];
 		if ($old !== false && $lst > $old)
 			continue;
 
@@ -41,42 +71,39 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 			$row = 'odd';
 
 		$pg .= "<tr class=$row>";
-		$pg .= '<td class=dl>'.htmlspecialchars($ans['workername:'.$i]).'</td>';
-		if ($ans['w_lastdiff:'.$i] > 0)
-			$ld = difffmt($ans['w_lastdiff:'.$i]);
+		$pg .= '<td class=dl>'.htmlspecialchars($all[$i]['workername']).'</td>';
+		if ($all[$i]['w_lastdiff'] > 0)
+			$ld = difffmt($all[$i]['w_lastdiff']);
 		else
 			$ld = '&nbsp;';
 		$pg .= "<td class=dr>$ld</td>";
 
 		$pg .= '<td class=dr>'.howlongago($lst).'</td>';
 
-		$shareacc = number_format($ans['w_shareacc:'.$i], 0);
-		$totshare += $ans['w_shareacc:'.$i];
-		$diffacc = number_format($ans['w_diffacc:'.$i], 0);
-		$totdiff += $ans['w_diffacc:'.$i];
+		$shareacc = number_format($all[$i]['w_shareacc'], 0);
+		$totshare += $all[$i]['w_shareacc'];
+		$diffacc = number_format($all[$i]['w_diffacc'], 0);
+		$totdiff += $all[$i]['w_diffacc'];
 		$pg .= "<td class=dr>$shareacc</td>";
 		$pg .= "<td class=dr>$diffacc</td>";
 
-		$dtot = $ans['w_diffacc:'.$i] + $ans['w_diffinv:'.$i];
+		$dtot = $all[$i]['w_diffacc'] + $all[$i]['w_diffinv'];
 		if ($dtot > 0)
-			$rej = number_format(100.0 * $ans['w_diffinv:'.$i] / $dtot, 3);
+			$rej = number_format(100.0 * $all[$i]['w_diffinv'] / $dtot, 3);
 		else
 			$rej = '0';
-		$totinvalid +=  $ans['w_diffinv:'.$i];
+		$totinvalid +=  $all[$i]['w_diffinv'];
 
 		$pg .= "<td class=dr>$rej%</td>";
 
 		if ($blockacc <= 0)
 			$blkpct = '&nbsp;';
 		else
-			$blkpct = number_format(100.0 * $ans['w_diffacc:'.$i] / $blockacc, 3) . '%';
+			$blkpct = number_format(100.0 * $all[$i]['w_diffacc'] / $blockacc, 3) . '%';
 
 		$pg .= "<td class=dr>$blkpct</td>";
 
-		if ($ans['w_elapsed:'.$i] > 3600)
-			$uhr = $ans['w_hashrate1hr:'.$i];
-		else
-			$uhr = $ans['w_hashrate5m:'.$i];
+		$uhr = $all[$i]['w_uhr'];
 		if ($uhr == '?')
 			$uhr = '?GHs';
 		else
@@ -138,7 +165,7 @@ function doworker($data, $user)
 
  $pg .= worktitle($data, $user);
  $pg .= workuser($data, $user, $offset, $totshare, $totdiff, $totinvalid,
-			$totrate, $blockacc, $blockreward, false);
+			$totrate, $blockacc, $blockreward, false, true);
  $pg .= worktotal($offset, $totshare, $totdiff, $totinvalid, $totrate,
 			$blockacc, $blockreward);
 

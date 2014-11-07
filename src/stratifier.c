@@ -2418,8 +2418,8 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	char *fname = NULL, *s, *nonce2;
 	enum share_err err = SE_NONE;
 	ckpool_t *ckp = client->ckp;
+	char idstring[20] = {};
 	workbase_t *wb = NULL;
-	char idstring[20];
 	uint32_t ntime32;
 	uchar hash[32];
 	int nlen, len;
@@ -2489,12 +2489,12 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		id = current_workbase->id;
 		err = SE_INVALID_JOBID;
 		json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
-		strcpy(idstring, job_id);
+		strncpy(idstring, job_id, 19);
 		ASPRINTF(&fname, "%s.sharelog", current_workbase->logdir);
 		goto out_unlock;
 	}
 	wdiff = wb->diff;
-	strcpy(idstring, wb->idstring);
+	strncpy(idstring, wb->idstring, 19);
 	ASPRINTF(&fname, "%s.sharelog", wb->logdir);
 	/* Fix broken clients sending too many chars. Nonce2 is part of the
 	 * read only json so use a temporary variable and modify it. */
