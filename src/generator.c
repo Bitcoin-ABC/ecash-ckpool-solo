@@ -792,6 +792,19 @@ static bool show_message(json_t *val)
 	return true;
 }
 
+static bool send_pong(proxy_instance_t *proxi, json_t *val)
+{
+	json_t *json_msg, *id_val = json_object_dup(val, "id");
+	connsock_t *cs = proxi->cs;
+	bool ret;
+
+	JSON_CPACK(json_msg, "{sossso}", "id", id_val, "result", "pong",
+			     "error", json_null());
+	ret = send_json_msg(cs, json_msg);
+	json_decref(json_msg);
+	return ret;
+}
+
 static bool parse_reconnect(proxy_instance_t *proxi, json_t *val)
 {
 	server_instance_t *newsi, *si = proxi->si;
@@ -922,6 +935,11 @@ static bool parse_method(proxy_instance_t *proxi, const char *msg)
 
 	if (cmdmatch(buf, "client.show_message")) {
 		ret = show_message(params);
+		goto out;
+	}
+
+	if (cmdmatch(buf, "mining.ping")) {
+		ret = send_pong(proxi, val);
 		goto out;
 	}
 out:
