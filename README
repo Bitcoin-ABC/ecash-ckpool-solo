@@ -240,6 +240,9 @@ new network blocks and is 100 by default. It is intended to be a backup only
 for when the notifier is not set up and only polls if the "notify" field is
 not set on a btcd.
 
+'noncelength" : This is optional allowing the extranonce1 length to be chosen
+from 2 to 8. Default 8
+
 "update_interval" : This is the frequency that stratum updates are sent out to
 miners and is set to 30 seconds by default to help perpetuate transactions for
 the health of the bitcoin network.

@@ -1017,6 +1017,7 @@ static void parse_config(ckpool_t *ckp)
 		ckp->btcsig[38] = '\0';
 	}
 	json_get_int(&ckp->blockpoll, json_conf, "blockpoll");
+	json_get_int(&ckp->noncelength, json_conf, "noncelength");
 	json_get_int(&ckp->update_interval, json_conf, "update_interval");
 	json_get_string(&ckp->serverurl, json_conf, "serverurl");
 	json_get_int64(&ckp->mindiff, json_conf, "mindiff");
@@ -1318,6 +1319,10 @@ int main(int argc, char **argv)
 		ckp.btcaddress = ckp.donaddress;
 	if (!ckp.blockpoll)
 		ckp.blockpoll = 100;
+	if (!ckp.noncelength)
+		ckp.noncelength = 8;
+	else if (ckp.noncelength < 2 || ckp.noncelength > 8)
+		quit(0, "Invalid noncelength %d specified, must be 2~8", ckp.noncelength);
 	if (!ckp.update_interval)
 		ckp.update_interval = 30;
 	if (!ckp.mindiff)
