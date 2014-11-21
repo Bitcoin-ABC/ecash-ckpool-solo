@@ -229,6 +229,7 @@ static void kill_server(server_instance_t *si)
 	LOGNOTICE("Killing server");
 	cs = &si->cs;
 	Close(cs->fd);
+	empty_buffer(cs);
 	dealloc(cs->url);
 	dealloc(cs->port);
 	dealloc(cs->auth);
@@ -1452,6 +1453,7 @@ static void kill_proxy(ckpool_t *ckp, proxy_instance_t *proxi)
 	LOGNOTICE("Killing proxy");
 	cs = proxi->cs;
 	Close(cs->fd);
+	empty_buffer(cs);
 
 	/* All our notify data is invalid if we reconnect so discard them */
 	mutex_lock(&proxi->notify_lock);

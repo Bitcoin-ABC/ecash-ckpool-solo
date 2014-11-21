@@ -260,6 +260,7 @@ struct stratum_instance {
 	char *workername;
 	char *password;
 	int64_t user_id;
+	int server; /* Which server is this instance bound to */
 
 	ckpool_t *ckp;
 
@@ -423,7 +424,8 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	len = ser_number(wb->coinb1bin + ofs, now.tv_nsec);
 	ofs += len;
 
-	wb->enonce1varlen = wb->enonce2varlen = ckp->noncelength;
+	wb->enonce1varlen = ckp->nonce1length;
+	wb->enonce2varlen = ckp->nonce2length;
 	wb->coinb1bin[ofs++] = wb->enonce1varlen + wb->enonce2varlen;
 
 	wb->coinb1len = ofs;
@@ -638,7 +640,7 @@ static void send_workinfo(ckpool_t *ckp, workbase_t *wb)
 			"createdate", cdfield,
 			"createby", "code",
 			"createcode", __func__,
-			"createinet", ckp->serverurl);
+			"createinet", ckp->serverurl[0]);
 	ckdbq_add(ckp, ID_WORKINFO, val);
 }
 
@@ -657,7 +659,7 @@ static void send_ageworkinfo(ckpool_t *ckp, int64_t id)
 			"createdate", cdfield,
 			"createby", "code",
 			"createcode", __func__,
-			"createinet", ckp->serverurl);
+			"createinet", ckp->serverurl[0]);
 	ckdbq_add(ckp, ID_AGEWORKINFO, val);
 }
 
@@ -1150,16 +1152,17 @@ static void dec_instance_ref(sdata_t *sdata, stratum_instance_t *instance)
 }
 
 /* Enter with write instance_lock held */
-static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id)
+static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, int server)
 {
 	stratum_instance_t *instance = ckzalloc(sizeof(stratum_instance_t));
 	sdata_t *sdata = ckp->data;
 
 	instance->id = id;
+	instance->server = server;
 	instance->diff = instance->old_diff = ckp->startdiff;
 	instance->ckp = ckp;
 	tv_time(&instance->ldc);
-	LOGINFO("Added instance %ld", id);
+	LOGINFO("Stratifier added instance %ld server %d", id, server);
 	HASH_ADD_I64(sdata->stratum_instances, id, instance);
 	return instance;
 }
@@ -2401,7 +2404,7 @@ test_blocksolve(stratum_instance_t *client, workbase_t *wb, const uchar *data, c
 			"createdate", cdfield,
 			"createby", "code",
 			"createcode", __func__,
-			"createinet", ckp->serverurl);
+			"createinet", ckp->serverurl[client->server]);
 	val_copy = json_deep_copy(val);
 	block_ckmsg = ckalloc(sizeof(ckmsg_t));
 	block_ckmsg->data = val_copy;
@@ -2719,7 +2722,7 @@ out_unlock:
 	json_set_string(val, "createdate", cdfield);
 	json_set_string(val, "createby", "code");
 	json_set_string(val, "createcode", __func__);
-	json_set_string(val, "createinet", ckp->serverurl);
+	json_set_string(val, "createinet", ckp->serverurl[client->server]);
 	json_set_string(val, "workername", client->workername);
 	json_set_string(val, "username", user_instance->username);
 
@@ -2771,7 +2774,7 @@ out:
 				"createdate", cdfield,
 				"createby", "code",
 				"createcode", __func__,
-				"createinet", ckp->serverurl);
+				"createinet", ckp->serverurl[client->server]);
 		ckdbq_add(ckp, ID_SHAREERR, val);
 		LOGINFO("Invalid share from client %ld: %s", client->id, client->workername);
 	}
@@ -3129,6 +3132,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	sdata_t *sdata = ckp->data;
 	smsg_t *msg;
 	json_t *val;
+	int server;
 
 	val = json_loads(buf, 0, NULL);
 	if (unlikely(!val)) {
@@ -3158,11 +3162,21 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	strcpy(msg->address, json_string_value(val));
 	json_object_clear(val);
 
+	val = json_object_get(msg->json_msg, "server");
+	if (unlikely(!val)) {
+		LOGWARNING("Failed to extract server from connector json smsg %s", buf);
+		json_decref(msg->json_msg);
+		free(msg);
+		goto out;
+	}
+	server = json_integer_value(val);
+	json_object_clear(val);
+
 	/* Parse the message here */
 	ck_wlock(&sdata->instance_lock);
 	/* client_id instance doesn't exist yet, create one */
 	if (!__instance_by_id(sdata, msg->client_id))
-		__stratum_add_instance(ckp, msg->client_id);
+		__stratum_add_instance(ckp, msg->client_id, server);
 	ck_wunlock(&sdata->instance_lock);
 
 	parse_instance_msg(sdata, msg);
@@ -3516,7 +3530,7 @@ static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 					"createdate", cdfield,
 					"createby", "code",
 					"createcode", __func__,
-					"createinet", ckp->serverurl);
+					"createinet", ckp->serverurl[0]);
 			worker->notified_idle = worker->idle;
 			ckdbq_add(ckp, ID_WORKERSTATS, val);
 		}
@@ -3758,7 +3772,7 @@ static void *statsupdate(void *arg)
 				"createdate", cdfield,
 				"createby", "code",
 				"createcode", __func__,
-				"createinet", ckp->serverurl);
+				"createinet", ckp->serverurl[0]);
 		ckdbq_add(ckp, ID_POOLSTATS, val);
 
 		/* Update stats 3 times per minute for smooth values, displaying
@@ -3823,7 +3837,7 @@ static void *ckdb_heartbeat(void *arg)
 				"createdate", cdfield,
 				"createby", "code",
 				"createcode", __func__,
-				"createinet", ckp->serverurl);
+				"createinet", ckp->serverurl[0]);
 		ckdbq_add(ckp, ID_HEARTBEAT, val);
 	}
 	return NULL;
@@ -3834,6 +3848,7 @@ int stratifier(proc_instance_t *pi)
 	pthread_t pth_blockupdate, pth_statsupdate, pth_heartbeat;
 	ckpool_t *ckp = pi->ckp;
 	int ret = 1, threads;
+	int64_t randomiser;
 	sdata_t *sdata;
 	char *buf;
 
@@ -3866,15 +3881,19 @@ int stratifier(proc_instance_t *pi)
 		}
 	}
 
+	randomiser = ((int64_t)time(NULL)) << 32;
 	/* Set the initial id to time as high bits so as to not send the same
 	 * id on restarts */
 	if (!ckp->proxy)
-		sdata->blockchange_id = sdata->workbase_id = ((int64_t)time(NULL)) << 32;
+		sdata->blockchange_id = sdata->workbase_id = randomiser;
+	sdata->enonce1u.u64 = htobe64(randomiser);
 
 	dealloc(buf);
 
-	if (!ckp->serverurl)
-		ckp->serverurl = "127.0.0.1";
+	if (!ckp->serverurls) {
+		ckp->serverurl[0] = "127.0.0.1";
+		ckp->serverurls = 1;
+	}
 	cklock_init(&sdata->instance_lock);
 
 	mutex_init(&sdata->ckdb_lock);

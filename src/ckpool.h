@@ -151,7 +151,8 @@ struct ckpool_instance {
 	char **btcdpass;
 	bool *btcdnotify;
 	int blockpoll; // How frequently in ms to poll bitcoind for block updates
-	int noncelength; // Extranonce1 length
+	int nonce1length; // Extranonce1 length
+	int nonce2length; // Extranonce2 length
 
 	/* Difficulty settings */
 	int64_t mindiff; // Default 1
@@ -166,7 +167,8 @@ struct ckpool_instance {
 
 	/* Stratum options */
 	server_instance_t **servers;
-	char *serverurl; // URL to bind our server/proxy to
+	char **serverurl; // Array of URLs to bind our server/proxy to
+	int serverurls; // Number of server bindings
 	int update_interval; // Seconds between stratum updates
 	int chosen_server; // Chosen server for next connection
 
@@ -195,6 +197,7 @@ bool ckmsgq_empty(ckmsgq_t *ckmsgq);
 ckpool_t *global_ckp;
 
 bool ping_main(ckpool_t *ckp);
+void empty_buffer(connsock_t *cs);
 int read_socket_line(connsock_t *cs, int timeout);
 bool _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
 #define send_proc(pi, msg) _send_proc(pi, msg, __FILE__, __func__, __LINE__)
@@ -209,7 +212,7 @@ char *_ckdb_msg_call(const ckpool_t *ckp, char *msg,  const char *file, const ch
 json_t *json_rpc_call(connsock_t *cs, const char *rpc_req);
 
 int process_exit(ckpool_t *ckp, proc_instance_t *pi, int ret);
-void json_get_string(char **store, json_t *val, const char *res);
-void json_get_int(int *store, json_t *val, const char *res);
+bool json_get_string(char **store, json_t *val, const char *res);
+bool json_get_int(int *store, json_t *val, const char *res);
 
 #endif /* CKPOOL_H */

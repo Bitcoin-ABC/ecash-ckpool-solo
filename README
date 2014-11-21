@@ -240,16 +240,21 @@ new network blocks and is 100 by default. It is intended to be a backup only
 for when the notifier is not set up and only polls if the "notify" field is
 not set on a btcd.
 
-'noncelength" : This is optional allowing the extranonce1 length to be chosen
+"nonce1length" : This is optional allowing the extranonce1 length to be chosen
+from 2 to 8. Default 8
+
+"nonce2length" : This is optional allowing the extranonce2 length to be chosen
 from 2 to 8. Default 8
 
 "update_interval" : This is the frequency that stratum updates are sent out to
 miners and is set to 30 seconds by default to help perpetuate transactions for
 the health of the bitcoin network.
 
-"serverurl" : This is the IP to try to bind ckpool uniquely to, otherwise it
+"serverurl" : This is the IP(s) to try to bind ckpool uniquely to, otherwise it
 will attempt to bind to all interfaces in port 3333 by default in pool mode
-and 3334 in proxy mode.
+and 3334 in proxy mode. Multiple entries can be specified as an array by
+either IP or resolvable domain name but the executable must be able to bind to
+all of them and ports up to 1024 usually require privileged access.
 
 "mindiff" : Minimum diff that vardiff will allow miners to drop to. Default 1
 

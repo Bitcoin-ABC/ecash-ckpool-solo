@@ -67,6 +67,55 @@ void username_trim(USERS *users)
 	}
 }
 
+/* Is the trimmed username like an address?
+ * False positive is OK (i.e. 'like')
+ * Before checking, it is trimmed to avoid web display confusion
+ * Length check is done before trimming - this may give a false
+ *  positive on any username with lots of trim characters ... which is OK */
+bool like_address(char *username)
+{
+	char *tmp, *front, *trail;
+	size_t len;
+	regex_t re;
+	int ret;
+
+	len = strlen(username);
+	if (len < ADDR_USER_CHECK)
+		return false;
+
+	tmp = strdup(username);
+	front = tmp;
+	while (*front && TRIM_IGNORE(*front))
+		front++;
+
+	trail = front + strlen(front) - 1;
+	while (trail >= front) {
+		if (TRIM_IGNORE(*trail))
+			*(trail--) = '\0';
+		else
+			break;
+	}
+
+	if (regcomp(&re, addrpatt, REG_NOSUB) != 0) {
+		LOGEMERG("%s(): failed to compile addrpatt '%s'",
+			 __func__, addrpatt);
+		free(tmp);
+		// This will disable adding any new usernames ...
+		return true;
+	}
+
+	ret = regexec(&re, front, (size_t)0, NULL, 0);
+	regfree(&re);
+
+	if (ret == 0) {
+		free(tmp);
+		return true;
+	}
+
+	free(tmp);
+	return false;
+}
+
 void _txt_to_data(enum data_type typ, char *nam, char *fld, void *data, size_t siz, WHERE_FFL_ARGS)
 {
 	char *tmp;
@@ -173,6 +222,8 @@ void _txt_to_data(enum data_type typ, char *nam, char *fld, void *data, size_t s
 				quithere(1, "Field %s (%d) OOM" WHERE_FFL,
 						nam, (int)strlen(fld), WHERE_FFL_PASS);
 			}
+			// free() allows NULL
+			free(*((char **)data));
 			*((char **)data) = tmp;
 			break;
 		case TYPE_DOUBLE:
@@ -594,24 +645,33 @@ K_ITEM *_find_create_workerstatus(int64_t userid, char *workername,
    TODO: combine set_block_share_counters() with this? */
 void workerstatus_ready()
 {
-	K_TREE_CTX ws_ctx[1], us_ctx[1], ss_ctx[1];
+	K_TREE_CTX ws_ctx[1], us_ctx[1], ss_ctx[1], ms_ctx[1];
 	K_ITEM *ws_item, us_look, ss_look, *us_item, *ss_item;
+	K_ITEM *ms_item, ms_look, *wm_item;
 	USERSTATS lookuserstats, *userstats;
 	SHARESUMMARY looksharesummary, *sharesummary;
+	MARKERSUMMARY *markersummary;
 	WORKERSTATUS *workerstatus;
 
+	LOGWARNING("%s(): Updating workerstatus...", __func__);
+
 	INIT_USERSTATS(&us_look);
+	INIT_MARKERSUMMARY(&ms_look);
 	INIT_SHARESUMMARY(&ss_look);
 	ws_item = first_in_ktree(workerstatus_root, ws_ctx);
 	while (ws_item) {
 		DATA_WORKERSTATUS(workerstatus, ws_item);
+
+		// The last one
 		lookuserstats.userid = workerstatus->userid;
 		STRNCPY(lookuserstats.workername, workerstatus->workername);
 		lookuserstats.statsdate.tv_sec = date_eot.tv_sec;
 		lookuserstats.statsdate.tv_usec = date_eot.tv_usec;
 		us_look.data = (void *)(&lookuserstats);
+		K_RLOCK(userstats_free);
 		us_item = find_before_in_ktree(userstats_workerstatus_root, &us_look,
 						cmp_userstats_workerstatus, us_ctx);
+		K_RUNLOCK(userstats_free);
 		if (us_item) {
 			DATA_USERSTATS(userstats, us_item);
 			if (userstats->idle) {
@@ -629,8 +689,28 @@ void workerstatus_ready()
 			}
 		}
 
+		K_RLOCK(markersummary_free);
+		// This is the last one
+		ms_item = find_markersummary_userid(workerstatus->userid,
+						    workerstatus->workername, ms_ctx);
+		K_RUNLOCK(markersummary_free);
+		if (ms_item) {
+			DATA_MARKERSUMMARY(markersummary, ms_item);
+			K_RLOCK(workmarkers_free);
+			wm_item = find_workmarkerid(markersummary->markerid);
+			K_RUNLOCK(workmarkers_free);
+			if (wm_item &&
+			    tv_newer(&(workerstatus->last_share), &(markersummary->lastshare))) {
+				copy_tv(&(workerstatus->last_share),
+					&(markersummary->lastshare));
+				workerstatus->last_diff =
+					markersummary->lastdiffacc;
+			}
+		}
+
+		// The last one
 		looksharesummary.userid = workerstatus->userid;
-		STRNCPY(looksharesummary.workername, workerstatus->workername);
+		looksharesummary.workername = workerstatus->workername;
 		looksharesummary.workinfoid = MAXID;
 		ss_look.data = (void *)(&looksharesummary);
 		K_RLOCK(sharesummary_free);
@@ -650,6 +730,8 @@ void workerstatus_ready()
 
 		ws_item = next_in_ktree(ws_ctx);
 	}
+
+	LOGWARNING("%s(): Update workerstatus complete", __func__);
 }
 
 void _workerstatus_update(AUTHS *auths, SHARES *shares,
@@ -1238,7 +1320,8 @@ bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 		  tv_t *ss_first, tv_t *ss_last, int64_t *ss_count,
 		  int64_t *s_count, int64_t *s_diff)
 {
-	K_ITEM *wi_item, ss_look, *ss_item, s_look, *s_item, *tmp_item;
+	K_ITEM *wi_item, ss_look, *ss_item, s_look, *s_item;
+	K_ITEM *wm_item, *tmp_item;
 	K_TREE_CTX ss_ctx[1], s_ctx[1];
 	char cd_buf[DATE_BUFSIZ];
 	int64_t ss_tot, ss_already, ss_failed, shares_tot, shares_dumped;
@@ -1274,13 +1357,26 @@ bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 		goto bye;
 	}
 
+	K_RLOCK(markersummary_free);
+	wm_item = find_workmarkers(workinfoid);
+	K_RUNLOCK(markersummary_free);
+	// Should never happen?
+	if (wm_item && !reloading) {
+		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
+		LOGERR("%s() %"PRId64"/%s/%ld,%ld %.19s attempt to age a "
+			"workmarker! Age ignored!",
+			__func__, workinfoid, poolinstance,
+			cd->tv_sec, cd->tv_usec, cd_buf);
+		goto bye;
+	}
+
 	INIT_SHARESUMMARY(&ss_look);
 	INIT_SHARES(&s_look);
 
 	// Find the first matching sharesummary
 	looksharesummary.workinfoid = workinfoid;
 	looksharesummary.userid = -1;
-	looksharesummary.workername[0] = '\0';
+	looksharesummary.workername = EMPTY;
 
 	ok = true;
 	ss_tot = ss_already = ss_failed = shares_tot = shares_dumped = 0;
@@ -1511,7 +1607,7 @@ K_ITEM *find_sharesummary(int64_t userid, char *workername, int64_t workinfoid)
 	K_ITEM look;
 
 	sharesummary.userid = userid;
-	STRNCPY(sharesummary.workername, workername);
+	sharesummary.workername = workername;
 	sharesummary.workinfoid = workinfoid;
 
 	INIT_SHARESUMMARY(&look);
@@ -1519,6 +1615,8 @@ K_ITEM *find_sharesummary(int64_t userid, char *workername, int64_t workinfoid)
 	return find_in_ktree(sharesummary_root, &look, cmp_sharesummary, ctx);
 }
 
+/* TODO: markersummary checking?
+ * However, there should be no issues since the sharesummaries are removed */
 void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 		    char *by, char *code, char *inet, tv_t *cd)
 {
@@ -1545,7 +1643,7 @@ void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 	// Find the oldest 'unaged' sharesummary < workinfoid and >= prev_found
 	looksharesummary.workinfoid = prev_found;
 	looksharesummary.userid = -1;
-	looksharesummary.workername[0] = '\0';
+	looksharesummary.workername = EMPTY;
 	INIT_SHARESUMMARY(&look);
 	look.data = (void *)(&looksharesummary);
 
@@ -1833,12 +1931,17 @@ void zero_on_new_block()
  * Will need to add locking if it's used, later, after startup completes */
 void set_block_share_counters()
 {
-	K_TREE_CTX ctx[1];
-	K_ITEM *ss_item, ss_look, *ws_item;
+	K_TREE_CTX ctx[1], ctx_ms[1];
+	K_ITEM *ss_item, ss_look, *ws_item, *wm_item, *ms_item, ms_look;
 	WORKERSTATUS *workerstatus;
 	SHARESUMMARY *sharesummary, looksharesummary;
+	WORKMARKERS *workmarkers;
+	MARKERSUMMARY *markersummary, lookmarkersummary;
+
+	LOGWARNING("%s(): Updating block sharesummary counters...", __func__);
 
 	INIT_SHARESUMMARY(&ss_look);
+	INIT_MARKERSUMMARY(&ms_look);
 
 	zero_on_new_block();
 
@@ -1850,11 +1953,10 @@ void set_block_share_counters()
 	ss_item = last_in_ktree(sharesummary_root, ctx);
 	while (ss_item) {
 		DATA_SHARESUMMARY(sharesummary, ss_item);
-		if (sharesummary->workinfoid < pool.workinfoid) {
+		if (sharesummary->workinfoid <= pool.workinfoid) {
 			// Skip back to the next worker
 			looksharesummary.userid = sharesummary->userid;
-			STRNCPY(looksharesummary.workername,
-				sharesummary->workername);
+			looksharesummary.workername = sharesummary->workername;
 			looksharesummary.workinfoid = -1;
 			ss_look.data = (void *)(&looksharesummary);
 			ss_item = find_before_in_ktree(sharesummary_root, &ss_look,
@@ -1906,6 +2008,89 @@ void set_block_share_counters()
 		ss_item = prev_in_ktree(ctx);
 	}
 	K_RUNLOCK(sharesummary_free);
+
+	LOGWARNING("%s(): Updating block markersummary counters...", __func__);
+
+	// workmarkers after the workinfoid of the last pool block
+	// TODO: tune the loop layout if needed
+	ws_item = NULL;
+	wm_item = last_in_ktree(workmarkers_workinfoid_root, ctx);
+	DATA_WORKMARKERS_NULL(workmarkers, wm_item);
+	while (wm_item &&
+	       CURRENT(&(workmarkers->expirydate)) &&
+	       workmarkers->workinfoidend > pool.workinfoid) {
+
+		if (WMREADY(workmarkers->status))
+		{
+			// Should never be true
+			if (workmarkers->workinfoidstart <= pool.workinfoid) {
+				LOGEMERG("%s(): ERROR workmarker %"PRId64" has an invalid"
+					 " workinfoid range start=%"PRId64" end=%"PRId64
+					 " due to pool lastblock=%"PRId32
+					 " workinfoid="PRId64,
+					 __func__, workmarkers->markerid,
+					 workmarkers->workinfoidstart,
+					 workmarkers->workinfoidend,
+					 pool.height, pool.workinfoid);
+			}
+
+			lookmarkersummary.markerid = workmarkers->markerid;
+			lookmarkersummary.userid = MAXID;
+			lookmarkersummary.workername = EMPTY;
+			ms_look.data = (void *)(&lookmarkersummary);
+			ms_item = find_before_in_ktree(markersummary_root, &ms_look, cmp_markersummary, ctx_ms);
+			while (ms_item) {
+				DATA_MARKERSUMMARY(markersummary, ms_item);
+				if (markersummary->markerid != workmarkers->markerid)
+					break;
+
+				/* Check for user/workername change for new workerstatus
+				 * The tree has user/workername grouped together in order
+				 *  so this will only be once per user/workername */
+				if (!ws_item ||
+				    markersummary->userid != workerstatus->userid ||
+				    strcmp(markersummary->workername, workerstatus->workername)) {
+					/* This is to trigger a console error if it is missing
+					 *  since it should always exist
+					 * However, it is simplest to simply create it
+					 *  and keep going */
+					ws_item = find_workerstatus(markersummary->userid,
+								    markersummary->workername,
+								    __FILE__, __func__, __LINE__);
+					if (!ws_item) {
+						ws_item = find_create_workerstatus(markersummary->userid,
+										   markersummary->workername,
+										   __FILE__, __func__, __LINE__);
+					}
+					DATA_WORKERSTATUS(workerstatus, ws_item);
+				}
+
+				pool.diffacc += markersummary->diffacc;
+				pool.diffinv += markersummary->diffsta + markersummary->diffdup +
+						markersummary->diffhi + markersummary->diffrej;
+				workerstatus->diffacc += markersummary->diffacc;
+				workerstatus->diffinv += markersummary->diffsta + markersummary->diffdup +
+							 markersummary->diffhi + markersummary->diffrej;
+				workerstatus->diffsta += markersummary->diffsta;
+				workerstatus->diffdup += markersummary->diffdup;
+				workerstatus->diffhi += markersummary->diffhi;
+				workerstatus->diffrej += markersummary->diffrej;
+				workerstatus->shareacc += markersummary->shareacc;
+				workerstatus->shareinv += markersummary->sharesta + markersummary->sharedup +
+							  markersummary->sharehi + markersummary->sharerej;
+				workerstatus->sharesta += markersummary->sharesta;
+				workerstatus->sharedup += markersummary->sharedup;
+				workerstatus->sharehi += markersummary->sharehi;
+				workerstatus->sharerej += markersummary->sharerej;
+
+				ms_item = prev_in_ktree(ctx_ms);
+			}
+		}
+		wm_item = prev_in_ktree(ctx);
+		DATA_WORKMARKERS_NULL(workmarkers, wm_item);
+	}
+
+	LOGWARNING("%s(): Update block counters complete", __func__);
 }
 
 /* order by height asc,userid asc,expirydate asc
@@ -2071,3 +2256,194 @@ bool userstats_starttimeband(USERSTATS *row, tv_t *statsdate)
 	}
 	return true;
 }
+
+void dsp_markersummary(K_ITEM *item, FILE *stream)
+{
+	MARKERSUMMARY *ms;
+
+	if (!item)
+		fprintf(stream, "%s() called with (null) item\n", __func__);
+	else {
+		DATA_MARKERSUMMARY(ms, item);
+		fprintf(stream, " markerid=%"PRId64" userid=%"PRId64
+				" worker='%s' " "diffacc=%f shares=%"PRId64
+				" errs=%"PRId64" lastdiff=%f\n",
+				ms->markerid, ms->userid, ms->workername,
+				ms->diffacc, ms->sharecount, ms->errorcount,
+				ms->lastdiffacc);
+	}
+}
+
+// order by markerid asc,userid asc,workername asc
+cmp_t cmp_markersummary(K_ITEM *a, K_ITEM *b)
+{
+	MARKERSUMMARY *ma, *mb;
+	DATA_MARKERSUMMARY(ma, a);
+	DATA_MARKERSUMMARY(mb, b);
+	cmp_t c = CMP_BIGINT(ma->markerid, mb->markerid);
+	if (c == 0) {
+		c = CMP_BIGINT(ma->userid, mb->userid);
+		if (c == 0)
+			c = CMP_STR(ma->workername, mb->workername);
+	}
+	return c;
+}
+
+// order by userid asc,workername asc,lastshare asc
+cmp_t cmp_markersummary_userid(K_ITEM *a, K_ITEM *b)
+{
+	MARKERSUMMARY *ma, *mb;
+	DATA_MARKERSUMMARY(ma, a);
+	DATA_MARKERSUMMARY(mb, b);
+	cmp_t c = CMP_BIGINT(ma->userid, mb->userid);
+	if (c == 0) {
+		c = CMP_STR(ma->workername, mb->workername);
+		if (c == 0)
+			c = CMP_TV(ma->lastshare, mb->lastshare);
+	}
+	return c;
+}
+
+// Finds the last markersummary for the worker but also returns the CTX
+K_ITEM *find_markersummary_userid(int64_t userid, char *workername, K_TREE_CTX *ctx)
+{
+	K_ITEM look, *ms_item = NULL;
+	MARKERSUMMARY markersummary, *ms;
+
+	markersummary.userid = userid;
+	markersummary.workername = workername;
+	markersummary.lastshare.tv_sec = DATE_S_EOT;
+
+	INIT_MARKERSUMMARY(&look);
+	look.data = (void *)(&markersummary);
+	ms_item = find_before_in_ktree(markersummary_userid_root, &look, cmp_markersummary_userid, ctx);
+	if (ms_item) {
+		DATA_MARKERSUMMARY(ms, ms_item);
+		if (ms->userid != userid || strcmp(ms->workername, workername))
+			ms_item = NULL;
+	}
+	return ms_item;
+}
+
+K_ITEM *find_markersummary(int64_t workinfoid, int64_t userid, char *workername)
+{
+	K_ITEM look, *wm_item, *ms_item = NULL;
+	MARKERSUMMARY markersummary;
+	WORKMARKERS *wm;
+	K_TREE_CTX ctx[1];
+
+	wm_item = find_workmarkers(workinfoid);
+	if (wm_item) {
+		DATA_WORKMARKERS(wm, wm_item);
+		markersummary.markerid = wm->markerid;
+		markersummary.userid = userid;
+		markersummary.workername = workername;
+
+		INIT_MARKERSUMMARY(&look);
+		look.data = (void *)(&markersummary);
+		ms_item = find_in_ktree(markersummary_root, &look, cmp_markersummary, ctx);
+	}
+
+	return ms_item;
+}
+
+void dsp_workmarkers(K_ITEM *item, FILE *stream)
+{
+	WORKMARKERS *wm;
+
+	if (!item)
+		fprintf(stream, "%s() called with (null) item\n", __func__);
+	else {
+		DATA_WORKMARKERS(wm, item);
+		fprintf(stream, " id=%"PRId64" pi='%s' end=%"PRId64" stt=%"
+				PRId64" sta='%s' des='%s'\n",
+				wm->markerid, wm->poolinstance,
+				wm->workinfoidend, wm->workinfoidstart,
+				wm->status, wm->description);
+	}
+}
+
+// order by expirydate asc,markerid asc
+cmp_t cmp_workmarkers(K_ITEM *a, K_ITEM *b)
+{
+	WORKMARKERS *wa, *wb;
+	DATA_WORKMARKERS(wa, a);
+	DATA_WORKMARKERS(wb, b);
+	cmp_t c = CMP_TV(wa->expirydate, wb->expirydate);
+	if (c == 0)
+		c = CMP_BIGINT(wa->markerid, wb->markerid);
+	return c;
+}
+
+// order by expirydate asc,workinfoidend asc
+// TODO: add poolinstance
+cmp_t cmp_workmarkers_workinfoid(K_ITEM *a, K_ITEM *b)
+{
+	WORKMARKERS *wa, *wb;
+	DATA_WORKMARKERS(wa, a);
+	DATA_WORKMARKERS(wb, b);
+	cmp_t c = CMP_TV(wa->expirydate, wb->expirydate);
+	if (c == 0)
+		c = CMP_BIGINT(wa->workinfoidend, wb->workinfoidend);
+	return c;
+}
+
+K_ITEM *find_workmarkers(int64_t workinfoid)
+{
+	WORKMARKERS workmarkers, *wm;
+	K_TREE_CTX ctx[1];
+	K_ITEM look, *wm_item;
+
+	workmarkers.expirydate.tv_sec = default_expiry.tv_sec;
+	workmarkers.expirydate.tv_usec = default_expiry.tv_usec;
+	workmarkers.workinfoidend = workinfoid-1;
+
+	INIT_WORKMARKERS(&look);
+	look.data = (void *)(&workmarkers);
+	wm_item = find_after_in_ktree(workmarkers_workinfoid_root, &look, cmp_workmarkers_workinfoid, ctx);
+	if (wm_item) {
+		DATA_WORKMARKERS(wm, wm_item);
+		if (!CURRENT(&(wm->expirydate)) ||
+		    !WMREADY(wm->status) ||
+		    workinfoid < wm->workinfoidstart ||
+		    workinfoid > wm->workinfoidend)
+			wm_item = NULL;
+	}
+	return wm_item;
+}
+
+K_ITEM *find_workmarkerid(int64_t markerid)
+{
+	WORKMARKERS workmarkers, *wm;
+	K_TREE_CTX ctx[1];
+	K_ITEM look, *wm_item;
+
+	workmarkers.expirydate.tv_sec = default_expiry.tv_sec;
+	workmarkers.expirydate.tv_usec = default_expiry.tv_usec;
+	workmarkers.markerid = markerid;
+
+	INIT_WORKMARKERS(&look);
+	look.data = (void *)(&workmarkers);
+	wm_item = find_in_ktree(workmarkers_root, &look, cmp_workmarkers, ctx);
+	if (wm_item) {
+		DATA_WORKMARKERS(wm, wm_item);
+		if (!CURRENT(&(wm->expirydate)) ||
+		    !WMREADY(wm->status))
+			wm_item = NULL;
+	}
+	return wm_item;
+}
+
+// order by expirydate asc,workinfoid asc
+// TODO: add poolinstance
+cmp_t cmp_marks(K_ITEM *a, K_ITEM *b)
+{
+	MARKS *ma, *mb;
+	DATA_MARKS(ma, a);
+	DATA_MARKS(mb, b);
+	cmp_t c = CMP_TV(ma->expirydate, mb->expirydate);
+	if (c == 0)
+		c = CMP_BIGINT(ma->workinfoid, mb->workinfoid);
+	return c;
+}
+

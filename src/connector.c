@@ -40,6 +40,9 @@ struct client_instance {
 	struct sockaddr address;
 	char address_name[INET6_ADDRSTRLEN];
 
+	/* Which serverurl is this instance connected to */
+	int server;
+
 	char buf[PAGESIZE];
 	int bufofs;
 
@@ -64,8 +67,14 @@ struct connector_data {
 	ckpool_t *ckp;
 	cklock_t lock;
 	proc_instance_t *pi;
-	int serverfd;
+
+	/* Array of server fds */
+	int *serverfd;
+	/* Number of server fds */
+	int serverfds;
+	/* All time count of clients connected */
 	int nfds;
+
 	bool accept;
 	pthread_t pth_sender;
 	pthread_t pth_receiver;
@@ -109,12 +118,12 @@ static void dec_instance_ref(cdata_t *cdata, client_instance_t *client)
 
 /* Accepts incoming connections on the server socket and generates client
  * instances */
-static int accept_client(cdata_t *cdata, int epfd)
+static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 {
+	int fd, port, no_clients, sockd;
 	ckpool_t *ckp = cdata->ckp;
 	client_instance_t *client;
 	struct epoll_event event;
-	int fd, port, no_clients;
 	socklen_t address_len;
 
 	ck_rlock(&cdata->lock);
@@ -126,9 +135,11 @@ static int accept_client(cdata_t *cdata, int epfd)
 		return 0;
 	}
 
+	sockd = cdata->serverfd[server];
 	client = ckzalloc(sizeof(client_instance_t));
+	client->server = server;
 	address_len = sizeof(client->address);
-	fd = accept(cdata->serverfd, &client->address, &address_len);
+	fd = accept(sockd, &client->address, &address_len);
 	if (unlikely(fd < 0)) {
 		/* Handle these errors gracefully should we ever share this
 		 * socket */
@@ -136,7 +147,7 @@ static int accept_client(cdata_t *cdata, int epfd)
 			LOGERR("Recoverable error on accept in accept_client");
 			return 0;
 		}
-		LOGERR("Failed to accept on socket %d in acceptor", cdata->serverfd);
+		LOGERR("Failed to accept on socket %d in acceptor", sockd);
 		dealloc(client);
 		return -1;
 	}
@@ -327,6 +338,7 @@ reparse:
 		} else
 			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
 		json_object_set_new_nocheck(val, "address", json_string(client->address_name));
+		json_object_set_new_nocheck(val, "server", json_integer(client->server));
 		s = json_dumps(val, 0);
 		if (ckp->passthrough)
 			send_proc(ckp->generator, s);
@@ -348,7 +360,7 @@ void *receiver(void *arg)
 	cdata_t *cdata = (cdata_t *)arg;
 	struct epoll_event event;
 	bool maxconn = true;
-	int ret, epfd;
+	int ret, epfd, i;
 
 	rename_proc("creceiver");
 
@@ -357,12 +369,17 @@ void *receiver(void *arg)
 		LOGEMERG("FATAL: Failed to create epoll in receiver");
 		return NULL;
 	}
-	event.data.fd = cdata->serverfd;
-	event.events = EPOLLIN;
-	ret = epoll_ctl(epfd, EPOLL_CTL_ADD, cdata->serverfd, &event);
-	if (ret < 0) {
-		LOGEMERG("FATAL: Failed to add epfd %d to epoll_ctl", epfd);
-		return NULL;
+	/* Add all the serverfds to the epoll */
+	for (i = 0; i < cdata->serverfds; i++) {
+		/* The small values will be easily identifiable compared to
+		 * pointers */
+		event.data.u64 = i;
+		event.events = EPOLLIN;
+		ret = epoll_ctl(epfd, EPOLL_CTL_ADD, cdata->serverfd[i], &event);
+		if (ret < 0) {
+			LOGEMERG("FATAL: Failed to add epfd %d to epoll_ctl", epfd);
+			return NULL;
+		}
 	}
 
 	while (42) {
@@ -383,12 +400,13 @@ void *receiver(void *arg)
 				* can receive connections. */
 				LOGDEBUG("Dropping listen backlog to 0");
 				maxconn = false;
-				listen(cdata->serverfd, 0);
+				for (i = 0; i < cdata->serverfds; i++)
+					listen(cdata->serverfd[i], 0);
 			}
 			continue;
 		}
-		if (event.data.fd == cdata->serverfd) {
-			ret = accept_client(cdata, epfd);
+		if (event.data.u64 < (uint64_t)cdata->serverfds) {
+			ret = accept_client(cdata, epfd, event.data.u64);
 			if (unlikely(ret < 0)) {
 				LOGEMERG("FATAL: Failed to accept_client in receiver");
 				break;
@@ -691,7 +709,7 @@ retry:
 		goto retry;
 	}
 	if (cmdmatch(buf, "getfd")) {
-		send_fd(cdata->serverfd, sockd);
+		send_fd(cdata->serverfd[0], sockd);
 		goto retry;
 	}
 
@@ -740,32 +758,23 @@ int connector(proc_instance_t *pi)
 	ckp->data = cdata;
 	cdata->ckp = ckp;
 
-	if (ckp->oldconnfd > 0) {
-		sockd = ckp->oldconnfd;
-	} else if (ckp->serverurl) {
-		if (!extract_sockaddr(ckp->serverurl, &url, &port)) {
-			LOGWARNING("Failed to extract server address from %s", ckp->serverurl);
-			ret = 1;
-			goto out;
-		}
-		do {
-			sockd = bind_socket(url, port);
-			if (sockd > 0)
-				break;
-			LOGWARNING("Connector failed to bind to socket, retrying in 5s");
-			sleep(5);
-		} while (++tries < 25);
+	if (!ckp->serverurls)
+		cdata->serverfd = ckalloc(sizeof(int *));
+	else
+		cdata->serverfd = ckalloc(sizeof(int *) * ckp->serverurls);
 
-		dealloc(url);
-		dealloc(port);
-		if (sockd < 0) {
-			LOGERR("Connector failed to bind to socket for 2 minutes");
-			ret = 1;
-			goto out;
-		}
-	} else {
+	if (ckp->oldconnfd > 0) {
+		/* Only handing over the first interface socket for now */
+		cdata->serverfd[0] = ckp->oldconnfd;
+		cdata->serverfds++;
+	}
+
+	if (!cdata->serverfds && !ckp->serverurls) {
+		/* No serverurls have been specified and no sockets have been
+		 * inherited. Bind to all interfaces on default sockets. */
 		struct sockaddr_in serv_addr;
 
+		cdata->serverfds = 1;
 		sockd = socket(AF_INET, SOCK_STREAM, 0);
 		if (sockd < 0) {
 			LOGERR("Connector failed to open socket");
@@ -789,20 +798,50 @@ int connector(proc_instance_t *pi)
 			Close(sockd);
 			goto out;
 		}
+		if (listen(sockd, SOMAXCONN) < 0) {
+			LOGERR("Connector failed to listen on socket");
+			Close(sockd);
+			goto out;
+		}
+		cdata->serverfd[0] = sockd;
+	} else {
+		for ( ; cdata->serverfds < ckp->serverurls; cdata->serverfds++) {
+			char *serverurl = ckp->serverurl[cdata->serverfds];
+
+			if (!extract_sockaddr(serverurl, &url, &port)) {
+				LOGWARNING("Failed to extract server address from %s", serverurl);
+				ret = 1;
+				goto out;
+			}
+			do {
+				sockd = bind_socket(url, port);
+				if (sockd > 0)
+					break;
+				LOGWARNING("Connector failed to bind to socket, retrying in 5s");
+				sleep(5);
+			} while (++tries < 25);
+
+			dealloc(url);
+			dealloc(port);
+			if (sockd < 0) {
+				LOGERR("Connector failed to bind to socket for 2 minutes");
+				ret = 1;
+				goto out;
+			}
+			if (listen(sockd, SOMAXCONN) < 0) {
+				LOGERR("Connector failed to listen on socket");
+				Close(sockd);
+				goto out;
+			}
+			cdata->serverfd[cdata->serverfds] = sockd;
+		}
 	}
+
 	if (tries)
 		LOGWARNING("Connector successfully bound to socket");
 
-	ret = listen(sockd, SOMAXCONN);
-	if (ret < 0) {
-		LOGERR("Connector failed to listen on socket");
-		Close(sockd);
-		goto out;
-	}
-
 	cklock_init(&cdata->lock);
 	cdata->pi = pi;
-	cdata->serverfd = sockd;
 	cdata->nfds = 0;
 	cdata->client_id = 1;
 	mutex_init(&cdata->sender_lock);

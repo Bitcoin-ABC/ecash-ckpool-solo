@@ -247,21 +247,38 @@ CREATE TABLE sharesummary ( -- per workinfo for each user+worker
     modifyby character varying(64) NOT NULL,
     modifycode character varying(128) NOT NULL,
     modifyinet character varying(128) NOT NULL,
-    PRIMARY KEY (userid, workername, workinfoid)
+    PRIMARY KEY (workinfoid, userid, workername)
 );
 
 
-CREATE TABLE workmarkers ( -- range of workinfo for share accounting
-    markerid bigint NOT NULL,
-    workinfoidend bigint NOT NULL,
-    workinfoidstart bigint NOT NULL,
+CREATE TABLE marks ( -- workinfoids to make workmarkers
+    poolinstance character varying(256) NOT NULL,
+    workinfoid bigint NOT NULL,
     description character varying(256) DEFAULT ''::character varying NOT NULL,
+    marktype char NOT NULL, -- 'b'lock 'p'plns-begin 's'hift-begin 'e'=shift-end
+    status char NOT NULL,
     createdate timestamp with time zone NOT NULL,
     createby character varying(64) DEFAULT ''::character varying NOT NULL,
     createcode character varying(128) DEFAULT ''::character varying NOT NULL,
     createinet character varying(128) DEFAULT ''::character varying NOT NULL,
     expirydate timestamp with time zone DEFAULT '6666-06-06 06:06:06+00',
-    PRIMARY KEY (markerid)
+    PRIMARY KEY (poolinstance, workinfoid, expirydate)
+);
+
+
+CREATE TABLE workmarkers ( -- range of workinfo for share accounting
+    markerid bigint NOT NULL,
+    poolinstance character varying(256) NOT NULL,
+    workinfoidend bigint NOT NULL,
+    workinfoidstart bigint NOT NULL,
+    description character varying(256) DEFAULT ''::character varying NOT NULL,
+    status char NOT NULL,
+    createdate timestamp with time zone NOT NULL,
+    createby character varying(64) DEFAULT ''::character varying NOT NULL,
+    createcode character varying(128) DEFAULT ''::character varying NOT NULL,
+    createinet character varying(128) DEFAULT ''::character varying NOT NULL,
+    expirydate timestamp with time zone DEFAULT '6666-06-06 06:06:06+00',
+    PRIMARY KEY (markerid, expirydate)
 );
 
 
@@ -283,7 +300,7 @@ CREATE TABLE markersummary ( -- sum of sharesummary for a workinfo range
     errorcount bigint NOT NULL,
     firstshare timestamp with time zone NOT NULL,
     lastshare timestamp with time zone NOT NULL,
-    complete char NOT NULL,
+    lastdiffacc float NOT NULL,
     createdate timestamp with time zone NOT NULL,
     createby character varying(64) NOT NULL,
     createcode character varying(128) NOT NULL,
@@ -415,4 +432,4 @@ CREATE TABLE version (
     PRIMARY KEY (vlock)
 );
 
-insert into version (vlock,version) values (1,'0.9.2');
+insert into version (vlock,version) values (1,'0.9.5');

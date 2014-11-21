@@ -15,7 +15,7 @@ static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
-	K_ITEM *i_username, *i_emailaddress, *i_passwordhash, *u_item;
+	K_ITEM *i_username, *i_emailaddress, *i_passwordhash, *u_item = NULL;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -23,18 +23,30 @@ static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 	if (!i_username)
 		return strdup(reply);
 
-	i_emailaddress = require_name(trf_root, "emailaddress", 7, (char *)mailpatt, reply, siz);
-	if (!i_emailaddress)
-		return strdup(reply);
+	/* If a username added from the web site looks like an address
+	 *  then disallow it - a false positive is not an issue
+	 * Allowing it will create a security issue - someone could create
+	 *  an account with someone else's, as yet unused, payout address
+	 *  and redirect the payout to another payout address.
+	 *  ... and the person who owns the payout address can't check that
+	 *  in advance, they'll just find out with their first payout not
+	 *  arriving at their payout address */
+	if (!like_address(transfer_data(i_username))) {
+		i_emailaddress = require_name(trf_root, "emailaddress", 7,
+					      (char *)mailpatt, reply, siz);
+		if (!i_emailaddress)
+			return strdup(reply);
 
-	i_passwordhash = require_name(trf_root, "passwordhash", 64, (char *)hashpatt, reply, siz);
-	if (!i_passwordhash)
-		return strdup(reply);
+		i_passwordhash = require_name(trf_root, "passwordhash", 64,
+					      (char *)hashpatt, reply, siz);
+		if (!i_passwordhash)
+			return strdup(reply);
 
-	u_item = users_add(conn, transfer_data(i_username),
-				 transfer_data(i_emailaddress),
-				 transfer_data(i_passwordhash),
-				 by, code, inet, now, trf_root);
+		u_item = users_add(conn, transfer_data(i_username),
+					 transfer_data(i_emailaddress),
+					 transfer_data(i_passwordhash),
+					 by, code, inet, now, trf_root);
+	}
 
 	if (!u_item) {
 		LOGERR("%s() %s.failed.DBE", __func__, id);
@@ -85,12 +97,13 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 		K_RUNLOCK(users_free);
 
 		if (u_item) {
-			ok = users_pass_email(NULL, u_item,
-						    oldhash,
-						    transfer_data(i_newhash),
-						    NULL,
-						    by, code, inet, now,
-						    trf_root);
+			ok = users_update(NULL, u_item,
+						oldhash,
+						transfer_data(i_newhash),
+						NULL,
+						by, code, inet, now,
+						trf_root,
+						NULL);
 		} else
 			ok = false;
 	}
@@ -223,7 +236,8 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 				email = NULL;
 			}
 			i_address = optional_name(trf_root, "address",
-						  27, (char *)addrpatt,
+						  ADDR_MIN_LEN,
+						  (char *)addrpatt,
 						  reply, siz);
 			if (i_address)
 				address = transfer_data(i_address);
@@ -248,10 +262,12 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 			}
 
 			if (email && *email) {
-				ok = users_pass_email(conn, u_item, NULL,
-							    NULL, email,
-							    by, code, inet,
-							    now, trf_root);
+				ok = users_update(conn, u_item,
+							NULL, NULL,
+							email,
+							by, code, inet, now,
+							trf_root,
+							NULL);
 				if (!ok) {
 					reason = "email error";
 					goto struckout;
@@ -2909,6 +2925,9 @@ static K_TREE *upd_add_mu(K_TREE *mu_root, K_STORE *mu_store, int64_t userid, in
      (also summarising diffacc per user)
     then keep stepping back until we complete the current begin_workinfoid
      (also summarising diffacc per user)
+   While we are still below diff_want
+    find each workmarker and add on the full set of worksummary
+     diffacc shares (also summarising diffacc per user)
    This will give us the total number of diff1 shares (diffacc_total)
     to use for the payment calculations
    The value of diff_want defaults to the block's network difficulty
@@ -2920,8 +2939,12 @@ static K_TREE *upd_add_mu(K_TREE *mu_root, K_STORE *mu_store, int64_t userid, in
     up to the createdate of the last share
    The user average hashrate would be:
 	diffacc_user * 2^32 / pplns_elapsed
-   PPLNS fraction of the block would be:
+   PPLNS fraction of the payout would be:
 	diffacc_user / diffacc_total
+
+   N.B. 'begin' means the oldest back in time and 'end' means the newest
+	'end' should usually be the info of the found block with the pplns
+	data going back in time to 'begin'
 */
 
 static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
@@ -2929,12 +2952,15 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  __maybe_unused char *code, __maybe_unused char *inet,
 			  __maybe_unused tv_t *notcd, K_TREE *trf_root)
 {
-	char reply[1024], tmp[1024], *buf;
+	char reply[1024], tmp[1024], *buf, *block_extra, *share_status = EMPTY;
 	size_t siz = sizeof(reply);
 	K_ITEM *i_height, *i_difftimes, *i_diffadd, *i_allowaged;
 	K_ITEM b_look, ss_look, *b_item, *w_item, *ss_item;
+	K_ITEM wm_look, *wm_item, ms_look, *ms_item;
 	K_ITEM *mu_item, *wb_item, *u_item;
 	SHARESUMMARY looksharesummary, *sharesummary;
+	WORKMARKERS lookworkmarkers, *workmarkers;
+	MARKERSUMMARY lookmarkersummary, *markersummary;
 	MININGPAYOUTS *miningpayouts;
 	WORKINFO *workinfo;
 	TRANSFER *transfer;
@@ -2943,13 +2969,14 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_STORE *mu_store;
 	USERS *users;
 	int32_t height;
-	int64_t workinfoid, end_workinfoid;
+	int64_t workinfoid, end_workinfoid = 0;
 	int64_t begin_workinfoid;
-	int64_t share_count;
+	int64_t total_share_count, acc_share_count;
+	int64_t ss_count, wm_count, ms_count;
 	char tv_buf[DATE_BUFSIZ];
 	tv_t cd, begin_tv, block_tv, end_tv;
-	K_TREE_CTX ctx[1];
-	double ndiff, total, elapsed;
+	K_TREE_CTX ctx[1], wm_ctx[1], ms_ctx[1];
+	double ndiff, total_diff, elapsed;
 	double diff_times = 1.0;
 	double diff_add = 0.0;
 	double diff_want;
@@ -2980,6 +3007,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 			allow_aged = true;
 	}
 
+	block_tv.tv_sec = block_tv.tv_usec = 0L;
 	cd.tv_sec = cd.tv_usec = 0L;
 	lookblocks.height = height + 1;
 	lookblocks.blockhash[0] = '\0';
@@ -2994,20 +3022,39 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	}
 	DATA_BLOCKS_NULL(blocks, b_item);
 	while (b_item && blocks->height == height) {
-		if (blocks->confirmed[0] == BLOCKS_CONFIRM)
+		if (blocks->confirmed[0] == BLOCKS_NEW) {
+			copy_tv(&block_tv, &(blocks->createdate));
+			copy_tv(&end_tv, &(blocks->createdate));
+		}
+		// Allow any state, but report it
+		if (CURRENT(&(blocks->expirydate)))
 			break;
 		b_item = prev_in_ktree(ctx);
 		DATA_BLOCKS_NULL(blocks, b_item);
 	}
 	K_RUNLOCK(blocks_free);
 	if (!b_item || blocks->height != height) {
-		snprintf(reply, siz, "ERR.unconfirmed block %d", height);
+		snprintf(reply, siz, "ERR.no CURRENT block %d", height);
 		return strdup(reply);
 	}
+	if (block_tv.tv_sec == 0) {
+		snprintf(reply, siz, "ERR.block %d missing '%s' record",
+				     height,
+				     blocks_confirmed(BLOCKS_NEW_STR));
+		return strdup(reply);
+	}
+	switch (blocks->confirmed[0]) {
+		case BLOCKS_NEW:
+			block_extra = "Can't be paid out yet";
+			break;
+		case BLOCKS_ORPHAN:
+			block_extra = "Can't be paid out";
+			break;
+		default:
+			block_extra = EMPTY;
+			break;
+	}
 	workinfoid = blocks->workinfoid;
-	copy_tv(&block_tv, &(blocks->createdate));
-	copy_tv(&end_tv, &(blocks->createdate));
-
 	w_item = find_workinfo(workinfoid);
 	if (!w_item) {
 		snprintf(reply, siz, "ERR.missing workinfo %"PRId64, workinfoid);
@@ -3026,34 +3073,30 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	}
 
 	begin_workinfoid = 0;
-	share_count = 0;
-	total = 0;
-
-	looksharesummary.workinfoid = workinfoid;
-	looksharesummary.userid = MAXID;
-	looksharesummary.workername[0] = '\0';
-	INIT_SHARESUMMARY(&ss_look);
-	ss_look.data = (void *)(&looksharesummary);
-	K_RLOCK(sharesummary_free);
-	ss_item = find_before_in_ktree(sharesummary_workinfoid_root, &ss_look,
-					cmp_sharesummary_workinfoid, ctx);
-	if (!ss_item) {
-		K_RUNLOCK(sharesummary_free);
-		snprintf(reply, siz,
-			 "ERR.no shares found with or before "
-			 "workinfo %"PRId64,
-			 workinfoid);
-		return strdup(reply);
-	}
-	DATA_SHARESUMMARY(sharesummary, ss_item);
+	total_share_count = acc_share_count = 0;
+	total_diff = 0;
+	ss_count = wm_count = ms_count = 0;
 
 	mu_store = k_new_store(miningpayouts_free);
 	mu_root = new_ktree();
-	end_workinfoid = sharesummary->workinfoid;
+
+	looksharesummary.workinfoid = workinfoid;
+	looksharesummary.userid = MAXID;
+	looksharesummary.workername = EMPTY;
+	INIT_SHARESUMMARY(&ss_look);
+	ss_look.data = (void *)(&looksharesummary);
+	K_RLOCK(sharesummary_free);
+	K_RLOCK(workmarkers_free);
+	K_RLOCK(markersummary_free);
+	ss_item = find_before_in_ktree(sharesummary_workinfoid_root, &ss_look,
+					cmp_sharesummary_workinfoid, ctx);
+	DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
+	if (ss_item)
+		end_workinfoid = sharesummary->workinfoid;
 	/* add up all sharesummaries until >= diff_want
 	 * also record the latest lastshare - that will be the end pplns time
 	 *  which will be >= block_tv */
-	while (ss_item && total < diff_want) {
+	while (total_diff < diff_want && ss_item) {
 		switch (sharesummary->complete[0]) {
 			case SUMMARY_CONFIRM:
 				break;
@@ -3061,15 +3104,12 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 				if (allow_aged)
 					break;
 			default:
-				K_RUNLOCK(sharesummary_free);
-				snprintf(reply, siz,
-					 "ERR.sharesummary1 not ready in "
-					 "workinfo %"PRId64,
-					 sharesummary->workinfoid);
-				goto shazbot;
+				share_status = "Not ready1";
 		}
-		share_count++;
-		total += (int64_t)(sharesummary->diffacc);
+		ss_count++;
+		total_share_count += sharesummary->sharecount;
+		acc_share_count += sharesummary->shareacc;
+		total_diff += (int64_t)(sharesummary->diffacc);
 		begin_workinfoid = sharesummary->workinfoid;
 		if (tv_newer(&end_tv, &(sharesummary->lastshare)))
 			copy_tv(&end_tv, &(sharesummary->lastshare));
@@ -3089,24 +3129,71 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 				if (allow_aged)
 					break;
 			default:
-				K_RUNLOCK(sharesummary_free);
-				snprintf(reply, siz,
-					 "ERR.sharesummary2 not ready in "
-					 "workinfo %"PRId64,
-					 sharesummary->workinfoid);
-				goto shazbot;
+				if (share_status == EMPTY)
+					share_status = "Not ready2";
+				else
+					share_status = "Not ready1+2";
 		}
-		share_count++;
-		total += (int64_t)(sharesummary->diffacc);
+		ss_count++;
+		total_share_count += sharesummary->sharecount;
+		acc_share_count += sharesummary->shareacc;
+		total_diff += (int64_t)(sharesummary->diffacc);
 		mu_root = upd_add_mu(mu_root, mu_store,
 				     sharesummary->userid,
 				     (int64_t)(sharesummary->diffacc));
 		ss_item = prev_in_ktree(ctx);
 		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 	}
+
+	/* If we haven't met or exceeded the required N,
+	 * move on to the markersummaries */
+	if (total_diff < diff_want) {
+		lookworkmarkers.expirydate.tv_sec = default_expiry.tv_sec;
+		lookworkmarkers.expirydate.tv_usec = default_expiry.tv_usec;
+		lookworkmarkers.workinfoidend = begin_workinfoid;
+		INIT_WORKMARKERS(&wm_look);
+		wm_look.data = (void *)(&lookworkmarkers);
+		wm_item = find_before_in_ktree(workmarkers_workinfoid_root, &wm_look,
+					       cmp_workmarkers_workinfoid, wm_ctx);
+		DATA_WORKMARKERS_NULL(workmarkers, wm_item);
+		while (total_diff < diff_want && wm_item && CURRENT(&(workmarkers->expirydate))) {
+			if (WMREADY(workmarkers->status)) {
+				wm_count++;
+				lookmarkersummary.markerid = workmarkers->markerid;
+				lookmarkersummary.userid = MAXID;
+				lookmarkersummary.workername = EMPTY;
+				INIT_MARKERSUMMARY(&ms_look);
+				ms_look.data = (void *)(&lookmarkersummary);
+				ms_item = find_before_in_ktree(markersummary_root, &ms_look,
+							       cmp_markersummary, ms_ctx);
+				DATA_MARKERSUMMARY_NULL(markersummary, ms_item);
+				// add the whole markerid
+				while (ms_item && markersummary->markerid == workmarkers->markerid) {
+					if (end_workinfoid == 0)
+						end_workinfoid = workmarkers->workinfoidend;
+					ms_count++;
+					total_share_count += markersummary->sharecount;
+					acc_share_count += markersummary->shareacc;
+					total_diff += (int64_t)(markersummary->diffacc);
+					begin_workinfoid = workmarkers->workinfoidstart;
+					if (tv_newer(&end_tv, &(markersummary->lastshare)))
+						copy_tv(&end_tv, &(markersummary->lastshare));
+					mu_root = upd_add_mu(mu_root, mu_store,
+							     markersummary->userid,
+							     (int64_t)(markersummary->diffacc));
+					ms_item = prev_in_ktree(ms_ctx);
+					DATA_MARKERSUMMARY_NULL(markersummary, ms_item);
+				}
+			}
+			wm_item = prev_in_ktree(wm_ctx);
+			DATA_WORKMARKERS_NULL(workmarkers, wm_item);
+		}
+	}
+	K_RUNLOCK(markersummary_free);
+	K_RUNLOCK(workmarkers_free);
 	K_RUNLOCK(sharesummary_free);
 
-	if (total == 0.0) {
+	if (total_diff == 0.0) {
 		snprintf(reply, siz,
 			 "ERR.total share diff 0 before workinfo %"PRId64,
 			 workinfoid);
@@ -3138,6 +3225,13 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "block_reward=%"PRId64"%c", blocks->reward, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "block_status=%s%c",
+				   blocks_confirmed(blocks->confirmed), FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "block_extra=%s%c", block_extra, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "share_status=%s%c", share_status, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "workername=%s%c", blocks->workername, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "nonce=%s%c", blocks->nonce, FLDSEP);
@@ -3148,7 +3242,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "end_workinfoid=%"PRId64"%c", end_workinfoid, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
-	snprintf(tmp, sizeof(tmp), "diffacc_total=%.0f%c", total, FLDSEP);
+	snprintf(tmp, sizeof(tmp), "diffacc_total=%.0f%c", total_diff, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "pplns_elapsed=%f%c", elapsed, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
@@ -3231,7 +3325,17 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "diff_want=%f%c", diff_want, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
-	snprintf(tmp, sizeof(tmp), "share_count=%"PRId64, share_count);
+	snprintf(tmp, sizeof(tmp), "acc_share_count=%"PRId64"%c",
+				   acc_share_count, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "total_share_count=%"PRId64"%c",
+				   total_share_count, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "ss_count=%"PRId64"%c", ss_count, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "wm_count=%"PRId64"%c", wm_count, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "ms_count=%"PRId64, ms_count);
 	APPEND_REALLOC(buf, off, len, tmp);
 
 	mu_root = free_ktree(mu_root, NULL);
@@ -3283,7 +3387,14 @@ static char *cmd_dsp(__maybe_unused PGconn *conn, __maybe_unused char *cmd,
 	dsp_ktree(sharesummary_free, sharesummary_root,
 		  transfer_data(i_file), NULL);
 
-	dsp_ktree(userstats_free, userstats_root, transfer_data(i_file), NULL);
+	dsp_ktree(userstats_free, userstats_root,
+		  transfer_data(i_file), NULL);
+
+	dsp_ktree(markersummary_free, markersummary_root,
+		  transfer_data(i_file), NULL);
+
+	dsp_ktree(workmarkers_free, workmarkers_root,
+		  transfer_data(i_file), NULL);
 
 	LOGDEBUG("%s.ok.dsp.file='%s'", id, transfer_data(i_file));
 	return strdup("ok.dsp");
@@ -3341,6 +3452,8 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USEINFO(shares, 1, 1);
 	USEINFO(shareerrors, 1, 1);
 	USEINFO(sharesummary, 1, 2);
+	USEINFO(workmarkers, 1, 2);
+	USEINFO(markersummary, 1, 2);
 	USEINFO(blocks, 1, 1);
 	USEINFO(miningpayouts, 1, 1);
 	USEINFO(auths, 1, 1);
@@ -3366,6 +3479,69 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	LOGDEBUG("%s.ok.%s...", id, cmd);
 	return buf;
+}
+
+// TODO: add to heartbeat to disable the miner if active and status != ""
+static char *cmd_userstatus(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
+			  char *code, char *inet, __maybe_unused tv_t *cd,
+			  K_TREE *trf_root)
+{
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	K_ITEM *i_username, *i_userid, *i_status, *u_item;
+	int64_t userid;
+	char *status;
+	USERS *users;
+	bool ok;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	i_username = optional_name(trf_root, "username", 3, (char *)userpatt, reply, siz);
+	i_userid = optional_name(trf_root, "userid", 1, (char *)intpatt, reply, siz);
+	// Either username or userid
+	if (!i_username && !i_userid) {
+		snprintf(reply, siz, "failed.invalid/missing userinfo");
+		LOGERR("%s.%s", id, reply);
+		return strdup(reply);
+	}
+
+	// A zero length status re-enables it
+	i_status = require_name(trf_root, "status", 0, NULL, reply, siz);
+	if (!i_status)
+		return strdup(reply);
+	status = transfer_data(i_status);
+
+	K_RLOCK(users_free);
+	if (i_username)
+		u_item = find_users(transfer_data(i_username));
+	else {
+		TXT_TO_BIGINT("userid", transfer_data(i_userid), userid);
+		u_item = find_userid(userid);
+	}
+	K_RUNLOCK(users_free);
+
+	if (!u_item)
+		ok = false;
+	else {
+		ok = users_update(conn, u_item,
+					NULL, NULL,
+					NULL,
+					by, code, inet, now,
+					trf_root,
+					status);
+	}
+
+	if (!ok) {
+		LOGERR("%s() %s.failed.DBE", __func__, id);
+		return strdup("failed.DBE");
+	}
+	DATA_USERS(users, u_item);
+	snprintf(reply, siz, "ok.updated %"PRId64" %s status %s",
+			     users->userid,
+			     users->username,
+			     status[0] ? "disabled" : "enabled");
+	LOGWARNING("%s.%s", id, reply);
+	return strdup(reply);
 }
 
 // TODO: limit access by having seperate sockets for each
@@ -3468,7 +3644,8 @@ struct CMDS ckdb_cmds[] = {
 	{ CMD_GETOPTS,	"getopts",	false,	false,	cmd_getopts,	ACCESS_WEB },
 	{ CMD_SETOPTS,	"setopts",	false,	false,	cmd_setopts,	ACCESS_WEB },
 	{ CMD_DSP,	"dsp",		false,	false,	cmd_dsp,	ACCESS_SYSTEM },
-	{ CMD_STATS,	"stats",	true,	false,	cmd_stats,	ACCESS_SYSTEM },
-	{ CMD_PPLNS,	"pplns",	false,	false,	cmd_pplns,	ACCESS_SYSTEM },
+	{ CMD_STATS,	"stats",	true,	false,	cmd_stats,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_PPLNS,	"pplns",	false,	false,	cmd_pplns,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_USERSTATUS,"userstatus",	false,	false,	cmd_userstatus,	ACCESS_SYSTEM ACCESS_WEB },
 	{ CMD_END,	NULL,		false,	false,	NULL,		NULL }
 };

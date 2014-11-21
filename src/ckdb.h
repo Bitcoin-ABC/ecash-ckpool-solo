@@ -51,8 +51,8 @@
  */
 
 #define DB_VLOCK "1"
-#define DB_VERSION "0.9.2"
-#define CKDB_VERSION DB_VERSION"-0.602"
+#define DB_VERSION "0.9.5"
+#define CKDB_VERSION DB_VERSION"-0.652"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -79,6 +79,14 @@ extern const char *idpatt;
 extern const char *intpatt;
 extern const char *hashpatt;
 extern const char *addrpatt;
+
+/* If a trimmed username is like an address but this many or more characters,
+ * disallow it */
+#define ADDR_USER_CHECK 16
+
+// BTC address size
+#define ADDR_MIN_LEN 26
+#define ADDR_MAX_LEN 34
 
 typedef struct loadstatus {
 	tv_t oldest_sharesummary_firstshare_n;
@@ -186,6 +194,9 @@ enum data_type {
 	TYPE_DOUBLE
 };
 
+// BLOB does what PTR needs
+#define TXT_TO_PTR TXT_TO_BLOB
+
 #define TXT_TO_STR(__nam, __fld, __data) txt_to_str(__nam, __fld, (__data), sizeof(__data))
 #define TXT_TO_BIGINT(__nam, __fld, __data) txt_to_bigint(__nam, __fld, &(__data), sizeof(__data))
 #define TXT_TO_INT(__nam, __fld, __data) txt_to_int(__nam, __fld, &(__data), sizeof(__data))
@@ -229,6 +240,8 @@ extern int64_t confirm_last_workinfoid;
  * workinfo and sharesummary */
 extern int64_t dbload_workinfoid_start;
 extern int64_t dbload_workinfoid_finish;
+// Only restrict sharesummary, not workinfo
+extern bool dbload_only_sharesummary;
 
 // DB users,workers,auth load is complete
 extern bool db_auths_complete;
@@ -292,6 +305,7 @@ enum cmd_values {
 	CMD_DSP,
 	CMD_STATS,
 	CMD_PPLNS,
+	CMD_USERSTATUS,
 	CMD_END
 };
 
@@ -335,15 +349,26 @@ enum cmd_values {
 // The size strdup will allocate multiples of
 #define MEMBASE 4
 
+#define LIST_MEM_ADD(_list, _fld) do { \
+		size_t __siz; \
+		__siz = strlen(_fld) + 1; \
+		if (__siz % MEMBASE) \
+			__siz += MEMBASE - (__siz % MEMBASE); \
+		_list->ram += (int)__siz; \
+	} while (0)
+
+#define LIST_MEM_SUB(_list, _fld) do { \
+		size_t __siz; \
+		__siz = strlen(_fld) + 1; \
+		if (__siz % MEMBASE) \
+			__siz += MEMBASE - (__siz % MEMBASE); \
+		_list->ram -= (int)__siz; \
+	} while (0)
+
 #define SET_POINTER(_list, _fld, _val, _def) do { \
-		size_t _siz; \
 		if ((_fld) && ((_fld) != EMPTY) && ((_fld) != (_def))) { \
-			if (_list) { \
-				_siz = strlen(_fld) + 1; \
-				if (_siz % MEMBASE) \
-					_siz += MEMBASE - (_siz % MEMBASE); \
-				_list->ram -= (int)_siz; \
-			} \
+			if (_list) \
+				LIST_MEM_SUB(_list, _fld); \
 			free(_fld); \
 		} \
 		if (!(_val) || !(*(_val))) \
@@ -352,12 +377,8 @@ enum cmd_values {
 			if (((_val) == (_def)) || (strcmp(_val, _def) == 0)) \
 				(_fld) = (_def); \
 			else { \
-				if (_list) { \
-					_siz = strlen(_val) + 1; \
-					if (_siz % MEMBASE) \
-						_siz += MEMBASE - (_siz % MEMBASE); \
-					_list->ram += (int)_siz; \
-				} \
+				if (_list) \
+					LIST_MEM_ADD(_list, _val); \
 				_fld = strdup(_val); \
 				if (!(_fld)) \
 					quithere(1, "malloc OOM"); \
@@ -600,9 +621,10 @@ typedef struct transfer {
 	char *mvalue;
 } TRANSFER;
 
-#define ALLOC_TRANSFER 64
+// Suggest malloc use MMAP - 1913 = largest under 2MB
+#define ALLOC_TRANSFER 1913
 #define LIMIT_TRANSFER 0
-#define CULL_TRANSFER 64
+#define CULL_TRANSFER 16
 #define INIT_TRANSFER(_item) INIT_GENERIC(_item, transfer)
 #define DATA_TRANSFER(_var, _item) DATA_GENERIC(_var, _item, transfer, true)
 
@@ -629,7 +651,7 @@ typedef struct users {
 	int64_t userid;
 	char username[TXT_BIG+1];
 	char usertrim[TXT_BIG+1]; // Non DB field
-	// TODO: Anything in 'status' disables the account
+	// Anything in 'status' fails mining authentication
 	char status[TXT_BIG+1];
 	char emailaddress[TXT_BIG+1];
 	tv_t joineddate;
@@ -923,7 +945,7 @@ extern K_STORE *shareerrors_store;
 // SHARESUMMARY
 typedef struct sharesummary {
 	int64_t userid;
-	char workername[TXT_BIG+1];
+	char *workername;
 	int64_t workinfoid;
 	double diffacc;
 	double diffsta;
@@ -1261,6 +1283,117 @@ extern K_TREE *workerstatus_root;
 extern K_LIST *workerstatus_free;
 extern K_STORE *workerstatus_store;
 
+// MARKERSUMMARY
+typedef struct markersummary {
+	int64_t markerid;
+	int64_t userid;
+	char *workername;
+	double diffacc;
+	double diffsta;
+	double diffdup;
+	double diffhi;
+	double diffrej;
+	double shareacc;
+	double sharesta;
+	double sharedup;
+	double sharehi;
+	double sharerej;
+	int64_t sharecount;
+	int64_t errorcount;
+	tv_t firstshare;
+	tv_t lastshare;
+	double lastdiffacc;
+	MODIFYDATECONTROLPOINTERS;
+} MARKERSUMMARY;
+
+#define ALLOC_MARKERSUMMARY 1000
+#define LIMIT_MARKERSUMMARY 0
+#define INIT_MARKERSUMMARY(_item) INIT_GENERIC(_item, markersummary)
+#define DATA_MARKERSUMMARY(_var, _item) DATA_GENERIC(_var, _item, markersummary, true)
+#define DATA_MARKERSUMMARY_NULL(_var, _item) DATA_GENERIC(_var, _item, markersummary, false)
+
+extern K_TREE *markersummary_root;
+extern K_TREE *markersummary_userid_root;
+extern K_LIST *markersummary_free;
+extern K_STORE *markersummary_store;
+
+// WORKMARKERS
+typedef struct workmarkers {
+	int64_t markerid;
+	char *poolinstance;
+	int64_t workinfoidend;
+	int64_t workinfoidstart;
+	char *description;
+	char status[TXT_FLAG+1];
+	HISTORYDATECONTROLFIELDS;
+} WORKMARKERS;
+
+#define ALLOC_WORKMARKERS 100
+#define LIMIT_WORKMARKERS 0
+#define INIT_WORKMARKERS(_item) INIT_GENERIC(_item, workmarkers)
+#define DATA_WORKMARKERS(_var, _item) DATA_GENERIC(_var, _item, workmarkers, true)
+#define DATA_WORKMARKERS_NULL(_var, _item) DATA_GENERIC(_var, _item, workmarkers, false)
+
+extern K_TREE *workmarkers_root;
+extern K_TREE *workmarkers_workinfoid_root;
+extern K_LIST *workmarkers_free;
+extern K_STORE *workmarkers_store;
+
+#define MARKER_COMPLETE 'x'
+#define WMREADY(_status) (tolower(_status[0]) == MARKER_COMPLETE)
+
+// MARKS
+// TODO: implement
+typedef struct marks {
+	char *poolinstance;
+	int64_t workinfoid;
+	char *description;
+	char marktype[TXT_FLAG+1];
+	char status[TXT_FLAG+1];
+	HISTORYDATECONTROLFIELDS;
+} MARKS;
+
+/* Marks:
+ *  marktype is one of:
+ *   b - block end
+ *   p - pplns begin
+ *   s - shift begin (not yet used)
+ *   e - shift end (not yet used)
+ *  description should one one of
+ *   b - Block NNN stt
+ *   p - Payout NNN fin (where NNN is the block number of the payout)
+ *   s/e - to be decided
+ *
+ * WorkMarkers are from a begin workinfoid to an end workinfoid
+ *  the "-1" and "+1" below mean adding to or subtracting from
+ *  the workinfoid number
+ *
+ * Until we start using shifts:
+ *  WorkMarkers can be created up to ending in the largest 'p' "-1"
+ *  WorkMarkers will always be the smallest of:
+ *   Block NNN-1 "+1" to Block NNN
+ *   Block NNN "+1" to Payout MMM "-1"
+ *   Payout MMM to Block NNN
+ *   Payout MMM-1 to Payout MMM "-1"
+ * Thus to generate the WorkMarkers from the Marks:
+ *  Find the last 'p' with no matching workinfoidbegin
+ *  Then determine each previous WorkMarker based on each previous
+ *  mark, using the above rules and stop when we find one that already exists
+ */
+
+#define ALLOC_MARKS 1000
+#define LIMIT_MARKS 0
+#define INIT_MARKS(_item) INIT_GENERIC(_item, marks)
+#define DATA_MARKS(_var, _item) DATA_GENERIC(_var, _item, marks, true)
+#define DATA_MARKS_NULL(_var, _item) DATA_GENERIC(_var, _item, marks, false)
+
+extern K_TREE *marks_root;
+extern K_LIST *marks_free;
+extern K_STORE *marks_store;
+
+#define MARK_READY 'x'
+#define MREADY(_status) (tolower(_status[0]) == MARK_READY)
+
 extern void logmsg(int loglevel, const char *fmt, ...);
 extern void setnow(tv_t *now);
 extern void tick();
@@ -1272,6 +1405,7 @@ extern PGconn *dbconnect();
 
 extern char *safe_text(char *txt);
 extern void username_trim(USERS *users);
+extern bool like_address(char *username);
 
 extern void _txt_to_data(enum data_type typ, char *nam, char *fld, void *data, size_t siz, WHERE_FFL_ARGS);
 
@@ -1413,6 +1547,19 @@ extern cmp_t cmp_userstats_workername(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_userstats_statsdate(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_userstats_workerstatus(K_ITEM *a, K_ITEM *b);
 extern bool userstats_starttimeband(USERSTATS *row, tv_t *statsdate);
+extern void dsp_markersummary(K_ITEM *item, FILE *stream);
+extern cmp_t cmp_markersummary(K_ITEM *a, K_ITEM *b);
+extern cmp_t cmp_markersummary_userid(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *find_markersummary(int64_t workinfoid, int64_t userid,
+				  char *workername);
+extern K_ITEM *find_markersummary_userid(int64_t userid, char *workername,
+					 K_TREE_CTX *ctx);
+extern void dsp_workmarkers(K_ITEM *item, FILE *stream);
+extern cmp_t cmp_workmarkers(K_ITEM *a, K_ITEM *b);
+extern cmp_t cmp_workmarkers_workinfoid(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *find_workmarkers(int64_t workinfoid);
+extern K_ITEM *find_workmarkerid(int64_t markerid);
+extern cmp_t cmp_marks(K_ITEM *a, K_ITEM *b);
 
 // ***
 // *** PostgreSQL functions ckdb_dbio.c
@@ -1460,9 +1607,9 @@ extern char *pqerrmsg(PGconn *conn);
 
 extern int64_t nextid(PGconn *conn, char *idname, int64_t increment,
 			tv_t *cd, char *by, char *code, char *inet);
-extern bool users_pass_email(PGconn *conn, K_ITEM *u_item, char *oldhash,
-			     char *newhash, char *email, char *by, char *code,
-			     char *inet, tv_t *cd, K_TREE *trf_root);
+extern bool users_update(PGconn *conn, K_ITEM *u_item, char *oldhash,
+			 char *newhash, char *email, char *by, char *code,
+			 char *inet, tv_t *cd, K_TREE *trf_root, char *status);
 extern K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 			char *passwordhash, char *by, char *code, char *inet,
 			tv_t *cd, K_TREE *trf_root);
@@ -1554,6 +1701,9 @@ extern bool userstats_add(char *poolinstance, char *elapsed, char *username,
 			  bool eos, char *by, char *code, char *inet, tv_t *cd,
 			  K_TREE *trf_root);
 extern bool userstats_fill(PGconn *conn);
+extern bool markersummary_fill(PGconn *conn);
+extern bool workmarkers_fill(PGconn *conn);
+extern bool marks_fill(PGconn *conn);
 extern bool check_db_version(PGconn *conn);
 
 // ***

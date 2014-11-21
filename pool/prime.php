@@ -34,6 +34,9 @@ function process($p, $user, $menu)
 function def_menu()
 {
  $dmenu = array('Home'  => array('Home' => ''),
+		'Pool' => array(
+			'Blocks' => 'pblocks'
+		),
 		'gap' => array( # options not shown
 				'API' => 'api'),
 		'Help' => array('Help' => 'help',
@@ -66,8 +69,9 @@ function check()
 			'API' => 'api'
 	),
 	'Help' => array(
-		'Help' => 'help',
-		'Payouts' => 'payout'
+		'Payouts' => 'payout',
+		'Workers ' => 'workers',
+		'Blocks' => 'blocks'
 	)
  );
  tryLogInOut();

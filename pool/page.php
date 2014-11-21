@@ -110,8 +110,8 @@ span.err {color:red; font-weight:bold; font-size:120%;}
 span.alert {color:red; font-weight:bold; font-size:250%;}
 input.tiny {width: 0px; height: 0px; margin: 0px; padding: 0px; outline: none; border: 0px;}
 #n42 {margin:0; position: relative; color:#fff; background:#07e;}
-#n42 a {color:#fff; text-decoration:none; margin: 4px;}
-#n42 td {min-width: 100px; float: left; vertical-align: top; padding: 2px;}
+#n42 a {color:#fff; text-decoration:none; padding: 6px; display:block;}
+#n42 td {min-width: 100px; float: left; vertical-align: top; padding: 0px 2px;}
 #n42 td.navboxr {float: right;}
 #n42 td.nav {position: relative;}
 #n42 div.sub {left: 0px; z-index: 42; position: absolute; visibility: hidden;}

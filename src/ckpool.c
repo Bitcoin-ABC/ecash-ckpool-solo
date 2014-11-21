@@ -367,11 +367,11 @@ void empty_buffer(connsock_t *cs)
  * of the buffer for use on the next receive. */
 int read_socket_line(connsock_t *cs, int timeout)
 {
+	int fd = cs->fd, ret = -1;
 	char *eom = NULL;
 	size_t buflen;
-	int ret = -1;
 
-	if (unlikely(cs->fd < 0))
+	if (unlikely(fd < 0))
 		goto out;
 
 	if (unlikely(!cs->buf))
@@ -388,7 +388,7 @@ int read_socket_line(connsock_t *cs, int timeout)
 	while (42) {
 		char readbuf[PAGESIZE] = {};
 
-		ret = wait_read_select(cs->fd, eom ? 0 : timeout);
+		ret = wait_read_select(fd, eom ? 0 : timeout);
 		if (eom && !ret)
 			break;
 		if (ret < 1) {
@@ -398,7 +398,7 @@ int read_socket_line(connsock_t *cs, int timeout)
 				LOGERR("Select failed in read_socket_line");
 			goto out;
 		}
-		ret = recv(cs->fd, readbuf, PAGESIZE - 4, 0);
+		ret = recv(fd, readbuf, PAGESIZE - 4, 0);
 		if (ret < 1) {
 			LOGERR("Failed to recv in read_socket_line");
 			ret = -1;
@@ -423,6 +423,7 @@ int read_socket_line(connsock_t *cs, int timeout)
 	*eom = '\0';
 out:
 	if (ret < 0) {
+		empty_buffer(cs);
 		dealloc(cs->buf);
 		Close(cs->fd);
 	}
@@ -889,23 +890,31 @@ static void sighandler(int sig)
 	exit(0);
 }
 
-void json_get_string(char **store, json_t *val, const char *res)
+static bool _json_get_string(char **store, json_t *entry, const char *res)
 {
-	json_t *entry = json_object_get(val, res);
+	bool ret = false;
 	const char *buf;
 
 	*store = NULL;
 	if (!entry || json_is_null(entry)) {
 		LOGDEBUG("Json did not find entry %s", res);
-		return;
+		goto out;
 	}
 	if (!json_is_string(entry)) {
 		LOGWARNING("Json entry %s is not a string", res);
-		return;
+		goto out;
 	}
 	buf = json_string_value(entry);
 	LOGDEBUG("Json found entry %s: %s", res, buf);
 	*store = strdup(buf);
+	ret = true;
+out:
+	return ret;
+}
+
+bool json_get_string(char **store, json_t *val, const char *res)
+{
+	return _json_get_string(store, json_object_get(val, res), res);
 }
 
 static void json_get_int64(int64_t *store, json_t *val, const char *res)
@@ -924,36 +933,44 @@ static void json_get_int64(int64_t *store, json_t *val, const char *res)
 	LOGDEBUG("Json found entry %s: %ld", res, *store);
 }
 
-void json_get_int(int *store, json_t *val, const char *res)
+bool json_get_int(int *store, json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);
+	bool ret = false;
 
 	if (!entry) {
 		LOGDEBUG("Json did not find entry %s", res);
-		return;
+		goto out;
 	}
 	if (!json_is_integer(entry)) {
 		LOGWARNING("Json entry %s is not an integer", res);
-		return;
+		goto out;
 	}
 	*store = json_integer_value(entry);
 	LOGDEBUG("Json found entry %s: %d", res, *store);
+	ret = true;
+out:
+	return ret;
 }
 
-static void json_get_bool(bool *store, json_t *val, const char *res)
+static bool json_get_bool(bool *store, json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);
+	bool ret = false;
 
 	if (!entry) {
 		LOGDEBUG("Json did not find entry %s", res);
-		return;
+		goto out;
 	}
 	if (!json_is_boolean(entry)) {
 		LOGWARNING("Json entry %s is not a boolean", res);
-		return;
+		goto out;
 	}
 	*store = json_is_true(entry);
 	LOGDEBUG("Json found entry %s: %s", res, *store ? "true" : "false");
+	ret = true;
+out:
+	return ret;
 }
 
 static void parse_btcds(ckpool_t *ckp, json_t *arr_val, int arr_size)
@@ -992,10 +1009,41 @@ static void parse_proxies(ckpool_t *ckp, json_t *arr_val, int arr_size)
 	}
 }
 
+static bool parse_serverurls(ckpool_t *ckp, json_t *arr_val)
+{
+	bool ret = false;
+	int arr_size, i;
+
+	if (!arr_val)
+		goto out;
+	if (!json_is_array(arr_val)) {
+		LOGWARNING("Unable to parse serverurl entries as an array");
+		goto out;
+	}
+	arr_size = json_array_size(arr_val);
+	if (!arr_size) {
+		LOGWARNING("Serverurl array empty");
+		goto out;
+	}
+	ckp->serverurls = arr_size;
+	ckp->serverurl = ckalloc(sizeof(char *) * arr_size);
+	for (i = 0; i < arr_size; i++) {
+		json_t *val = json_array_get(arr_val, i);
+
+		if (!_json_get_string(&ckp->serverurl[i], val, "serverurl"))
+			LOGWARNING("Invalid serverurl entry number %d", i);
+	}
+	ret = true;
+out:
+	return ret;
+}
+
 static void parse_config(ckpool_t *ckp)
 {
 	json_t *json_conf, *arr_val;
 	json_error_t err_val;
+	int arr_size;
+	char *url;
 
 	json_conf = json_load_file(ckp->config, JSON_DISABLE_EOF_CHECK, &err_val);
 	if (!json_conf) {
@@ -1005,8 +1053,7 @@ static void parse_config(ckpool_t *ckp)
 	}
 	arr_val = json_object_get(json_conf, "btcd");
 	if (arr_val && json_is_array(arr_val)) {
-		int arr_size = json_array_size(arr_val);
-
+		arr_size = json_array_size(arr_val);
 		if (arr_size)
 			parse_btcds(ckp, arr_val, arr_size);
 	}
@@ -1017,9 +1064,18 @@ static void parse_config(ckpool_t *ckp)
 		ckp->btcsig[38] = '\0';
 	}
 	json_get_int(&ckp->blockpoll, json_conf, "blockpoll");
-	json_get_int(&ckp->noncelength, json_conf, "noncelength");
+	json_get_int(&ckp->nonce1length, json_conf, "nonce1length");
+	json_get_int(&ckp->nonce2length, json_conf, "nonce2length");
 	json_get_int(&ckp->update_interval, json_conf, "update_interval");
-	json_get_string(&ckp->serverurl, json_conf, "serverurl");
+	/* Look for an array first and then a single entry */
+	arr_val = json_object_get(json_conf, "serverurl");
+	if (!parse_serverurls(ckp, arr_val)) {
+		if (json_get_string(&url, json_conf, "serverurl")) {
+			ckp->serverurl = ckalloc(sizeof(char *));
+			ckp->serverurl[0] = url;
+			ckp->serverurls = 1;
+		}
+	}
 	json_get_int64(&ckp->mindiff, json_conf, "mindiff");
 	json_get_int64(&ckp->startdiff, json_conf, "startdiff");
 	json_get_int64(&ckp->maxdiff, json_conf, "maxdiff");
@@ -1027,8 +1083,7 @@ static void parse_config(ckpool_t *ckp)
 	json_get_int(&ckp->maxclients, json_conf, "maxclients");
 	arr_val = json_object_get(json_conf, "proxy");
 	if (arr_val && json_is_array(arr_val)) {
-		int arr_size = json_array_size(arr_val);
-
+		arr_size = json_array_size(arr_val);
 		if (arr_size)
 			parse_proxies(ckp, arr_val, arr_size);
 	}
@@ -1319,10 +1374,14 @@ int main(int argc, char **argv)
 		ckp.btcaddress = ckp.donaddress;
 	if (!ckp.blockpoll)
 		ckp.blockpoll = 100;
-	if (!ckp.noncelength)
-		ckp.noncelength = 8;
-	else if (ckp.noncelength < 2 || ckp.noncelength > 8)
-		quit(0, "Invalid noncelength %d specified, must be 2~8", ckp.noncelength);
+	if (!ckp.nonce1length)
+		ckp.nonce1length = 8;
+	else if (ckp.nonce1length < 2 || ckp.nonce1length > 8)
+		quit(0, "Invalid nonce1length %d specified, must be 2~8", ckp.nonce1length);
+	if (!ckp.nonce2length)
+		ckp.nonce2length = 8;
+	else if (ckp.nonce2length < 2 || ckp.nonce2length > 8)
+		quit(0, "Invalid nonce2length %d specified, must be 2~8", ckp.nonce2length);
 	if (!ckp.update_interval)
 		ckp.update_interval = 30;
 	if (!ckp.mindiff)
@@ -1331,6 +1390,8 @@ int main(int argc, char **argv)
 		ckp.startdiff = 42;
 	if (!ckp.logdir)
 		ckp.logdir = strdup("logs");
+	if (!ckp.serverurls)
+		ckp.serverurl = ckzalloc(sizeof(char *));
 	if (ckp.proxy && !ckp.proxies)
 		quit(0, "No proxy entries found in config file %s", ckp.config);
 

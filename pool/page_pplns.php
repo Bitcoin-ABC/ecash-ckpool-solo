@@ -14,7 +14,7 @@ function stnum($num)
  return $b4.$fmt.$af;
 }
 #
-# ... Of course ... check the output and add the txin
+# ... Of course ... check the output and add the txin ... etc.
 function calctx($ans, $count, $miner_sat, $diffacc_total)
 {
  $pg = '<br><table cellpadding=0 cellspacing=0 border=0>';
@@ -159,6 +159,7 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 	$ans['miner_sat'] = $miner_sat;
 
 	$data = array(	'Block' => 'block',
+			'Block Status' => 'block_status',
 			'Block Hash' => 'block_hash',
 			'Block Reward (Satoshis)' => 'block_reward',
 			'Miner Reward (Satoshis)' => 'miner_sat',
@@ -178,10 +179,29 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 			'Network Difficulty' => 'block_ndiff',
 			'PPLNS Factor' => 'diff_times',
 			'PPLNS Added' => 'diff_add',
-			'Share Count' => 'share_count');
+			'Accepted Share Count' => 'acc_share_count',
+			'Total Share Count' => 'total_share_count',
+			'ShareSummary Count' => 'ss_count',
+			'WorkMarkers Count' => 'wm_count',
+			'MarkerSummary Count' => 'ms_count');
 
 	$pg = '<br><a href=https://blockchain.info/block-height/';
 	$pg .= $ans['block'].'>Blockchain '.$ans['block']."</a><br>\n";
+
+	if (strlen($ans['block_extra']) > 0)
+	{
+		$pg .= '<br><span class=err>';
+		$msg = $ans['block_status'].' - '.$ans['block_extra'];
+		$pg .= str_replace(' ', '&nbsp;', $msg)."</span><br>\n";
+	}
+
+	if (strlen($ans['share_status']) > 0)
+	{
+		$pg .= '<br><span class=err>';
+		$msg = $ans['share_status']." - Can't be paid out yet";
+		$pg .= str_replace(' ', '&nbsp;', $msg)."</span><br>\n";
+	}
+
 	$pg .= "<br><table callpadding=0 cellspacing=0 border=0>\n";
 	$pg .= '<tr class=title>';
 	$pg .= '<td class=dl>Name</td>';

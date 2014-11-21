@@ -4,8 +4,8 @@ function pctcolour($pct)
 {
  if ($pct == 100)
  {
-	$fg = '#fff';
-	$bg = '#000';
+	$fg = 'white';
+	$bg = 'black';
  }
 
  if ($pct < 100)
@@ -17,9 +17,9 @@ function pctcolour($pct)
 		$grn = 255;
 
 	if ($grn > 190)
-		$fg = '#00f';
+		$fg = 'blue';
 	else
-		$fg = '#fff';
+		$fg = 'white';
 	$bg = sprintf("#00%02x00", $grn);
  }
 
@@ -31,7 +31,7 @@ function pctcolour($pct)
 	if ($red > 255)
 		$red = 255;
 
-	$fg = '#fff';
+	$fg = 'white';
 	$bg = sprintf("#%02x0000", $red);
  }
 
@@ -44,21 +44,27 @@ function doblocks($data, $user)
 
  $pg = '<h1>Blocks</h1>';
 
- $ans = getBlocks($user);
+ if ($user === null)
+	$ans = getBlocks('Anon');
+ else
+	$ans = getBlocks($user);
 
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= "<tr class=title>";
  $pg .= "<td class=dl>Height</td>";
- $pg .= "<td class=dl>Who</td>";
+ if ($user !== null)
+	$pg .= "<td class=dl>Who</td>";
  $pg .= "<td class=dr>Reward</td>";
  $pg .= "<td class=dc>When</td>";
  $pg .= "<td class=dr>Status</td>";
  $pg .= "<td class=dr>Diff</td>";
  $pg .= "<td class=dr>%</td>";
+ $pg .= "<td class=dr>CDF</td>";
  $pg .= "</tr>\n";
  $blktot = 0;
  $nettot = 0;
  $i = 0;
+ $orph = false;
  if ($ans['STATUS'] == 'ok')
  {
 	$count = $ans['rows'];
@@ -75,7 +81,10 @@ function doblocks($data, $user)
 		$ex = '';
 		$stat = $ans['status:'.$i];
 		if ($stat == 'Orphan')
+		{
 			$ex = 's';
+			$orph = true;
+		}
 		if ($stat == '1-Confirm')
 		{
 			if (isset($data['info']['lastheight']))
@@ -110,21 +119,27 @@ function doblocks($data, $user)
 			$blktot += $diffacc;
 			if ($stat != 'Orphan')
 				$nettot += $netdiff;
+
+			$cdfv = 1 - exp(-1 * $diffacc / $netdiff);
+			$cdf = number_format($cdfv, 2);
 		}
 		else
 		{
 			$bg = '';
 			$bpct = '?';
+			$cdf = '?';
 		}
 
 		$pg .= "<tr class=$row>";
 		$pg .= "<td class=dl$ex>$hifld</td>";
-		$pg .= "<td class=dl$ex>".htmlspecialchars($ans['workername:'.$i]).'</td>';
+		if ($user !== null)
+			$pg .= "<td class=dl$ex>".htmlspecialchars($ans['workername:'.$i]).'</td>';
 		$pg .= "<td class=dr$ex>".btcfmt($ans['reward:'.$i]).'</td>';
 		$pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['firstcreatedate:'.$i]).'</td>';
 		$pg .= "<td class=dr$ex>".$stat.'</td>';
 		$pg .= "<td class=dr>$stara$acc</td>";
 		$pg .= "<td class=dr$bg>$bpct</td>";
+		$pg .= "<td class=dr>$cdf</td>";
 		$pg .= "</tr>\n";
 	}
  }
@@ -141,9 +156,26 @@ function doblocks($data, $user)
 	$bg = " bgcolor=$bg";
 
 	$pg .= "<tr class=$row>";
-	$pg .= "<td class=dl colspan=6></td>";
+	$pg .= '<td class=dr>Total:</td>';
+	$pg .= '<td class=dl colspan=';
+	if ($user === null)
+		$pg .= '4';
+	else
+		$pg .= '5';
+	$pg .= '></td>';
 	$pg .= "<td class=dr$bg>".$bpct.'</td>';
-	$pg .= "</tr>\n";
+	$pg .= "<td></td></tr>\n";
+	if ($orph === true)
+	{
+		$pg .= '<tr><td colspan=';
+		if ($user === null)
+			$pg .= '7';
+		else
+			$pg .= '8';
+		$pg .= ' class=dc><font size=-1><span class=st1>*</span>';
+		$pg .= '% total is adjusted to include orphans correctly';
+		$pg .= '</font></td></tr>';
+	}
  }
  $pg .= "</table>\n";
 
