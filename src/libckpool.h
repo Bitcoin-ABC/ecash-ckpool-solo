@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <jansson.h>
+#include <netdb.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -279,13 +280,13 @@ typedef struct proc_instance proc_instance_t;
 
 
 void _json_check(json_t *val, json_error_t *err, const char *file, const char *func, const int line);
-#define json_check(val, err) _json_check(val, err,  __FILE__, __func__, __LINE__)
+#define json_check(VAL, ERR) _json_check(VAL, ERR,  __FILE__, __func__, __LINE__)
 
 /* Check and pack json */
-#define JSON_CPACK(val, ...) do { \
-	json_error_t err; \
-	val = json_pack_ex(&err, 0, ##__VA_ARGS__); \
-	json_check(val, &err); \
+#define JSON_CPACK(VAL, ...) do { \
+	json_error_t ERR; \
+	VAL = json_pack_ex(&ERR, 0, ##__VA_ARGS__); \
+	json_check(VAL, &ERR); \
 } while (0)
 
 /* No error checking with these, make sure we know they're valid already! */
@@ -361,6 +362,7 @@ static inline void _json_set_bool(json_t *val, const char *key, bool boolean,
 void rename_proc(const char *name);
 void create_pthread(pthread_t *thread, void *(*start_routine)(void *), void *arg);
 void join_pthread(pthread_t thread);
+bool ck_completion_timeout(void *fn, void *fnarg, int timeout);
 
 void _mutex_lock(pthread_mutex_t *lock, const char *file, const char *func, const int line);
 void _mutex_unlock_noyield(pthread_mutex_t *lock, const char *file, const char *func, const int line);
@@ -398,13 +400,13 @@ void _cksem_init(sem_t *sem, const char *file, const char *func, const int line)
 void _cksem_post(sem_t *sem, const char *file, const char *func, const int line);
 void _cksem_wait(sem_t *sem, const char *file, const char *func, const int line);
 int _cksem_mswait(sem_t *sem, int ms, const char *file, const char *func, const int line);
-void cksem_reset(sem_t *sem);
-void cksem_destroy(sem_t *sem);
+void _cksem_destroy(sem_t *sem, const char *file, const char *func, const int line);
 
-#define cksem_init(_sem) _cksem_init(_sem, __FILE__, __func__, __LINE__)
-#define cksem_post(_sem) _cksem_post(_sem, __FILE__, __func__, __LINE__)
-#define cksem_wait(_sem) _cksem_wait(_sem, __FILE__, __func__, __LINE__)
-#define cksem_mswait(_sem, _timeout) _cksem_mswait(_sem, _timeout, __FILE__, __func__, __LINE__)
+#define cksem_init(SEM) _cksem_init(SEM, __FILE__, __func__, __LINE__)
+#define cksem_post(SEM) _cksem_post(SEM, __FILE__, __func__, __LINE__)
+#define cksem_wait(SEM) _cksem_wait(SEM, __FILE__, __func__, __LINE__)
+#define cksem_mswait(SEM, _timeout) _cksem_mswait(SEM, _timeout, __FILE__, __func__, __LINE__)
+#define cksem_destroy(SEM) _cksem_destroy(SEM, __FILE__, __func__, __LINE__)
 
 static inline bool sock_connecting(void)
 {
@@ -422,6 +424,11 @@ static inline bool sock_timeout(void)
 }
 
 bool extract_sockaddr(char *url, char **sockaddr_url, char **sockaddr_port);
+bool url_from_sockaddr(const struct sockaddr *addr, char *url, char *port);
+bool addrinfo_from_url(const char *url, const char *port, struct addrinfo *addrinfo);
+bool url_from_serverurl(char *serverurl, char *newurl, char *newport);
+bool url_from_socket(const int sockd, char *url, char *port);
+
 void keep_sockalive(int fd);
 void nolinger_socket(int fd);
 void noblock_socket(int fd);

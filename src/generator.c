@@ -251,6 +251,7 @@ static int gen_loop(proc_instance_t *pi)
 	char hash[68];
 
 reconnect:
+	Close(sockd);
 	if (si) {
 		kill_server(si);
 		reconnecting = true;
@@ -267,6 +268,7 @@ reconnect:
 	}
 
 retry:
+	Close(sockd);
 	ckmsgq_add(gdata->srvchk, si);
 
 	do {
@@ -294,7 +296,6 @@ retry:
 	buf = recv_unix_msg(sockd);
 	if (!buf) {
 		LOGWARNING("Failed to get message in gen_loop");
-		Close(sockd);
 		goto retry;
 	}
 	LOGDEBUG("Generator received request: %s", buf);
@@ -374,7 +375,6 @@ retry:
 		LOGDEBUG("Generator received ping request");
 		send_unix_msg(sockd, "pong");
 	}
-	Close(sockd);
 	goto retry;
 
 out:

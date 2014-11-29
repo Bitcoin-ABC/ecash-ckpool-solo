@@ -697,7 +697,8 @@ void workerstatus_ready()
 		if (ms_item) {
 			DATA_MARKERSUMMARY(markersummary, ms_item);
 			K_RLOCK(workmarkers_free);
-			wm_item = find_workmarkerid(markersummary->markerid);
+			wm_item = find_workmarkerid(markersummary->markerid,
+						    false, MARKER_PROCESSED);
 			K_RUNLOCK(workmarkers_free);
 			if (wm_item &&
 			    tv_newer(&(workerstatus->last_share), &(markersummary->lastshare))) {
@@ -1357,9 +1358,9 @@ bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 		goto bye;
 	}
 
-	K_RLOCK(markersummary_free);
-	wm_item = find_workmarkers(workinfoid);
-	K_RUNLOCK(markersummary_free);
+	K_RLOCK(workmarkers_free);
+	wm_item = find_workmarkers(workinfoid, false, MARKER_PROCESSED);
+	K_RUNLOCK(workmarkers_free);
 	// Should never happen?
 	if (wm_item && !reloading) {
 		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
@@ -2020,7 +2021,7 @@ void set_block_share_counters()
 	       CURRENT(&(workmarkers->expirydate)) &&
 	       workmarkers->workinfoidend > pool.workinfoid) {
 
-		if (WMREADY(workmarkers->status))
+		if (WMPROCESSED(workmarkers->status))
 		{
 			// Should never be true
 			if (workmarkers->workinfoidstart <= pool.workinfoid) {
@@ -2332,7 +2333,7 @@ K_ITEM *find_markersummary(int64_t workinfoid, int64_t userid, char *workername)
 	WORKMARKERS *wm;
 	K_TREE_CTX ctx[1];
 
-	wm_item = find_workmarkers(workinfoid);
+	wm_item = find_workmarkers(workinfoid, false, MARKER_PROCESSED);
 	if (wm_item) {
 		DATA_WORKMARKERS(wm, wm_item);
 		markersummary.markerid = wm->markerid;
@@ -2388,7 +2389,7 @@ cmp_t cmp_workmarkers_workinfoid(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
-K_ITEM *find_workmarkers(int64_t workinfoid)
+K_ITEM *find_workmarkers(int64_t workinfoid, bool anystatus, char status)
 {
 	WORKMARKERS workmarkers, *wm;
 	K_TREE_CTX ctx[1];
@@ -2404,7 +2405,7 @@ K_ITEM *find_workmarkers(int64_t workinfoid)
 	if (wm_item) {
 		DATA_WORKMARKERS(wm, wm_item);
 		if (!CURRENT(&(wm->expirydate)) ||
-		    !WMREADY(wm->status) ||
+		    (!anystatus && wm->status[0] != status) ||
 		    workinfoid < wm->workinfoidstart ||
 		    workinfoid > wm->workinfoidend)
 			wm_item = NULL;
@@ -2412,7 +2413,7 @@ K_ITEM *find_workmarkers(int64_t workinfoid)
 	return wm_item;
 }
 
-K_ITEM *find_workmarkerid(int64_t markerid)
+K_ITEM *find_workmarkerid(int64_t markerid, bool anystatus, char status)
 {
 	WORKMARKERS workmarkers, *wm;
 	K_TREE_CTX ctx[1];
@@ -2428,10 +2429,267 @@ K_ITEM *find_workmarkerid(int64_t markerid)
 	if (wm_item) {
 		DATA_WORKMARKERS(wm, wm_item);
 		if (!CURRENT(&(wm->expirydate)) ||
-		    !WMREADY(wm->status))
+		    (!anystatus && wm->status[0] != status))
 			wm_item = NULL;
 	}
 	return wm_item;
+}
+
+// Create one
+static bool gen_workmarkers(PGconn *conn, MARKS *stt, bool after, MARKS *fin,
+			    bool before, char *by, char *code, char *inet,
+			    tv_t *cd, K_TREE *trf_root)
+{
+	K_ITEM look, *wi_stt_item, *wi_fin_item, *old_wm_item;
+	WORKMARKERS *old_wm;
+	WORKINFO workinfo, *wi_stt, *wi_fin;
+	K_TREE_CTX ctx[1];
+	char description[TXT_BIG+1];
+	bool ok;
+
+	workinfo.workinfoid = stt->workinfoid;
+	workinfo.expirydate.tv_sec = default_expiry.tv_sec;
+	workinfo.expirydate.tv_usec = default_expiry.tv_usec;
+
+	INIT_WORKINFO(&look);
+	look.data = (void *)(&workinfo);
+	K_RLOCK(workinfo_free);
+	if (after) {
+		wi_stt_item = find_after_in_ktree(workinfo_root, &look,
+						  cmp_workinfo, ctx);
+		while (wi_stt_item) {
+			DATA_WORKINFO(wi_stt, wi_stt_item);
+			if (CURRENT(&(wi_stt->expirydate)))
+				break;
+			wi_stt_item = next_in_ktree(ctx);
+		}
+	} else {
+		wi_stt_item = find_in_ktree(workinfo_root, &look,
+					    cmp_workinfo, ctx);
+		DATA_WORKINFO_NULL(wi_stt, wi_stt_item);
+	}
+	K_RUNLOCK(workinfo_free);
+	if (!wi_stt_item)
+		return false;
+	if (!CURRENT(&(wi_stt->expirydate)))
+		return false;
+
+	workinfo.workinfoid = fin->workinfoid;
+
+	INIT_WORKINFO(&look);
+	look.data = (void *)(&workinfo);
+	K_RLOCK(workinfo_free);
+	if (before) {
+		workinfo.expirydate.tv_sec = 0;
+		workinfo.expirydate.tv_usec = 0;
+		wi_fin_item = find_before_in_ktree(workinfo_root, &look,
+						   cmp_workinfo, ctx);
+		while (wi_fin_item) {
+			DATA_WORKINFO(wi_fin, wi_fin_item);
+			if (CURRENT(&(wi_fin->expirydate)))
+				break;
+			wi_fin_item = prev_in_ktree(ctx);
+		}
+	} else {
+		workinfo.expirydate.tv_sec = default_expiry.tv_sec;
+		workinfo.expirydate.tv_usec = default_expiry.tv_usec;
+		wi_fin_item = find_in_ktree(workinfo_root, &look,
+					    cmp_workinfo, ctx);
+		DATA_WORKINFO_NULL(wi_fin, wi_fin_item);
+	}
+	K_RUNLOCK(workinfo_free);
+	if (!wi_fin_item)
+		return false;
+	if (!CURRENT(&(wi_fin->expirydate)))
+		return false;
+
+	/* If two marks in a row are fin(+after) then stt(-before),
+	 *  it may be that there should be no workmarkers range between them
+	 * This may show up as the calculated finish id being before
+	 *  the start id - so no need to create it since it will be empty
+	 * Also note that empty workmarkers are not a problem,
+	 *  but simply unnecessary and in this specific case,
+	 *  we don't create it since a negative range would cause tree
+	 *  sort order and matching errors */
+	if (wi_fin->workinfoid >= wi_stt->workinfoid) {
+		K_RLOCK(workmarkers_free);
+		old_wm_item = find_workmarkers(wi_fin->workinfoid, true, '\0');
+		K_RUNLOCK(workmarkers_free);
+		DATA_WORKMARKERS_NULL(old_wm, old_wm_item);
+		if (old_wm_item && (WMREADY(old_wm->status) ||
+		    WMPROCESSED(old_wm->status))) {
+			/* This actually means a code bug or a DB marks has
+			 * been set incorrectly via cmd_marks (or pgsql) */
+			LOGEMERG("%s(): marks workinfoid %"PRId64" matches or"
+				 " is part of the existing markerid %"PRId64,
+				 __func__, wi_fin->workinfoid,
+				 old_wm->markerid);
+			return false;
+		}
+
+		snprintf(description, sizeof(description), "%s%s to %s%s",
+			 stt->description, after ? "++" : "",
+			 fin->description, before ? "--" : "");
+
+		ok = workmarkers_process(conn, true, 0, EMPTY,
+					 wi_fin->workinfoid, wi_stt->workinfoid,
+					 description, MARKER_READY_STR,
+					 by, code, inet, cd, trf_root);
+
+		if (!ok)
+			return false;
+	}
+
+	ok = marks_process(conn, true, EMPTY, fin->workinfoid,
+			   fin->description, fin->extra, fin->marktype,
+			   MARK_USED_STR, by, code, inet, cd, trf_root);
+
+	return ok;
+}
+
+/* Generate workmarkers from the last USED mark
+ * Will only use the last USED mark and the contiguous READY
+ *  marks after the last USED mark
+ * If a mark is found not READY it will stop at that one and
+ *  report success with a message regarding the not READY one
+ * No checks are done for the validity of the mark status
+ *  information, however, until the next step of generating
+ *  the markersummaries is completely automated, rather than
+ *  simply running the SQL script manually, the existence of
+   a workmarker wont actually do anything automatically */
+bool workmarkers_generate(PGconn *conn, char *err, size_t siz, char *by,
+			  char *code, char *inet, tv_t *cd, K_TREE *trf_root)
+{
+	K_ITEM *m_item, *m_next_item;
+	MARKS *mused, *mnext;
+	MARKS marks;
+	K_TREE_CTX ctx[1];
+	K_ITEM look;
+	bool any = false, ok;
+
+	marks.expirydate.tv_sec = default_expiry.tv_sec;
+	marks.expirydate.tv_usec = default_expiry.tv_usec;
+	marks.workinfoid = MAXID;
+
+	INIT_MARKS(&look);
+	look.data = (void *)(&marks);
+	K_RLOCK(marks_free);
+	m_item = find_before_in_ktree(marks_root, &look, cmp_marks, ctx);
+	while (m_item) {
+		DATA_MARKS(mused, m_item);
+		if (CURRENT(&(mused->expirydate)) && MUSED(mused->status))
+			break;
+		m_item = prev_in_ktree(ctx);
+	}
+	K_RUNLOCK(marks_free);
+	if (!m_item || !CURRENT(&(mused->expirydate)) || !MUSED(mused->status)) {
+		snprintf(err, siz, "%s", "No trailing used mark found");
+		return false;
+	}
+	K_RLOCK(marks_free);
+	m_item = next_in_ktree(ctx);
+	K_RUNLOCK(marks_free);
+	while (m_item) {
+		DATA_MARKS(mnext, m_item);
+		if (!CURRENT(&(mnext->expirydate)) || !!MREADY(mused->status))
+			break;
+		/* We need to get the next marks in advance since
+		 *  gen_workmarker will create a new m_item flagged USED
+		 *  and the tree position ctx for m_item will no longer give
+		 *  us the correct 'next'
+		 * However, we can still use mnext as mused in the subsequent
+		 *  loop since the data that we need hasn't been changed
+		 */
+		K_RLOCK(marks_free);
+		m_next_item = next_in_ktree(ctx);
+		K_RUNLOCK(marks_free);
+
+// save code space ...
+#define GENWM(m1, b1, m2, b2) \
+	gen_workmarkers(conn, m1, b1, m2, b2, by, code, inet, cd, trf_root)
+
+		ok = true;
+		switch(mused->marktype[0]) {
+			case MARKTYPE_BLOCK:
+			case MARKTYPE_SHIFT_END:
+			case MARKTYPE_OTHER_FINISH:
+				switch(mnext->marktype[0]) {
+					case MARKTYPE_BLOCK:
+					case MARKTYPE_SHIFT_END:
+					case MARKTYPE_OTHER_FINISH:
+						ok = GENWM(mused, true, mnext, false);
+						if (ok)
+							any = true;
+						break;
+					case MARKTYPE_PPLNS:
+					case MARKTYPE_SHIFT_BEGIN:
+					case MARKTYPE_OTHER_BEGIN:
+						ok = GENWM(mused, true, mnext, true);
+						if (ok)
+							any = true;
+						break;
+					default:
+						snprintf(err, siz,
+							 "Mark %"PRId64" has"
+							 " an unknown marktype"
+							 " '%s' - aborting",
+							 mnext->workinfoid,
+							 mnext->marktype);
+						return false;
+				}
+				break;
+			case MARKTYPE_PPLNS:
+			case MARKTYPE_SHIFT_BEGIN:
+			case MARKTYPE_OTHER_BEGIN:
+				switch(mnext->marktype[0]) {
+					case MARKTYPE_BLOCK:
+					case MARKTYPE_SHIFT_END:
+					case MARKTYPE_OTHER_FINISH:
+						ok = GENWM(mused, false, mnext, false);
+						if (ok)
+							any = true;
+						break;
+					case MARKTYPE_PPLNS:
+					case MARKTYPE_SHIFT_BEGIN:
+					case MARKTYPE_OTHER_BEGIN:
+						ok = GENWM(mused, false, mnext, true);
+						if (ok)
+							any = true;
+						break;
+					default:
+						snprintf(err, siz,
+							 "Mark %"PRId64" has"
+							 " an unknown marktype"
+							 " '%s' - aborting",
+							 mnext->workinfoid,
+							 mnext->marktype);
+						return false;
+				}
+				break;
+			default:
+				snprintf(err, siz,
+					 "Mark %"PRId64" has an unknown "
+					 "marktype '%s' - aborting",
+					 mused->workinfoid,
+					 mused->marktype);
+				return false;
+		}
+		if (!ok) {
+			snprintf(err, siz,
+				 "Processing marks %"PRId64" to "
+				 "%"PRId64" failed - aborting",
+				 mused->workinfoid,
+				 mnext->workinfoid);
+			return false;
+		}
+		mused = mnext;
+		m_item = m_next_item;
+	}
+	if (!any) {
+		snprintf(err, siz, "%s", "No ready marks found");
+		return false;
+	}
+	return true;
 }
 
 // order by expirydate asc,workinfoid asc
@@ -2445,5 +2703,125 @@ cmp_t cmp_marks(K_ITEM *a, K_ITEM *b)
 	if (c == 0)
 		c = CMP_BIGINT(ma->workinfoid, mb->workinfoid);
 	return c;
+}
+
+K_ITEM *find_marks(int64_t workinfoid)
+{
+	MARKS marks;
+	K_TREE_CTX ctx[1];
+	K_ITEM look;
+
+	marks.expirydate.tv_sec = default_expiry.tv_sec;
+	marks.expirydate.tv_usec = default_expiry.tv_usec;
+	marks.workinfoid = workinfoid;
+
+	INIT_MARKS(&look);
+	look.data = (void *)(&marks);
+	return find_in_ktree(marks_root, &look, cmp_marks, ctx);
+}
+
+const char *marks_marktype(char *marktype)
+{
+	switch (marktype[0]) {
+		case MARKTYPE_BLOCK:
+			return marktype_block;
+		case MARKTYPE_PPLNS:
+			return marktype_pplns;
+		case MARKTYPE_SHIFT_BEGIN:
+			return marktype_shift_begin;
+		case MARKTYPE_SHIFT_END:
+			return marktype_shift_end;
+		case MARKTYPE_OTHER_BEGIN:
+			return marktype_other_begin;
+		case MARKTYPE_OTHER_FINISH:
+			return marktype_other_finish;
+	}
+	return NULL;
+}
+
+bool _marks_description(char *description, size_t siz, char *marktype,
+			int32_t height, char *shift, char *other,
+			WHERE_FFL_ARGS)
+{
+	switch (marktype[0]) {
+		case MARKTYPE_BLOCK:
+			if (height < START_POOL_HEIGHT) {
+				LOGERR("%s() invalid pool height %"PRId32
+					"for mark %s " WHERE_FFL,
+					__func__, height,
+					marks_marktype(marktype),
+					WHERE_FFL_PASS);
+				return false;
+			}
+			snprintf(description, siz,
+				 marktype_block_fmt, height);
+			break;
+		case MARKTYPE_PPLNS:
+			if (height < START_POOL_HEIGHT) {
+				LOGERR("%s() invalid pool height %"PRId32
+					"for mark %s " WHERE_FFL,
+					__func__, height,
+					marks_marktype(marktype),
+					WHERE_FFL_PASS);
+				return false;
+			}
+			snprintf(description, siz,
+				 marktype_pplns_fmt, height);
+			break;
+		case MARKTYPE_SHIFT_BEGIN:
+			if (shift == NULL || !*shift) {
+				LOGERR("%s() invalid mark shift NULL/empty "
+					"for mark %s " WHERE_FFL,
+					__func__,
+					marks_marktype(marktype),
+					WHERE_FFL_PASS);
+				return false;
+			}
+			snprintf(description, siz,
+				 marktype_shift_begin_fmt, shift);
+			break;
+		case MARKTYPE_SHIFT_END:
+			if (shift == NULL || !*shift) {
+				LOGERR("%s() invalid mark shift NULL/empty "
+					"for mark %s " WHERE_FFL,
+					__func__,
+					marks_marktype(marktype),
+					WHERE_FFL_PASS);
+				return false;
+			}
+			snprintf(description, siz,
+				 marktype_shift_end_fmt, shift);
+			break;
+		case MARKTYPE_OTHER_BEGIN:
+			if (other == NULL) {
+				LOGERR("%s() invalid mark other NULL/empty "
+					"for mark %s " WHERE_FFL,
+					__func__,
+					marks_marktype(marktype),
+					WHERE_FFL_PASS);
+				return false;
+			}
+			snprintf(description, siz,
+				 marktype_other_begin_fmt, other);
+			break;
+		case MARKTYPE_OTHER_FINISH:
+			if (other == NULL) {
+				LOGERR("%s() invalid mark other NULL/empty "
+					"for mark %s " WHERE_FFL,
+					__func__,
+					marks_marktype(marktype),
+					WHERE_FFL_PASS);
+				return false;
+			}
+			snprintf(description, siz,
+				 marktype_other_finish_fmt, other);
+			break;
+		default:
+			LOGERR("%s() invalid marktype '%s'" WHERE_FFL,
+				__func__, marktype,
+				WHERE_FFL_PASS);
+			return false;
+	}
+	return true;
 }
 

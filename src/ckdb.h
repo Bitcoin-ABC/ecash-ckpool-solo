@@ -51,8 +51,8 @@
  */
 
 #define DB_VLOCK "1"
-#define DB_VERSION "0.9.5"
-#define CKDB_VERSION DB_VERSION"-0.652"
+#define DB_VERSION "0.9.6"
+#define CKDB_VERSION DB_VERSION"-0.665"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -306,6 +306,7 @@ enum cmd_values {
 	CMD_STATS,
 	CMD_PPLNS,
 	CMD_USERSTATUS,
+	CMD_MARKS,
 	CMD_END
 };
 
@@ -882,6 +883,7 @@ typedef struct workinfo {
 #define LIMIT_WORKINFO 0
 #define INIT_WORKINFO(_item) INIT_GENERIC(_item, workinfo)
 #define DATA_WORKINFO(_var, _item) DATA_GENERIC(_var, _item, workinfo, true)
+#define DATA_WORKINFO_NULL(_var, _item) DATA_GENERIC(_var, _item, workinfo, false)
 
 extern K_TREE *workinfo_root;
 // created during data load then destroyed since not needed later
@@ -1339,46 +1341,59 @@ extern K_TREE *workmarkers_workinfoid_root;
 extern K_LIST *workmarkers_free;
 extern K_STORE *workmarkers_store;
 
-#define MARKER_COMPLETE 'x'
-#define WMREADY(_status) (tolower(_status[0]) == MARKER_COMPLETE)
+#define MARKER_READY 'x'
+#define MARKER_READY_STR "x"
+#define WMREADY(_status) (tolower((_status)[0]) == MARKER_READY)
+#define MARKER_PROCESSED 'p'
+#define MARKER_PROCESSED_STR "p"
+#define WMPROCESSED(_status) (tolower((_status)[0]) == MARKER_PROCESSED)
 
 // MARKS
-// TODO: implement
 typedef struct marks {
 	char *poolinstance;
 	int64_t workinfoid;
 	char *description;
+	char *extra;
 	char marktype[TXT_FLAG+1];
 	char status[TXT_FLAG+1];
 	HISTORYDATECONTROLFIELDS;
 } MARKS;
 
-/* Marks:
+/* marks:
  *  marktype is one of:
  *   b - block end
  *   p - pplns begin
  *   s - shift begin (not yet used)
  *   e - shift end (not yet used)
- *  description should one one of
- *   b - Block NNN stt
- *   p - Payout NNN fin (where NNN is the block number of the payout)
- *   s/e - to be decided
+ *   o - other begin
+ *   f - other finish/end
+ *  description generated will be:
+ *   b - Block NNN fin
+ *   p - Payout NNN stt (where NNN is the block number of the payout)
+ *   s - Shift AAA stt
+ *   e - Shift AAA fin
+ *   o - The string passed to the marks command
+ *   f - The string passed to the marks command
  *
- * WorkMarkers are from a begin workinfoid to an end workinfoid
+ * workmarkers are from a begin workinfoid to an end workinfoid
  *  the "-1" and "+1" below mean adding to or subtracting from
- *  the workinfoid number
+ *  the workinfoid number - but should move forward/back to the
+ *  next/prev valid workinfoid, not simply +1 or -1
+ *  i.e. all workinfoid in marks and workmarkers must exist in workinfo
  *
  * Until we start using shifts:
- *  WorkMarkers can be created up to ending in the largest 'p' "-1"
- *  WorkMarkers will always be the smallest of:
+ *  workmarkers can be created up to ending in the largest 'p' "-1"
+ *  workmarkers will always be the smallest of:
  *   Block NNN-1 "+1" to Block NNN
  *   Block NNN "+1" to Payout MMM "-1"
  *   Payout MMM to Block NNN
  *   Payout MMM-1 to Payout MMM "-1"
- * Thus to generate the WorkMarkers from the Marks:
- *  Find the last 'p' with no matching workinfoidbegin
- *  Then determine each previous WorkMarker based on each previous
- *  mark, using the above rules and stop when we find one that already exists
+ * Thus to generate the workmarkers from the marks:
+ *  Find the last USED mark then create a workmarker from each pair of
+ *   marks going forward for each READY mark
+ *  Set each mark as USED when we use it
+ *  Stop when either we run out of marks or find a non-READY mark
+ *  Finding a workmarker that already exists is an error
  */
 
 #define ALLOC_MARKS 1000
@@ -1391,8 +1406,33 @@ extern K_TREE *marks_root;
 extern K_LIST *marks_free;
 extern K_STORE *marks_store;
 
+#define MARKTYPE_BLOCK 'b'
+#define MARKTYPE_PPLNS 'p'
+#define MARKTYPE_SHIFT_BEGIN 's'
+#define MARKTYPE_SHIFT_END 'e'
+#define MARKTYPE_OTHER_BEGIN 'o'
+#define MARKTYPE_OTHER_FINISH 'f'
+
+extern const char *marktype_block;
+extern const char *marktype_pplns;
+extern const char *marktype_shift_begin;
+extern const char *marktype_shift_end;
+extern const char *marktype_other_begin;
+extern const char *marktype_other_finish;
+
+extern const char *marktype_block_fmt;
+extern const char *marktype_pplns_fmt;
+extern const char *marktype_shift_begin_fmt;
+extern const char *marktype_shift_end_fmt;
+extern const char *marktype_other_begin_fmt;
+extern const char *marktype_other_finish_fmt;
+
 #define MARK_READY 'x'
-#define MREADY(_status) (tolower(_status[0]) == MARK_READY)
+#define MARK_READY_STR "x"
+#define MREADY(_status) (tolower((_status)[0]) == MARK_READY)
+#define MARK_USED 'u'
+#define MARK_USED_STR "u"
+#define MUSED(_status) (tolower((_status)[0]) == MARK_USED)
 
 extern void logmsg(int loglevel, const char *fmt, ...);
 extern void setnow(tv_t *now);
@@ -1557,9 +1597,19 @@ extern K_ITEM *find_markersummary_userid(int64_t userid, char *workername,
 extern void dsp_workmarkers(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_workmarkers(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_workmarkers_workinfoid(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *find_workmarkers(int64_t workinfoid);
-extern K_ITEM *find_workmarkerid(int64_t markerid);
+extern K_ITEM *find_workmarkers(int64_t workinfoid, bool anystatus, char status);
+extern K_ITEM *find_workmarkerid(int64_t markerid, bool anystatus, char status);
+extern bool workmarkers_generate(PGconn *conn, char *err, size_t siz,
+				 char *by, char *code, char *inet, tv_t *cd,
+				 K_TREE *trf_root);
 extern cmp_t cmp_marks(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *find_marks(int64_t workinfoid);
+extern const char *marks_marktype(char *marktype);
+#define marks_description(_description, _siz, _marktype, _height, _shift, _other) \
+	_marks_description(_description, _siz, _marktype, _height, _shift, _other, WHERE_FFL_HERE)
+extern bool _marks_description(char *description, size_t siz, char *marktype,
+				int32_t height, char *shift, char *other,
+				WHERE_FFL_ARGS);
 
 // ***
 // *** PostgreSQL functions ckdb_dbio.c
@@ -1702,7 +1752,31 @@ extern bool userstats_add(char *poolinstance, char *elapsed, char *username,
 			  K_TREE *trf_root);
 extern bool userstats_fill(PGconn *conn);
 extern bool markersummary_fill(PGconn *conn);
+#define workmarkers_process(_conn, _add, _markerid, _poolinstance, \
+			    _workinfoidend, _workinfoidstart, _description, \
+			    _status, _by, _code, _inet, _cd, _trf_root) \
+	_workmarkers_process(_conn, _add, _markerid, _poolinstance, \
+			     _workinfoidend, _workinfoidstart, _description, \
+			     _status, _by, _code, _inet, _cd, _trf_root, \
+			     WHERE_FFL_HERE)
+extern bool _workmarkers_process(PGconn *conn, bool add, int64_t markerid,
+				 char *poolinstance, int64_t workinfoidend,
+				 int64_t workinfoidstart, char *description,
+				 char *status, char *by, char *code,
+				 char *inet, tv_t *cd, K_TREE *trf_root,
+				 WHERE_FFL_ARGS);
 extern bool workmarkers_fill(PGconn *conn);
+#define marks_process(_conn, _add, _poolinstance, _workinfoid, _description, \
+		      _extra, _marktype, _status, _by, _code, _inet, _cd, \
+		      _trf_root) \
+	_marks_process(_conn, _add, _poolinstance, _workinfoid, _description, \
+		      _extra, _marktype, _status, _by, _code, _inet, _cd, \
+		      _trf_root, WHERE_FFL_HERE)
+extern bool _marks_process(PGconn *conn, bool add, char *poolinstance,
+			   int64_t workinfoid, char *description,
+			   char *extra, char *marktype, char *status,
+			   char *by, char *code, char *inet, tv_t *cd,
+			   K_TREE *trf_root, WHERE_FFL_ARGS);
 extern bool marks_fill(PGconn *conn);
 extern bool check_db_version(PGconn *conn);
 

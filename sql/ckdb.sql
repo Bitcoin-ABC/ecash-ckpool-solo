@@ -255,6 +255,7 @@ CREATE TABLE marks ( -- workinfoids to make workmarkers
     poolinstance character varying(256) NOT NULL,
     workinfoid bigint NOT NULL,
     description character varying(256) DEFAULT ''::character varying NOT NULL,
+    extra character varying(256) DEFAULT ''::character varying NOT NULL,
     marktype char NOT NULL, -- 'b'lock 'p'plns-begin 's'hift-begin 'e'=shift-end
     status char NOT NULL,
     createdate timestamp with time zone NOT NULL,
@@ -432,4 +433,4 @@ CREATE TABLE version (
     PRIMARY KEY (vlock)
 );
 
-insert into version (vlock,version) values (1,'0.9.5');
+insert into version (vlock,version) values (1,'0.9.6');

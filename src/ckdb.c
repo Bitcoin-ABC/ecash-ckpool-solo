@@ -460,6 +460,20 @@ K_TREE *marks_root;
 K_LIST *marks_free;
 K_STORE *marks_store;
 
+const char *marktype_block = "Block End";
+const char *marktype_pplns = "Payout Begin";
+const char *marktype_shift_begin = "Shift Begin";
+const char *marktype_shift_end = "Shift End";
+const char *marktype_other_begin = "Other Begin";
+const char *marktype_other_finish = "Other Finish";
+
+const char *marktype_block_fmt = "Block %"PRId32" fin";
+const char *marktype_pplns_fmt = "Payout %"PRId32" stt";
+const char *marktype_shift_begin_fmt = "Shift %s stt";
+const char *marktype_shift_end_fmt = "Shift %s fin";
+const char *marktype_other_begin_fmt = "stt: %s";
+const char *marktype_other_finish_fmt = "fin: %s";
+
 static char logname[512];
 static char *dbcode;
 
@@ -1046,7 +1060,7 @@ static void alloc_storage()
 
 	marks_free = k_new_list("Marks", sizeof(MARKS),
 				ALLOC_MARKS, LIMIT_MARKS, true);
-	marks_store = k_new_store(workmarkers_free);
+	marks_store = k_new_store(marks_free);
 	marks_root = new_ktree();
 }
 
@@ -1114,6 +1128,19 @@ static void free_workmarkers_data(K_ITEM *item)
 		free(workmarkers->description);
 }
 
+static void free_marks_data(K_ITEM *item)
+{
+	MARKS *marks;
+
+	DATA_MARKS(marks, item);
+	if (marks->poolinstance && marks->poolinstance != EMPTY)
+		free(marks->poolinstance);
+	if (marks->description && marks->description != EMPTY)
+		free(marks->description);
+	if (marks->extra && marks->extra != EMPTY)
+		free(marks->extra);
+}
+
 #define FREE_TREE(_tree) \
 	if (_tree ## _root) \
 		_tree ## _root = free_ktree(_tree ## _root, NULL) \
@@ -1154,7 +1181,9 @@ static void dealloc_storage()
 {
 	FREE_LISTS(logqueue);
 
-	FREE_ALL(marks);
+	FREE_TREE(marks);
+	FREE_STORE_DATA(marks);
+	FREE_LIST_DATA(marks);
 
 	FREE_TREE(workmarkers_workinfoid);
 	FREE_TREE(workmarkers);
@@ -1281,7 +1310,7 @@ static bool setup_data()
 
 static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 				 char *buf, int *which_cmds, char *cmd,
-				 char *id, tv_t *cd)
+				 char *id, tv_t *now, tv_t *cd)
 {
 	char reply[1024] = "";
 	TRANSFER *transfer;
@@ -1295,8 +1324,7 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 	*trf_store = NULL;
 	*which_cmds = CMD_UNSET;
 	*cmd = *id = '\0';
-	cd->tv_sec = 0;
-	cd->tv_usec = 0;
+	copy_tv(cd, now); // default cd to 'now'
 
 	cmdptr = strdup(buf);
 	idptr = strchr(cmdptr, '.');
@@ -1676,7 +1704,7 @@ static void summarise_blocks()
 				 workmarkers->description,
 				 workmarkers->status, hi, wi_finish);
 		}
-		if (WMREADY(workmarkers->status)) {
+		if (WMPROCESSED(workmarkers->status)) {
 			lookmarkersummary.markerid = workmarkers->markerid;
 			lookmarkersummary.userid = MAXID;
 			lookmarkersummary.workername = EMPTY;
@@ -2202,7 +2230,7 @@ static void *socketer(__maybe_unused void *arg)
 					LOGDEBUG("Duplicate '%s' message received", duptype);
 			} else {
 				LOGQUE(buf);
-				cmdnum = breakdown(&trf_root, &trf_store, buf, &which_cmds, cmd, id, &cd);
+				cmdnum = breakdown(&trf_root, &trf_store, buf, &which_cmds, cmd, id, &now, &cd);
 				switch (cmdnum) {
 					case CMD_REPLY:
 						snprintf(reply, sizeof(reply), "%s.%ld.?.", id, now.tv_sec);
@@ -2373,6 +2401,30 @@ static void *socketer(__maybe_unused void *arg)
 							rep = NULL;
 						}
 						break;
+					/* Process, but reject (loading) until startup_complete
+					 * and don't test for duplicates */
+					case CMD_MARKS:
+						if (!startup_complete) {
+							snprintf(reply, sizeof(reply),
+								 "%s.%ld.loading.%s",
+								 id, now.tv_sec, cmd);
+							send_unix_msg(sockd, reply);
+						} else {
+							ans = ckdb_cmds[which_cmds].func(NULL, cmd, id, &now,
+											 by_default,
+											 (char *)__func__,
+											 inet_default,
+											 &cd, trf_root);
+							siz = strlen(ans) + strlen(id) + 32;
+							rep = malloc(siz);
+							snprintf(rep, siz, "%s.%ld.%s", id, now.tv_sec, ans);
+							send_unix_msg(sockd, rep);
+							free(ans);
+							ans = NULL;
+							free(rep);
+							rep = NULL;
+						}
+						break;
 					// Always queue (ok.queued)
 					case CMD_SHARELOG:
 					case CMD_POOLSTAT:
@@ -2503,7 +2555,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 		}
 
 		LOGQUE(buf);
-		cmdnum = breakdown(&trf_root, &trf_store, buf, &which_cmds, cmd, id, &cd);
+		cmdnum = breakdown(&trf_root, &trf_store, buf, &which_cmds, cmd, id, &now, &cd);
 		switch (cmdnum) {
 			// Ignore
 			case CMD_REPLY:
@@ -2535,6 +2587,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_STATS:
 			case CMD_PPLNS:
 			case CMD_USERSTATUS:
+			case CMD_MARKS:
 				LOGERR("%s() Message line %"PRIu64" '%s' - invalid - ignored",
 					__func__, count, cmd);
 				break;

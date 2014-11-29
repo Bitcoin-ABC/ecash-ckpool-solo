@@ -2473,8 +2473,9 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 		goto unitem;
 
 	if (reloading && !confirm_sharesummary) {
-		// We only need to know if the workmarker is ready
-		wm_item = find_workmarkers(shares->workinfoid);
+		// We only need to know if the workmarker is processed
+		wm_item = find_workmarkers(shares->workinfoid, false,
+					   MARKER_PROCESSED);
 		if (wm_item) {
 			K_WLOCK(shares_free);
 			k_add_head(shares_free, s_item);
@@ -2590,8 +2591,9 @@ bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 		goto unitem;
 
 	if (reloading && !confirm_sharesummary) {
-		// We only need to know if the workmarker is ready
-		wm_item = find_workmarkers(shareerrors->workinfoid);
+		// We only need to know if the workmarker is processed
+		wm_item = find_workmarkers(shareerrors->workinfoid, false,
+					   MARKER_PROCESSED);
 		if (wm_item) {
 			K_WLOCK(shareerrors_free);
 			k_add_head(shareerrors_free, s_item);
@@ -2693,14 +2695,14 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 		}
 
 		K_RLOCK(workmarkers_free);
-		wm_item = find_workmarkers(workinfoid);
+		wm_item = find_workmarkers(workinfoid, false, MARKER_PROCESSED);
 		K_RUNLOCK(workmarkers_free);
 		if (wm_item) {
 			char *tmp;
 			DATA_WORKMARKERS(wm, wm_item);
 			LOGERR("%s(): attempt to update sharesummary "
 			       "with %s %"PRId64"/%"PRId64"/%s createdate %s"
-			       " but ready workmarkers %"PRId64" exists",
+			       " but processed workmarkers %"PRId64" exists",
 				__func__, s_row ? "shares" : "shareerrors",
 				workinfoid, userid, workername,
 				(tmp = ctv_to_buf(sharecreatedate, NULL, 0)),
@@ -5009,6 +5011,231 @@ bool markersummary_fill(PGconn *conn)
 	return ok;
 }
 
+/* Add means create a new one and expire the old one if it exists,
+ *  otherwise we only expire the old one if it exists
+ * Add requires all db fields except markerid, however if markerid
+ *  is non-zero, it will be used instead of getting a new one
+ *  i.e. this effectively means updating a workmarker
+ * !Add requires markerid or workinfoidend, only
+ *  workinfoidend is used if markerid is zero
+ * N.B. if you expire a workmarker without creating a new one,
+ *  it's markerid is effectively cancelled, since creating a
+ *  new matching workmarker later, will get a new markerid,
+ *  since we only check for a CURRENT workmarkers
+ * N.B. also, this returns success if !add and there is no matching
+ *  old workmarkers */
+bool _workmarkers_process(PGconn *conn, bool add, int64_t markerid,
+			  char *poolinstance, int64_t workinfoidend,
+			  int64_t workinfoidstart, char *description,
+			  char *status, char *by, char *code,
+			  char *inet, tv_t *cd, K_TREE *trf_root,
+			  WHERE_FFL_ARGS)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	PGresult *res = NULL;
+	K_ITEM *wm_item = NULL, *old_wm_item = NULL, *w_item;
+	WORKMARKERS *row, *oldworkmarkers;
+	char *upd, *ins;
+	char *params[6 + HISTORYDATECOUNT];
+	bool ok = false, begun = false;
+	int n, par = 0;
+
+	LOGDEBUG("%s(): add", __func__);
+
+	if (markerid == 0) {
+		K_RLOCK(workmarkers_free);
+		old_wm_item = find_workmarkers(workinfoidend, true, '\0');
+		K_RUNLOCK(workmarkers_free);
+	} else {
+		K_RLOCK(workmarkers_free);
+		old_wm_item = find_workmarkerid(markerid, true, '\0');
+		K_RUNLOCK(workmarkers_free);
+	}
+	if (old_wm_item) {
+		DATA_WORKMARKERS(oldworkmarkers, old_wm_item);
+		if (!conn) {
+			conn = dbconnect();
+			conned = true;
+		}
+		res = PQexec(conn, "Begin", CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Begin", rescode, conn);
+			goto unparam;
+		}
+
+		begun = true;
+
+		upd = "update workmarkers set expirydate=$1 where markerid=$2"
+			" and expirydate=$3";
+		par = 0;
+		params[par++] = tv_to_buf(cd, NULL, 0);
+		params[par++] = bigint_to_buf(oldworkmarkers->markerid, NULL, 0);
+		params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+		PARCHKVAL(par, 3, params);
+
+		res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Update", rescode, conn);
+			goto rollback;
+		}
+
+		for (n = 0; n < par; n++)
+			free(params[n]);
+		par = 0;
+	}
+
+	if (add) {
+		if (poolinstance == NULL || description == NULL ||
+		    status == NULL) {
+			LOGEMERG("%s(): NULL field(s) passed:%s%s%s"
+				 WHERE_FFL, __func__,
+				 poolinstance ? "" : " poolinstance",
+				 description ? "" : " description",
+				 status ? "" : " status",
+				 WHERE_FFL_PASS);
+			goto rollback;
+		}
+		w_item = find_workinfo(workinfoidend);
+		if (!w_item)
+			goto rollback;
+		w_item = find_workinfo(workinfoidstart);
+		if (!w_item)
+			goto rollback;
+		K_WLOCK(workmarkers_free);
+		wm_item = k_unlink_head(workmarkers_free);
+		K_WUNLOCK(workmarkers_free);
+		DATA_WORKMARKERS(row, wm_item);
+		bzero(row, sizeof(*row));
+
+		if (conn == NULL) {
+			conn = dbconnect();
+			conned = true;
+		}
+
+		if (!begun) {
+			res = PQexec(conn, "Begin", CKPQ_WRITE);
+			rescode = PQresultStatus(res);
+			PQclear(res);
+			if (!PGOK(rescode)) {
+				PGLOGERR("Begin", rescode, conn);
+				goto unparam;
+			}
+			begun = true;
+		}
+
+		if (old_wm_item)
+			row->markerid = oldworkmarkers->markerid;
+		else {
+			if (markerid != 0)
+				row->markerid = markerid;
+			else {
+				row->markerid = nextid(conn, "markerid", 1,
+							cd, by, code, inet);
+				if (row->markerid == 0)
+					goto rollback;
+			}
+		}
+
+		row->poolinstance = strdup(poolinstance);
+		LIST_MEM_ADD(workmarkers_free, poolinstance);
+		row->workinfoidend = workinfoidend;
+		row->workinfoidstart = workinfoidstart;
+		row->description = strdup(description);
+		LIST_MEM_ADD(workmarkers_free, description);
+		STRNCPY(row->status, status);
+		HISTORYDATEINIT(row, cd, by, code, inet);
+		HISTORYDATETRANSFER(trf_root, row);
+
+		ins = "insert into workmarkers "
+			"(markerid,poolinstance,workinfoidend,workinfoidstart,"
+			"description,status"
+			HISTORYDATECONTROL ") values (" PQPARAM11 ")";
+		par = 0;
+		params[par++] = bigint_to_buf(row->markerid, NULL, 0);
+		params[par++] = str_to_buf(row->poolinstance, NULL, 0);
+		params[par++] = bigint_to_buf(row->workinfoidend, NULL, 0);
+		params[par++] = bigint_to_buf(row->workinfoidstart, NULL, 0);
+		params[par++] = str_to_buf(row->description, NULL, 0);
+		params[par++] = str_to_buf(row->status, NULL, 0);
+		HISTORYDATEPARAMS(params, par, row);
+		PARCHK(par, params);
+
+		res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Insert", rescode, conn);
+			goto rollback;
+		}
+	}
+
+	ok = true;
+rollback:
+	if (begun) {
+		if (ok)
+			res = PQexec(conn, "Commit", CKPQ_WRITE);
+		else
+			res = PQexec(conn, "Rollback", CKPQ_WRITE);
+
+		PQclear(res);
+	}
+unparam:
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	if (conned)
+		PQfinish(conn);
+
+	K_WLOCK(workmarkers_free);
+	if (!ok) {
+		if (wm_item) {
+			DATA_WORKMARKERS(row, wm_item);
+			if (row->poolinstance) {
+				if (row->poolinstance != EMPTY) {
+					LIST_MEM_SUB(workmarkers_free,
+						     row->poolinstance);
+					free(row->poolinstance);
+				}
+				row->poolinstance = NULL;
+			}
+			if (row->description) {
+				if (row->description != EMPTY) {
+					LIST_MEM_SUB(workmarkers_free,
+						     row->description);
+					free(row->description);
+				}
+				row->description = NULL;
+			}
+			k_add_head(workmarkers_free, wm_item);
+		}
+	}
+	else {
+		if (old_wm_item) {
+			workmarkers_root = remove_from_ktree(workmarkers_root,
+							     old_wm_item,
+							     cmp_workmarkers);
+			copy_tv(&(oldworkmarkers->expirydate), cd);
+			workmarkers_root = add_to_ktree(workmarkers_root,
+							old_wm_item,
+							cmp_workmarkers);
+		}
+		if (wm_item) {
+			workmarkers_root = add_to_ktree(workmarkers_root,
+							wm_item,
+							cmp_workmarkers);
+			k_add_head(workmarkers_store, wm_item);
+		}
+	}
+	K_WUNLOCK(workmarkers_free);
+
+	return ok;
+}
+
 bool workmarkers_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
@@ -5111,6 +5338,200 @@ bool workmarkers_fill(PGconn *conn)
 	return ok;
 }
 
+/* Add means create a new one and expire the old one if it exists,
+ *  otherwise we only expire the old one if it exists
+ * Add requires all db fields
+ * !Add only requires the (poolinstance and) workinfoid db fields */
+bool _marks_process(PGconn *conn, bool add, char *poolinstance,
+		    int64_t workinfoid, char *description, char *extra,
+		    char *marktype, char *status, char *by, char *code,
+		    char *inet, tv_t *cd, K_TREE *trf_root, WHERE_FFL_ARGS)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	PGresult *res = NULL;
+	K_ITEM *m_item = NULL, *old_m_item = NULL, *w_item;
+	MARKS *row, *oldmarks;
+	char *upd, *ins;
+	char *params[6 + HISTORYDATECOUNT];
+	bool ok = false, begun = false;
+	int n, par = 0;
+
+	LOGDEBUG("%s(): add", __func__);
+
+	K_RLOCK(marks_free);
+	old_m_item = find_marks(workinfoid);
+	K_RUNLOCK(marks_free);
+	if (old_m_item) {
+		DATA_MARKS(oldmarks, old_m_item);
+		if (!conn) {
+			conn = dbconnect();
+			conned = true;
+		}
+		res = PQexec(conn, "Begin", CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Begin", rescode, conn);
+			goto unparam;
+		}
+
+		begun = true;
+
+		upd = "update marks set expirydate=$1 where workinfoid=$2"
+			" and expirydate=$3";
+		par = 0;
+		params[par++] = tv_to_buf(cd, NULL, 0);
+		params[par++] = bigint_to_buf(workinfoid, NULL, 0);
+		params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+		PARCHKVAL(par, 3, params);
+
+		res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Update", rescode, conn);
+			goto rollback;
+		}
+
+		for (n = 0; n < par; n++)
+			free(params[n]);
+		par = 0;
+	}
+
+	if (add) {
+		if (poolinstance == NULL || description == NULL ||
+		    extra == NULL || marktype == NULL || status == NULL) {
+			LOGEMERG("%s(): NULL field(s) passed:%s%s%s%s%s"
+				 WHERE_FFL, __func__,
+				 poolinstance ? "" : " poolinstance",
+				 description ? "" : " description",
+				 extra ? "" : " extra",
+				 marktype ? "" : " marktype",
+				 status ? "" : " status",
+				 WHERE_FFL_PASS);
+			goto rollback;
+		}
+		w_item = find_workinfo(workinfoid);
+		if (!w_item)
+			goto rollback;
+		K_WLOCK(marks_free);
+		m_item = k_unlink_head(marks_free);
+		K_WUNLOCK(marks_free);
+		DATA_MARKS(row, m_item);
+		bzero(row, sizeof(*row));
+		row->poolinstance = strdup(poolinstance);
+		LIST_MEM_ADD(marks_free, poolinstance);
+		row->workinfoid = workinfoid;
+		row->description = strdup(description);
+		LIST_MEM_ADD(marks_free, description);
+		row->extra = strdup(extra);
+		LIST_MEM_ADD(marks_free, extra);
+		STRNCPY(row->marktype, marktype);
+		STRNCPY(row->status, status);
+		HISTORYDATEINIT(row, cd, by, code, inet);
+		HISTORYDATETRANSFER(trf_root, row);
+
+		ins = "insert into marks "
+			"(poolinstance,workinfoid,description,extra,marktype,"
+			"status"
+			HISTORYDATECONTROL ") values (" PQPARAM11 ")";
+		par = 0;
+		params[par++] = str_to_buf(row->poolinstance, NULL, 0);
+		params[par++] = bigint_to_buf(workinfoid, NULL, 0);
+		params[par++] = str_to_buf(row->description, NULL, 0);
+		params[par++] = str_to_buf(row->extra, NULL, 0);
+		params[par++] = str_to_buf(row->marktype, NULL, 0);
+		params[par++] = str_to_buf(row->status, NULL, 0);
+		HISTORYDATEPARAMS(params, par, row);
+		PARCHK(par, params);
+
+		if (conn == NULL) {
+			conn = dbconnect();
+			conned = true;
+		}
+
+		if (!begun) {
+			res = PQexec(conn, "Begin", CKPQ_WRITE);
+			rescode = PQresultStatus(res);
+			PQclear(res);
+			if (!PGOK(rescode)) {
+				PGLOGERR("Begin", rescode, conn);
+				goto unparam;
+			}
+			begun = true;
+		}
+
+		res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Insert", rescode, conn);
+			goto rollback;
+		}
+	}
+
+	ok = true;
+rollback:
+	if (begun) {
+		if (ok)
+			res = PQexec(conn, "Commit", CKPQ_WRITE);
+		else
+			res = PQexec(conn, "Rollback", CKPQ_WRITE);
+
+		PQclear(res);
+	}
+unparam:
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	if (conned)
+		PQfinish(conn);
+
+	K_WLOCK(marks_free);
+	if (!ok) {
+		if (m_item) {
+			DATA_MARKS(row, m_item);
+			if (row->poolinstance) {
+				if (row->poolinstance != EMPTY) {
+					LIST_MEM_SUB(marks_free, row->poolinstance);
+					free(row->poolinstance);
+				}
+				row->poolinstance = NULL;
+			}
+			if (row->description) {
+				if (row->description != EMPTY) {
+					LIST_MEM_SUB(marks_free, row->description);
+					free(row->description);
+				}
+				row->description = NULL;
+			}
+			if (row->extra) {
+				if (row->extra != EMPTY) {
+					LIST_MEM_SUB(marks_free, row->extra);
+					free(row->extra);
+				}
+				row->extra = NULL;
+			}
+			k_add_head(marks_free, m_item);
+		}
+	}
+	else {
+		if (old_m_item) {
+			marks_root = remove_from_ktree(marks_root, old_m_item, cmp_marks);
+			copy_tv(&(oldmarks->expirydate), cd);
+			marks_root = add_to_ktree(marks_root, old_m_item, cmp_marks);
+		}
+		if (m_item) {
+			marks_root = add_to_ktree(marks_root, m_item, cmp_marks);
+			k_add_head(marks_store, m_item);
+		}
+	}
+	K_WUNLOCK(marks_free);
+
+	return ok;
+}
+
 bool marks_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
@@ -5120,14 +5541,14 @@ bool marks_fill(PGconn *conn)
 	MARKS *row;
 	char *field;
 	char *sel;
-	int fields = 5;
+	int fields = 6;
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
 
 	// TODO: limit how far back
 	sel = "select "
-		"poolinstance,workinfoid,description,marktype,status"
+		"poolinstance,workinfoid,description,extra,marktype,status"
 		HISTORYDATECONTROL
 		" from marks";
 	res = PQexec(conn, sel, CKPQ_READ);
@@ -5172,6 +5593,11 @@ bool marks_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_PTR("description", field, row->description);
+
+		PQ_GET_FLD(res, i, "extra", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_PTR("extra", field, row->extra);
 
 		PQ_GET_FLD(res, i, "marktype", field, ok);
 		if (!ok)

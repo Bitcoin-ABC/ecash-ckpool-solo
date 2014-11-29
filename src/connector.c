@@ -70,8 +70,6 @@ struct connector_data {
 
 	/* Array of server fds */
 	int *serverfd;
-	/* Number of server fds */
-	int serverfds;
 	/* All time count of clients connected */
 	int nfds;
 
@@ -143,7 +141,7 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	if (unlikely(fd < 0)) {
 		/* Handle these errors gracefully should we ever share this
 		 * socket */
-		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNABORTED || errno == EINTR) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNABORTED) {
 			LOGERR("Recoverable error on accept in accept_client");
 			return 0;
 		}
@@ -358,9 +356,8 @@ reparse:
 void *receiver(void *arg)
 {
 	cdata_t *cdata = (cdata_t *)arg;
+	int ret, epfd, i, serverfds;
 	struct epoll_event event;
-	bool maxconn = true;
-	int ret, epfd, i;
 
 	rename_proc("creceiver");
 
@@ -369,8 +366,9 @@ void *receiver(void *arg)
 		LOGEMERG("FATAL: Failed to create epoll in receiver");
 		return NULL;
 	}
+	serverfds = cdata->ckp->serverurls;
 	/* Add all the serverfds to the epoll */
-	for (i = 0; i < cdata->serverfds; i++) {
+	for (i = 0; i < serverfds; i++) {
 		/* The small values will be easily identifiable compared to
 		 * pointers */
 		event.data.u64 = i;
@@ -380,6 +378,12 @@ void *receiver(void *arg)
 			LOGEMERG("FATAL: Failed to add epfd %d to epoll_ctl", epfd);
 			return NULL;
 		}
+		/* When we first start we listen to as many connections as
+		 * possible. Once we start polling we drop the listen to the
+		 * minimum to effectively ratelimit how fast we can receive
+		 * connections. */
+		LOGDEBUG("Dropping listen backlog to 0");
+		listen(cdata->serverfd[i], 0);
 	}
 
 	while (42) {
@@ -392,20 +396,9 @@ void *receiver(void *arg)
 			LOGEMERG("FATAL: Failed to epoll_wait in receiver");
 			break;
 		}
-		if (unlikely(!ret)) {
-			if (unlikely(maxconn)) {
-				/* When we first start we listen to as many connections as
-				* possible. Once we stop receiving connections we drop the
-				* listen to the minimum to effectively ratelimit how fast we
-				* can receive connections. */
-				LOGDEBUG("Dropping listen backlog to 0");
-				maxconn = false;
-				for (i = 0; i < cdata->serverfds; i++)
-					listen(cdata->serverfd[i], 0);
-			}
+		if (unlikely(!ret))
 			continue;
-		}
-		if (event.data.u64 < (uint64_t)cdata->serverfds) {
+		if (event.data.u64 < (uint64_t)serverfds) {
 			ret = accept_client(cdata, epfd, event.data.u64);
 			if (unlikely(ret < 0)) {
 				LOGEMERG("FATAL: Failed to accept_client in receiver");
@@ -602,6 +595,35 @@ static void passthrough_client(cdata_t *cdata, client_instance_t *client)
 	send_client(cdata, client->id, buf);
 }
 
+static void process_client_msg(cdata_t *cdata, const char *buf)
+{
+	int64_t client_id64, client_id;
+	json_t *json_msg;
+	char *msg;
+
+	json_msg = json_loads(buf, 0, NULL);
+	if (unlikely(!json_msg)) {
+		LOGWARNING("Invalid json message: %s", buf);
+		return;
+	}
+
+	/* Extract the client id from the json message and remove its entry */
+	client_id64 = json_integer_value(json_object_get(json_msg, "client_id"));
+	json_object_del(json_msg, "client_id");
+	if (client_id64 > 0xffffffffll) {
+		int64_t passthrough_id;
+
+		passthrough_id = client_id64 & 0xffffffffll;
+		client_id = client_id64 >> 32;
+		json_object_set_new_nocheck(json_msg, "client_id", json_integer(passthrough_id));
+	} else
+		client_id = client_id64;
+	msg = json_dumps(json_msg, 0);
+	realloc_strcat(&msg, "\n");
+	send_client(cdata, client_id, msg);
+	json_decref(json_msg);
+}
+
 static int connector_loop(proc_instance_t *pi, cdata_t *cdata)
 {
 	int sockd = -1,  ret = 0, selret;
@@ -609,7 +631,6 @@ static int connector_loop(proc_instance_t *pi, cdata_t *cdata)
 	unixsock_t *us = &pi->us;
 	ckpool_t *ckp = pi->ckp;
 	char *buf = NULL;
-	json_t *json_msg;
 
 	do {
 		selret = wait_read_select(us->sockd, 5);
@@ -648,30 +669,26 @@ retry:
 		LOGWARNING("Failed to get message in connector_loop");
 		goto retry;
 	}
+
 	LOGDEBUG("Connector received message: %s", buf);
-	if (cmdmatch(buf, "ping")) {
+	/* The bulk of the messages will be json messages to send to clients
+	 * so look for them first. */
+	if (likely(buf[0] == '{')) {
+		process_client_msg(cdata, buf);
+	} else if (cmdmatch(buf, "ping")) {
 		LOGDEBUG("Connector received ping request");
 		send_unix_msg(sockd, "pong");
-		goto retry;
-	}
-	if (cmdmatch(buf, "accept")) {
+	} else if (cmdmatch(buf, "accept")) {
 		LOGDEBUG("Connector received accept signal");
 		cdata->accept = true;
-		goto retry;
-	}
-	if (cmdmatch(buf, "reject")) {
+	} else if (cmdmatch(buf, "reject")) {
 		LOGDEBUG("Connector received reject signal");
 		cdata->accept = false;
-		goto retry;
-	}
-	if (cmdmatch(buf, "loglevel")) {
+	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
-		goto retry;
-	}
-
-	if (cmdmatch(buf, "shutdown"))
+	} else if (cmdmatch(buf, "shutdown")) {
 		goto out;
-	if (cmdmatch(buf, "dropclient")) {
+	} else if (cmdmatch(buf, "dropclient")) {
 		client_instance_t *client;
 
 		ret = sscanf(buf, "dropclient=%ld", &client_id64);
@@ -689,9 +706,7 @@ retry:
 		dec_instance_ref(cdata, client);
 		if (ret >= 0)
 			LOGINFO("Connector dropped client id: %ld", client_id);
-		goto retry;
-	}
-	if (cmdmatch(buf, "passthrough")) {
+	} else if (cmdmatch(buf, "passthrough")) {
 		client_instance_t *client;
 
 		ret = sscanf(buf, "passthrough=%ld", &client_id);
@@ -706,38 +721,14 @@ retry:
 		}
 		passthrough_client(cdata, client);
 		dec_instance_ref(cdata, client);
-		goto retry;
-	}
-	if (cmdmatch(buf, "getfd")) {
-		send_fd(cdata->serverfd[0], sockd);
-		goto retry;
-	}
+	} else if (cmdmatch(buf, "getxfd")) {
+		int fdno = -1;
 
-	/* Anything else should be a json message to send to a client */
-	json_msg = json_loads(buf, 0, NULL);
-	if (unlikely(!json_msg)) {
-		LOGWARNING("Invalid json message: %s", buf);
-		goto retry;
-	}
-
-	/* Extract the client id from the json message and remove its entry */
-	client_id64 = json_integer_value(json_object_get(json_msg, "client_id"));
-	json_object_del(json_msg, "client_id");
-	if (client_id64 > 0xffffffffll) {
-		int64_t passthrough_id;
-
-		passthrough_id = client_id64 & 0xffffffffll;
-		client_id = client_id64 >> 32;
-		json_object_set_new_nocheck(json_msg, "client_id", json_integer(passthrough_id));
+		sscanf(buf, "getxfd%d", &fdno);
+		if (fdno > -1 && fdno < ckp->serverurls)
+			send_fd(cdata->serverfd[fdno], sockd);
 	} else
-		client_id = client_id64;
-	dealloc(buf);
-	buf = json_dumps(json_msg, 0);
-	realloc_strcat(&buf, "\n");
-	send_client(cdata, client_id, buf);
-	json_decref(json_msg);
-	buf = NULL;
-
+		LOGWARNING("Unhandled connector message: %s", buf);
 	goto retry;
 out:
 	Close(sockd);
@@ -748,9 +739,8 @@ out:
 int connector(proc_instance_t *pi)
 {
 	cdata_t *cdata = ckzalloc(sizeof(cdata_t));
-	char *url = NULL, *port = NULL;
 	ckpool_t *ckp = pi->ckp;
-	int sockd, ret = 0;
+	int sockd, ret = 0, i;
 	const int on = 1;
 	int tries = 0;
 
@@ -763,18 +753,11 @@ int connector(proc_instance_t *pi)
 	else
 		cdata->serverfd = ckalloc(sizeof(int *) * ckp->serverurls);
 
-	if (ckp->oldconnfd > 0) {
-		/* Only handing over the first interface socket for now */
-		cdata->serverfd[0] = ckp->oldconnfd;
-		cdata->serverfds++;
-	}
-
-	if (!cdata->serverfds && !ckp->serverurls) {
-		/* No serverurls have been specified and no sockets have been
-		 * inherited. Bind to all interfaces on default sockets. */
+	if (!ckp->serverurls) {
+		/* No serverurls have been specified. Bind to all interfaces
+		 * on default sockets. */
 		struct sockaddr_in serv_addr;
 
-		cdata->serverfds = 1;
 		sockd = socket(AF_INET, SOCK_STREAM, 0);
 		if (sockd < 0) {
 			LOGERR("Connector failed to open socket");
@@ -805,24 +788,35 @@ int connector(proc_instance_t *pi)
 		}
 		cdata->serverfd[0] = sockd;
 	} else {
-		for ( ; cdata->serverfds < ckp->serverurls; cdata->serverfds++) {
-			char *serverurl = ckp->serverurl[cdata->serverfds];
+		for (i = 0; i < ckp->serverurls; i++) {
+			char oldurl[INET6_ADDRSTRLEN], oldport[8];
+			char newurl[INET6_ADDRSTRLEN], newport[8];
+			char *serverurl = ckp->serverurl[i];
 
-			if (!extract_sockaddr(serverurl, &url, &port)) {
-				LOGWARNING("Failed to extract server address from %s", serverurl);
+			if (!url_from_serverurl(serverurl, newurl, newport)) {
+				LOGWARNING("Failed to extract resolved url from %s", serverurl);
 				ret = 1;
 				goto out;
 			}
+			sockd = ckp->oldconnfd[i];
+			if (url_from_socket(sockd, oldurl, oldport)) {
+				if (strcmp(newurl, oldurl) || strcmp(newport, oldport)) {
+					LOGWARNING("Handed over socket url %s:%s does not match config %s:%s, creating new socket",
+						   oldurl, oldport, newurl, newport);
+					Close(sockd);
+				}
+			}
+
 			do {
-				sockd = bind_socket(url, port);
+				if (sockd > 0)
+					break;
+				sockd = bind_socket(newurl, newport);
 				if (sockd > 0)
 					break;
 				LOGWARNING("Connector failed to bind to socket, retrying in 5s");
 				sleep(5);
 			} while (++tries < 25);
 
-			dealloc(url);
-			dealloc(port);
 			if (sockd < 0) {
 				LOGERR("Connector failed to bind to socket for 2 minutes");
 				ret = 1;
@@ -833,7 +827,7 @@ int connector(proc_instance_t *pi)
 				Close(sockd);
 				goto out;
 			}
-			cdata->serverfd[cdata->serverfds] = sockd;
+			cdata->serverfd[i] = sockd;
 		}
 	}
 

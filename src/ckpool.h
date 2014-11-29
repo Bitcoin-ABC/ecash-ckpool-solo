@@ -109,8 +109,8 @@ struct ckpool_instance {
 	/* Logfile */
 	FILE *logfp;
 	int logfd;
-	/* Connector fd if we inherited it from a running process */
-	int oldconnfd;
+	/* Connector fds if we inherit them from a running process */
+	int *oldconnfd;
 	/* Should we inherit a running instance's socket and shut it down */
 	bool handover;
 	/* How many clients maximum to accept before rejecting further */
@@ -143,6 +143,9 @@ struct ckpool_instance {
 
 	/* Are we running in btcsolo mode */
 	bool btcsolo;
+
+	/* Should we daemonise the ckpool process */
+	bool daemon;
 
 	/* Bitcoind data */
 	int btcds;

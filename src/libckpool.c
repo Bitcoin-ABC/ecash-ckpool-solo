@@ -30,6 +30,7 @@
 #include <time.h>
 #include <math.h>
 #include <poll.h>
+#include <arpa/inet.h>
 
 #include "libckpool.h"
 #include "sha2.h"
@@ -76,6 +77,43 @@ void join_pthread(pthread_t thread)
 	if (!pthread_kill(thread, 0))
 		pthread_join(thread, NULL);
 }
+
+struct ck_completion {
+	sem_t sem;
+	void (*fn)(void *fnarg);
+	void *fnarg;
+};
+
+static void *completion_thread(void *arg)
+{
+	struct ck_completion *ckc = (struct ck_completion *)arg;
+
+	ckc->fn(ckc->fnarg);
+	cksem_post(&ckc->sem);
+
+	return NULL;
+}
+
+bool ck_completion_timeout(void *fn, void *fnarg, int timeout)
+{
+	struct ck_completion ckc;
+	pthread_t pthread;
+	bool ret = false;
+
+	cksem_init(&ckc.sem);
+	ckc.fn = fn;
+	ckc.fnarg = fnarg;
+
+	pthread_create(&pthread, NULL, completion_thread, (void *)&ckc);
+
+	ret = cksem_mswait(&ckc.sem, timeout);
+	if (!ret)
+		pthread_join(pthread, NULL);
+	else
+		pthread_cancel(pthread);
+	return !ret;
+}
+
 
 /* Place holders for when we add lock debugging */
 #define GETLOCK(_lock, _file, _func, _line)
@@ -294,10 +332,9 @@ void _cksem_post(sem_t *sem, const char *file, const char *func, const int line)
 
 void _cksem_wait(sem_t *sem, const char *file, const char *func, const int line)
 {
-retry:
 	if (unlikely(sem_wait(sem))) {
 		if (errno == EINTR)
-			goto retry;
+			return;
 		quitfrom(1, file, func, line, "Failed to sem_wait errno=%d sem=0x%p", errno, sem);
 	}
 }
@@ -311,7 +348,6 @@ int _cksem_mswait(sem_t *sem, int ms, const char *file, const char *func, const 
 	tv_time(&tv_now);
 	tv_to_ts(&ts_now, &tv_now);
 	ms_to_ts(&abs_timeout, ms);
-retry:
 	timeraddspec(&abs_timeout, &ts_now);
 	ret = sem_timedwait(sem, &abs_timeout);
 
@@ -319,28 +355,21 @@ retry:
 		if (likely(errno == ETIMEDOUT))
 			return ETIMEDOUT;
 		if (errno == EINTR)
-			goto retry;
+			return EINTR;
 		quitfrom(1, file, func, line, "Failed to sem_timedwait errno=%d sem=0x%p", errno, sem);
 	}
 	return 0;
 }
 
-void cksem_reset(sem_t *sem)
+void _cksem_destroy(sem_t *sem, const char *file, const char *func, const int line)
 {
-	int ret;
 
-	do {
-		ret = sem_trywait(sem);
-		if (unlikely(ret < 0 && (errno == EINTR)))
-			ret = 0;
-	} while (!ret);
+	if (unlikely(sem_destroy(sem)))
+		quitfrom(1, file, func, line, "Failed to sem_destroy errno=%d sem=0x%p", errno, sem);
 }
 
-void cksem_destroy(sem_t *sem)
-{
-	sem_destroy(sem);
-}
-
+/* Extract just the url and port information from a url string, allocating
+ * heap memory for sockaddr_url and sockaddr_port. */
 bool extract_sockaddr(char *url, char **sockaddr_url, char **sockaddr_port)
 {
 	char *url_begin, *url_end, *ipv6_begin, *ipv6_end, *port_start = NULL;
@@ -406,6 +435,95 @@ bool extract_sockaddr(char *url, char **sockaddr_url, char **sockaddr_port)
 	return true;
 }
 
+/* Convert a sockaddr structure into a url and port. URL should be a string of
+ * INET6_ADDRSTRLEN size, port at least a string of 6 bytes */
+bool url_from_sockaddr(const struct sockaddr *addr, char *url, char *port)
+{
+	int port_no = 0;
+
+	switch(addr->sa_family) {
+		const struct sockaddr_in *inet4_in;
+		const struct sockaddr_in6 *inet6_in;
+
+		case AF_INET:
+			inet4_in = (struct sockaddr_in *)addr;
+			inet_ntop(AF_INET, &inet4_in->sin_addr, url, INET6_ADDRSTRLEN);
+			port_no = htons(inet4_in->sin_port);
+			break;
+		case AF_INET6:
+			inet6_in = (struct sockaddr_in6 *)addr;
+			inet_ntop(AF_INET6, &inet6_in->sin6_addr, url, INET6_ADDRSTRLEN);
+			port_no = htons(inet6_in->sin6_port);
+			break;
+		default:
+			return false;
+	}
+	sprintf(port, "%d", port_no);
+	return true;
+}
+
+bool addrinfo_from_url(const char *url, const char *port, struct addrinfo *addrinfo)
+{
+	struct addrinfo *servinfo, hints;
+
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	servinfo = addrinfo;
+	if (getaddrinfo(url, port, &hints, &servinfo) != 0)
+		return false;
+	if (!servinfo)
+		return false;
+	memcpy(addrinfo, servinfo->ai_addr, servinfo->ai_addrlen);
+	freeaddrinfo(servinfo);
+	return true;
+}
+
+/* Extract a resolved url and port from a serverurl string. newurl must be
+ * a string of at least INET6_ADDRSTRLEN and newport at least 6 bytes. */
+bool url_from_serverurl(char *serverurl, char *newurl, char *newport)
+{
+	char *url = NULL, *port = NULL;
+	struct addrinfo addrinfo;
+	bool ret = false;
+
+	if (!extract_sockaddr(serverurl, &url, &port)) {
+		LOGWARNING("Failed to extract server address from %s", serverurl);
+		goto out;
+	}
+	if (!addrinfo_from_url(url, port, &addrinfo)) {
+		LOGWARNING("Failed to extract addrinfo from url %s:%s", url, port);
+		goto out;
+	}
+	if (!url_from_sockaddr((const struct sockaddr *)&addrinfo, newurl, newport)) {
+		LOGWARNING("Failed to extract url from sockaddr for original url: %s:%s",
+			   url, port);
+		goto out;
+	}
+	ret = true;
+out:
+	dealloc(url);
+	dealloc(port);
+	return ret;
+}
+
+/* Convert a socket into a url and port. URL should be a string of
+ * INET6_ADDRSTRLEN size, port at least a string of 6 bytes */
+bool url_from_socket(const int sockd, char *url, char *port)
+{
+	socklen_t addrlen = sizeof(struct sockaddr);
+	struct sockaddr addr;
+
+	if (sockd < 1)
+		return false;
+	if (getsockname(sockd, &addr, &addrlen))
+		return false;
+	if (!url_from_sockaddr(&addr, url, port))
+		return false;
+	return true;
+}
+
+
 void keep_sockalive(int fd)
 {
 	const int tcp_one = 1;
@@ -464,7 +582,7 @@ int bind_socket(char *url, char *port)
 
 	if (getaddrinfo(url, port, &hints, &servinfo) != 0) {
 		LOGWARNING("Failed to resolve (?wrong URL) %s:%s", url, port);
-		goto out;
+		return sockd;
 	}
 	for (p = servinfo; p != NULL; p = p->ai_next) {
 		sockd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
@@ -484,6 +602,7 @@ int bind_socket(char *url, char *port)
 	}
 
 out:
+	freeaddrinfo(servinfo);
 	return sockd;
 }
 
@@ -1494,11 +1613,7 @@ void cksleep_prepare_r(ts_t *ts)
 
 void nanosleep_abstime(ts_t *ts_end)
 {
-	int ret;
-
-	do {
-		ret = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, ts_end, NULL);
-	} while (ret == EINTR);
+	clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, ts_end, NULL);
 }
 
 void timeraddspec(ts_t *a, const ts_t *b)

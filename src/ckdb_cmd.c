@@ -2969,7 +2969,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_STORE *mu_store;
 	USERS *users;
 	int32_t height;
-	int64_t workinfoid, end_workinfoid = 0;
+	int64_t block_workinfoid, end_workinfoid;
 	int64_t begin_workinfoid;
 	int64_t total_share_count, acc_share_count;
 	int64_t ss_count, wm_count, ms_count;
@@ -3054,10 +3054,10 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 			block_extra = EMPTY;
 			break;
 	}
-	workinfoid = blocks->workinfoid;
-	w_item = find_workinfo(workinfoid);
+	block_workinfoid = blocks->workinfoid;
+	w_item = find_workinfo(block_workinfoid);
 	if (!w_item) {
-		snprintf(reply, siz, "ERR.missing workinfo %"PRId64, workinfoid);
+		snprintf(reply, siz, "ERR.missing workinfo %"PRId64, block_workinfoid);
 		return strdup(reply);
 	}
 	DATA_WORKINFO(workinfo, w_item);
@@ -3072,7 +3072,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		return strdup(reply);
 	}
 
-	begin_workinfoid = 0;
+	begin_workinfoid = end_workinfoid = 0;
 	total_share_count = acc_share_count = 0;
 	total_diff = 0;
 	ss_count = wm_count = ms_count = 0;
@@ -3080,7 +3080,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	mu_store = k_new_store(miningpayouts_free);
 	mu_root = new_ktree();
 
-	looksharesummary.workinfoid = workinfoid;
+	looksharesummary.workinfoid = block_workinfoid;
 	looksharesummary.userid = MAXID;
 	looksharesummary.workername = EMPTY;
 	INIT_SHARESUMMARY(&ss_look);
@@ -3150,14 +3150,17 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	if (total_diff < diff_want) {
 		lookworkmarkers.expirydate.tv_sec = default_expiry.tv_sec;
 		lookworkmarkers.expirydate.tv_usec = default_expiry.tv_usec;
-		lookworkmarkers.workinfoidend = begin_workinfoid;
+		if (begin_workinfoid != 0)
+			lookworkmarkers.workinfoidend = begin_workinfoid;
+		else
+			lookworkmarkers.workinfoidend = block_workinfoid + 1;
 		INIT_WORKMARKERS(&wm_look);
 		wm_look.data = (void *)(&lookworkmarkers);
 		wm_item = find_before_in_ktree(workmarkers_workinfoid_root, &wm_look,
 					       cmp_workmarkers_workinfoid, wm_ctx);
 		DATA_WORKMARKERS_NULL(workmarkers, wm_item);
 		while (total_diff < diff_want && wm_item && CURRENT(&(workmarkers->expirydate))) {
-			if (WMREADY(workmarkers->status)) {
+			if (WMPROCESSED(workmarkers->status)) {
 				wm_count++;
 				lookmarkersummary.markerid = workmarkers->markerid;
 				lookmarkersummary.userid = MAXID;
@@ -3196,13 +3199,13 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	if (total_diff == 0.0) {
 		snprintf(reply, siz,
 			 "ERR.total share diff 0 before workinfo %"PRId64,
-			 workinfoid);
+			 block_workinfoid);
 		goto shazbot;
 	}
 
 	wb_item = find_workinfo(begin_workinfoid);
 	if (!wb_item) {
-		snprintf(reply, siz, "ERR.missing begin workinfo record! %"PRId64, workinfoid);
+		snprintf(reply, siz, "ERR.missing begin workinfo record! %"PRId64, block_workinfoid);
 		goto shazbot;
 	}
 	DATA_WORKINFO(workinfo, wb_item);
@@ -3238,7 +3241,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "begin_workinfoid=%"PRId64"%c", begin_workinfoid, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
-	snprintf(tmp, sizeof(tmp), "block_workinfoid=%"PRId64"%c", workinfoid, FLDSEP);
+	snprintf(tmp, sizeof(tmp), "block_workinfoid=%"PRId64"%c", block_workinfoid, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "end_workinfoid=%"PRId64"%c", end_workinfoid, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
@@ -3454,6 +3457,7 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USEINFO(sharesummary, 1, 2);
 	USEINFO(workmarkers, 1, 2);
 	USEINFO(markersummary, 1, 2);
+	USEINFO(marks, 1, 1);
 	USEINFO(blocks, 1, 1);
 	USEINFO(miningpayouts, 1, 1);
 	USEINFO(auths, 1, 1);
@@ -3483,8 +3487,8 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 // TODO: add to heartbeat to disable the miner if active and status != ""
 static char *cmd_userstatus(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
-			  char *code, char *inet, __maybe_unused tv_t *cd,
-			  K_TREE *trf_root)
+			    char *code, char *inet, __maybe_unused tv_t *cd,
+			    K_TREE *trf_root)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -3540,6 +3544,325 @@ static char *cmd_userstatus(PGconn *conn, char *cmd, char *id, tv_t *now, char *
 			     users->userid,
 			     users->username,
 			     status[0] ? "disabled" : "enabled");
+	LOGWARNING("%s.%s", id, reply);
+	return strdup(reply);
+}
+
+/* Socket interface to the functions that will be used later to automatically
+ * create marks, workmarkers and process the workmarkers
+ * to generate markersummaries */
+static char *cmd_marks(PGconn *conn, char *cmd, char *id,
+			__maybe_unused tv_t *now, char *by,
+			char *code, char *inet, tv_t *cd,
+			K_TREE *trf_root)
+{
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	char tmp[1024] = "";
+	char msg[1024] = "";
+	K_ITEM *i_action, *i_workinfoid, *i_marktype, *i_description;
+	K_ITEM *i_height, *i_status, *i_extra, *m_item, *b_item, *w_item;
+	K_ITEM *wm_item, *wm_item_prev;
+	WORKMARKERS *workmarkers;
+	K_TREE_CTX ctx[1];
+	BLOCKS *blocks;
+	MARKS *marks;
+	char *action;
+	int64_t workinfoid = -1;
+	char *marktype;
+	int32_t height = 0;
+	char description[TXT_BIG+1] = { '\0' };
+	char extra[TXT_BIG+1] = { '\0' };
+	char status[TXT_FLAG+1] = { MARK_READY, '\0' };
+	bool ok;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	i_action = require_name(trf_root, "action", 1, NULL, reply, siz);
+	if (!i_action)
+		return strdup(reply);
+	action = transfer_data(i_action);
+
+	if (strcasecmp(action, "add") == 0) {
+		/* Add a mark
+		 * Require marktype
+		 * Require workinfoid for all but 'b'
+		 * If marktype is 'b' or 'p' then require height/block (number)
+		 * If marktype is 'o' or 'f' then require description
+		 * Status optional - default READY */
+		i_marktype = require_name(trf_root, "marktype",
+					  1, NULL,
+					  reply, siz);
+		if (!i_marktype)
+			return strdup(reply);
+		marktype = transfer_data(i_marktype);
+
+		if (marktype[0] != MARKTYPE_BLOCK) {
+			i_workinfoid = require_name(trf_root, "workinfoid",
+						    1, (char *)intpatt,
+						    reply, siz);
+			if (!i_workinfoid)
+				return strdup(reply);
+			TXT_TO_BIGINT("workinfoid",
+				      transfer_data(i_workinfoid),
+				      workinfoid);
+		}
+
+		switch (marktype[0]) {
+			case MARKTYPE_BLOCK:
+			case MARKTYPE_PPLNS:
+				i_height = require_name(trf_root,
+							"height",
+							1, (char *)intpatt,
+							reply, siz);
+				if (!i_height)
+					return strdup(reply);
+				TXT_TO_INT("height", transfer_data(i_height),
+					   height);
+				K_RLOCK(blocks_free);
+				b_item = find_prev_blocks(height+1);
+				K_RUNLOCK(blocks_free);
+				if (b_item) {
+					DATA_BLOCKS(blocks, b_item);
+					if (blocks->height != height)
+						b_item = NULL;
+				}
+				if (!b_item) {
+					snprintf(reply, siz,
+						 "no blocks with height %"PRId32, height);
+					return strdup(reply);
+				}
+				if (marktype[0] == MARKTYPE_BLOCK)
+					workinfoid = blocks->workinfoid;
+
+				if (!marks_description(description, sizeof(description),
+							marktype, height, NULL, NULL))
+					goto dame;
+				break;
+			case MARKTYPE_SHIFT_BEGIN:
+			case MARKTYPE_SHIFT_END:
+				snprintf(reply, siz,
+					 "marktype %s not yet handled",
+					 marks_marktype(marktype));
+				return strdup(reply);
+			case MARKTYPE_OTHER_BEGIN:
+			case MARKTYPE_OTHER_FINISH:
+				i_description = require_name(trf_root,
+							     "description",
+							     1, NULL,
+							     reply, siz);
+				if (!i_description)
+					return strdup(reply);
+				if (!marks_description(description, sizeof(description),
+							marktype, height, NULL,
+							transfer_data(i_description)))
+					goto dame;
+				break;
+			default:
+				snprintf(reply, siz,
+					 "unknown marktype '%s'", marktype);
+				return strdup(reply);
+		}
+		i_status = optional_name(trf_root, "status", 1, NULL, reply, siz);
+		if (i_status) {
+			STRNCPY(status, transfer_data(i_status));
+			switch(status[0]) {
+				case MARK_READY:
+				case MARK_USED:
+				case '\0':
+					break;
+				default:
+					snprintf(reply, siz,
+						 "unknown mark status '%s'", status);
+					return strdup(reply);
+			}
+		}
+		if (workinfoid == -1) {
+			snprintf(reply, siz, "workinfoid not found");
+			return strdup(reply);
+		}
+		w_item = find_workinfo(workinfoid);
+		if (!w_item) {
+			snprintf(reply, siz, "invalid workinfoid %"PRId64,
+				 workinfoid);
+			return strdup(reply);
+		}
+		ok = marks_process(conn, true, EMPTY, workinfoid, description,
+				   extra, marktype, status, by, code, inet, cd,
+				   trf_root);
+	} else if (strcasecmp(action, "expire") == 0) {
+		/* Expire the mark - effectively deletes it
+		 * Require workinfoid */
+		i_workinfoid = require_name(trf_root, "workinfoid", 1, (char *)intpatt, reply, siz);
+		if (!i_workinfoid)
+			return strdup(reply);
+		TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
+		K_RLOCK(marks_free);
+		m_item = find_marks(workinfoid);
+		K_RUNLOCK(marks_free);
+		if (!m_item) {
+			snprintf(reply, siz,
+				 "unknown current mark with workinfoid %"PRId64, workinfoid);
+			return strdup(reply);
+		}
+		ok = marks_process(conn, false, EMPTY, workinfoid, NULL,
+				   NULL, NULL, NULL, by, code, inet, cd,
+				   trf_root);
+	} else if (strcasecmp(action, "status") == 0) {
+		/* Change the status on a mark
+		 * Require workinfoid and status
+		 * N.B. you can cause generate errors if you change the status of a USED marks */
+		i_workinfoid = require_name(trf_root, "workinfoid", 1, (char *)intpatt, reply, siz);
+		if (!i_workinfoid)
+			return strdup(reply);
+		TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
+		K_RLOCK(marks_free);
+		m_item = find_marks(workinfoid);
+		K_RUNLOCK(marks_free);
+		if (!m_item) {
+			snprintf(reply, siz,
+				 "unknown current mark with workinfoid %"PRId64, workinfoid);
+			return strdup(reply);
+		}
+		DATA_MARKS(marks, m_item);
+		i_status = require_name(trf_root, "status", 0, NULL, reply, siz);
+		if (!i_status)
+			return strdup(reply);
+		STRNCPY(status, transfer_data(i_status));
+		switch(status[0]) {
+			case MARK_READY:
+			case MARK_USED:
+			case '\0':
+				break;
+			default:
+				snprintf(reply, siz,
+					 "unknown mark status '%s'", status);
+				return strdup(reply);
+		}
+		// Unchanged
+		if (strcmp(status, marks->status) == 0) {
+			action = "status-unchanged";
+			ok = true;
+		} else {
+			ok = marks_process(conn, true, marks->poolinstance,
+					   workinfoid, marks->description,
+					   marks->extra, marks->marktype,
+					   status, by, code, inet, cd,
+					   trf_root);
+		}
+	} else if (strcasecmp(action, "extra") == 0) {
+		/* Change the 'extra' description
+		 * Require workinfoid and extra
+		 * If a mark is actually multiple marks with the same
+		 *  workinfoid, then we can record the extra info here
+		 * This would be true of each block, once shifts are
+		 *  implemented, since the current shift ends when a
+		 *  block is found
+		 * This could also be true, very rarely, if the beginning
+		 *  of a pplns payout range matched any other mark,
+		 *  since the beginning can be any workinfoid */
+		i_workinfoid = require_name(trf_root, "workinfoid", 1, (char *)intpatt, reply, siz);
+		if (!i_workinfoid)
+			return strdup(reply);
+		TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
+		K_RLOCK(marks_free);
+		m_item = find_marks(workinfoid);
+		K_RUNLOCK(marks_free);
+		if (!m_item) {
+			snprintf(reply, siz,
+				 "unknown current mark with workinfoid %"PRId64, workinfoid);
+			return strdup(reply);
+		}
+		DATA_MARKS(marks, m_item);
+		i_extra = require_name(trf_root, "extra", 0, NULL, reply, siz);
+		if (!i_extra)
+			return strdup(reply);
+		STRNCPY(extra, transfer_data(i_extra));
+		// Unchanged
+		if (strcmp(extra, marks->extra) == 0) {
+			action = "extra-unchanged";
+			ok = true;
+		} else {
+			ok = marks_process(conn, true, marks->poolinstance,
+					   workinfoid, marks->description,
+					   extra, marks->marktype,
+					   status, by, code, inet, cd,
+					   trf_root);
+		}
+	} else if (strcasecmp(action, "generate") == 0) {
+		/* Generate workmarkers
+		 * No parameters */
+		tmp[0] = '\0';
+		ok = workmarkers_generate(conn, tmp, sizeof(tmp),
+					  by, code, inet, cd, trf_root);
+		if (!ok) {
+			snprintf(reply, siz, "%s error: %s", action, tmp);
+			LOGERR("%s.%s", id, reply);
+			return strdup(reply);
+		}
+		if (*tmp) {
+			snprintf(reply, siz, "%s: %s", action, tmp);
+			LOGWARNING("%s.%s", id, reply);
+		}
+	} else if (strcasecmp(action, "expunge") == 0) {
+		/* Expire all generated workmarkers that aren't PROCESSED
+		 * No parameters
+		 * This exists so we can fix all workmarkers that haven't
+		 *  been PROCESSED yet,
+		 *  if there was a problem with the marks
+		 * Simply expunge all the workmarkers, correct the marks,
+		 *  then generate the workmarkers again
+		 * WARNING - using psql to do the worksummary generation
+		 *  will not update the workmarkers status inside ckdb
+		 *  so this will expunge those worksummary records also
+		 *  You'll need to restart ckdb after using psql */
+		int count = 0;
+		ok = true;
+		wm_item_prev = NULL;
+		K_RLOCK(workmarkers_free);
+		wm_item = last_in_ktree(workmarkers_root, ctx);
+		K_RUNLOCK(workmarkers_free);
+		while (wm_item) {
+			K_RLOCK(workmarkers_free);
+			wm_item_prev = prev_in_ktree(ctx);
+			K_RUNLOCK(workmarkers_free);
+			DATA_WORKMARKERS(workmarkers, wm_item);
+			if (CURRENT(&(workmarkers->expirydate)) &&
+			    !WMPROCESSED(workmarkers->status)) {
+				ok = workmarkers_process(conn, false,
+							 workmarkers->markerid,
+							 NULL, 0, 0, NULL, NULL, by,
+							 code, inet, cd, trf_root);
+				if (!ok)
+					break;
+				count++;
+			}
+			wm_item = wm_item_prev;
+		}
+		if (ok) {
+			if (count == 0) {
+				snprintf(msg, sizeof(msg),
+					 "no unprocessed current workmarkers");
+			} else {
+				snprintf(msg, sizeof(msg),
+					 "%d workmarkers expunged", count);
+			}
+		}
+	} else {
+		snprintf(reply, siz, "unknown action '%s'", action);
+		LOGERR("%s.%s", id, reply);
+		return strdup(reply);
+	}
+
+	if (!ok) {
+dame:
+		LOGERR("%s() %s.failed.DBE", __func__, id);
+		return strdup("failed.DBE");
+	}
+	if (msg[0])
+		snprintf(reply, siz, "ok.%s %s", action, msg);
+	else
+		snprintf(reply, siz, "ok.%s", action);
 	LOGWARNING("%s.%s", id, reply);
 	return strdup(reply);
 }
@@ -3647,5 +3970,6 @@ struct CMDS ckdb_cmds[] = {
 	{ CMD_STATS,	"stats",	true,	false,	cmd_stats,	ACCESS_SYSTEM ACCESS_WEB },
 	{ CMD_PPLNS,	"pplns",	false,	false,	cmd_pplns,	ACCESS_SYSTEM ACCESS_WEB },
 	{ CMD_USERSTATUS,"userstatus",	false,	false,	cmd_userstatus,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_MARKS,	"marks",	false,	false,	cmd_marks,	ACCESS_SYSTEM },
 	{ CMD_END,	NULL,		false,	false,	NULL,		NULL }
 };

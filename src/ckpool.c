@@ -221,6 +221,21 @@ static int kill_pid(int pid, int sig)
 	return kill(pid, sig);
 }
 
+static int pid_wait(pid_t pid, int ms)
+{
+	tv_t start, now;
+	int ret;
+
+	tv_time(&start);
+	do {
+		ret = kill_pid(pid, 0);
+		if (ret)
+			break;
+		tv_time(&now);
+	} while (ms_tvdiff(&now, &start) < ms);
+	return ret;
+}
+
 static int send_procmsg(proc_instance_t *pi, const char *buf)
 {
 	char *path = pi->us.path;
@@ -297,8 +312,8 @@ retry:
 			broadcast_proc(ckp, buf);
 			send_unix_msg(sockd, "success");
 		}
-	} else if (cmdmatch(buf, "getfd")) {
-		int connfd = send_procmsg(ckp->connector, "getfd");
+	} else if (cmdmatch(buf, "getxfd")) {
+		int connfd = send_procmsg(ckp->connector, buf);
 
 		if (connfd > 0) {
 			int newfd = get_fd(connfd);
@@ -350,8 +365,10 @@ bool ping_main(ckpool_t *ckp)
 {
 	char *buf;
 
+	if (unlikely(kill_pid(ckp->main.pid, 0)))
+		return false;
 	buf = send_recv_proc(&ckp->main, "ping");
-	if (!buf)
+	if (unlikely(!buf))
 		return false;
 	free(buf);
 	return true;
@@ -674,18 +691,35 @@ static bool write_pid(ckpool_t *ckp, const char *path, pid_t pid)
 		ret = fscanf(fp, "%d", &oldpid);
 		fclose(fp);
 		if (ret == 1 && !(kill_pid(oldpid, 0))) {
+			if (ckp->handover) {
+				if (pid_wait(oldpid, 500))
+					goto out;
+				LOGWARNING("Old process pid %d failed to shutdown cleanly, terminating");
+			}
 			if (!ckp->killold) {
 				LOGEMERG("Process %s pid %d still exists, start ckpool with -k if you wish to kill it",
 					 path, oldpid);
 				return false;
 			}
+			if (kill_pid(oldpid, 15)) {
+				LOGEMERG("Unable to kill old process %s pid %d", path, oldpid);
+				return false;
+			}
+			LOGWARNING("Terminating old process %s pid %d", path, oldpid);
+			if (pid_wait(oldpid, 500))
+				goto out;
 			if (kill_pid(oldpid, 9)) {
 				LOGEMERG("Unable to kill old process %s pid %d", path, oldpid);
 				return false;
 			}
-			LOGWARNING("Killing off old process %s pid %d", path, oldpid);
+			LOGWARNING("Unable to terminate old process %s pid %d, killing", path, oldpid);
+			if (!pid_wait(oldpid, 500)) {
+				LOGEMERG("Unable to kill old process %s pid %d", path, oldpid);
+				return false;
+			}
 		}
 	}
+out:
 	fp = fopen(path, "we");
 	if (!fp) {
 		LOGERR("Failed to open file %s", path);
@@ -747,11 +781,9 @@ static void childsighandler(int sig)
 	signal(sig, SIG_IGN);
 	signal(SIGTERM, SIG_IGN);
 	if (sig != SIGUSR1) {
-		pid_t ppid = getppid();
-
 		LOGWARNING("Child process received signal %d, forwarding signal to %s main process",
-			sig, global_ckp->name);
-		kill_pid(ppid, sig);
+			   sig, global_ckp->name);
+		kill_pid(global_ckp->main.pid, sig);
 	}
 	exit(0);
 }
@@ -782,6 +814,7 @@ static void launch_process(proc_instance_t *pi)
 		handler.sa_handler = &childsighandler;
 		handler.sa_flags = 0;
 		sigemptyset(&handler.sa_mask);
+		sigaction(SIGUSR1, &handler, NULL);
 		sigaction(SIGTERM, &handler, NULL);
 		signal(SIGINT, SIG_IGN);
 		signal(SIGQUIT, SIG_IGN);
@@ -833,7 +866,7 @@ static void clean_up(ckpool_t *ckp)
 
 static void cancel_join_pthread(pthread_t *pth)
 {
-	if (!*pth)
+	if (!pth || !*pth)
 		return;
 	pthread_cancel(*pth);
 	join_pthread(*pth);
@@ -842,13 +875,22 @@ static void cancel_join_pthread(pthread_t *pth)
 
 static void cancel_pthread(pthread_t *pth)
 {
-	if (!*pth)
+	if (!pth || !*pth)
 		return;
 	pthread_cancel(*pth);
 	pth = NULL;
 }
 
-static void __shutdown_children(ckpool_t *ckp, int sig)
+static void wait_child(pid_t *pid)
+{
+	int ret;
+
+	do {
+		ret = waitpid(*pid, NULL, 0);
+	} while (ret != *pid);
+}
+
+static void __shutdown_children(ckpool_t *ckp)
 {
 	int i;
 
@@ -858,18 +900,22 @@ static void __shutdown_children(ckpool_t *ckp, int sig)
 	if (!ckp->children)
 		return;
 
+	/* Send the children a SIGUSR1 for them to shutdown gracefully, then
+	 * wait for them to exit and kill them if they don't for 500ms. */
 	for (i = 0; i < ckp->proc_instances; i++) {
 		pid_t pid = ckp->children[i]->pid;
-		if (!kill_pid(pid, 0))
-			kill_pid(pid, sig);
+
+		kill_pid(pid, SIGUSR1);
+		if (!ck_completion_timeout(&wait_child, (void *)&pid, 500))
+			kill_pid(pid, SIGKILL);
 	}
 }
 
-static void shutdown_children(ckpool_t *ckp, int sig)
+static void shutdown_children(ckpool_t *ckp)
 {
 	cancel_join_pthread(&ckp->pth_watchdog);
 
-	__shutdown_children(ckp, sig);
+	__shutdown_children(ckp);
 }
 
 static void sighandler(int sig)
@@ -882,10 +928,7 @@ static void sighandler(int sig)
 		   ckp->name, sig);
 	cancel_join_pthread(&ckp->pth_watchdog);
 
-	__shutdown_children(ckp, SIGUSR1);
-	/* Wait, then send SIGKILL */
-	cksleep_ms(100);
-	__shutdown_children(ckp, SIGKILL);
+	__shutdown_children(ckp);
 	cancel_pthread(&ckp->pth_listener);
 	exit(0);
 }
@@ -1159,6 +1202,7 @@ static struct option long_options[] = {
 	{"standalone",	no_argument,		0,	'A'},
 	{"btcsolo",	no_argument,		0,	'B'},
 	{"config",	required_argument,	0,	'c'},
+	{"daemonise",	no_argument,		0,	'D'},
 	{"ckdb-name",	required_argument,	0,	'd'},
 	{"group",	required_argument,	0,	'g'},
 	{"handover",	no_argument,		0,	'H'},
@@ -1176,6 +1220,7 @@ static struct option long_options[] = {
 #else
 static struct option long_options[] = {
 	{"config",	required_argument,	0,	'c'},
+	{"daemonise",	no_argument,		0,	'D'},
 	{"group",	required_argument,	0,	'g'},
 	{"handover",	no_argument,		0,	'H'},
 	{"help",	no_argument,		0,	'h'},
@@ -1190,16 +1235,21 @@ static struct option long_options[] = {
 };
 #endif
 
-static void send_recv_path(const char *path, const char *msg)
+static bool send_recv_path(const char *path, const char *msg)
 {
 	int sockd = open_unix_client(path);
+	bool ret = false;
 	char *response;
 
 	send_unix_msg(sockd, msg);
 	response = recv_unix_msg(sockd);
-	LOGWARNING("Received: %s in response to %s request", response, msg);
-	dealloc(response);
+	if (response) {
+		ret = true;
+		LOGWARNING("Received: %s in response to %s request", response, msg);
+		dealloc(response);
+	}
 	Close(sockd);
+	return ret;
 }
 
 int main(int argc, char **argv)
@@ -1233,6 +1283,9 @@ int main(int argc, char **argv)
 				break;
 			case 'c':
 				ckp.config = optarg;
+				break;
+			case 'D':
+				ckp.daemon = true;
 				break;
 			case 'd':
 				ckp.ckdb_name = optarg;
@@ -1431,20 +1484,45 @@ int main(int argc, char **argv)
 	ckp.main.processname = strdup("main");
 	ckp.main.sockname = strdup("listener");
 	name_process_sockname(&ckp.main.us, &ckp.main);
+	ckp.oldconnfd = ckzalloc(sizeof(int *) * ckp.serverurls);
 	if (ckp.handover) {
-		int sockd = open_unix_client(ckp.main.us.path);
+		const char *path = ckp.main.us.path;
 
-		if (sockd > 0 && send_unix_msg(sockd, "getfd")) {
-			ckp.oldconnfd = get_fd(sockd);
-			Close(sockd);
+		if (send_recv_path(path, "ping")) {
+			for (i = 0; i < ckp.serverurls; i++) {
+				char getfd[16];
+				int sockd;
 
-			send_recv_path(ckp.main.us.path, "reject");
-			send_recv_path(ckp.main.us.path, "reconnect");
-			send_recv_path(ckp.main.us.path, "shutdown");
-			cksleep_ms(500);
+				snprintf(getfd, 15, "getxfd%d", i);
+				sockd = open_unix_client(path);
+				if (sockd < 1)
+					break;
+				if (!send_unix_msg(sockd, getfd))
+					break;
+				ckp.oldconnfd[i] = get_fd(sockd);
+				Close(sockd);
+				if (!ckp.oldconnfd[i])
+					break;
+				LOGWARNING("Inherited old server socket %d with new file descriptor %d!",
+					   i, ckp.oldconnfd[i]);
+			}
+			send_recv_path(path, "reject");
+			send_recv_path(path, "reconnect");
+			send_recv_path(path, "shutdown");
+		}
+	}
 
-			if (ckp.oldconnfd > 0)
-				LOGWARNING("Inherited old socket with new file descriptor %d!", ckp.oldconnfd);
+	if (ckp.daemon) {
+		int fd;
+
+		if (fork())
+			exit(0);
+		setsid();
+		fd = open("/dev/null",O_RDWR, 0);
+		if (fd != -1) {
+			dup2(fd, STDIN_FILENO);
+			dup2(fd, STDOUT_FILENO);
+			dup2(fd, STDERR_FILENO);
 		}
 	}
 
@@ -1474,7 +1552,7 @@ int main(int argc, char **argv)
 	if (ckp.pth_listener)
 		join_pthread(ckp.pth_listener);
 
-	shutdown_children(&ckp, SIGTERM);
+	shutdown_children(&ckp);
 	clean_up(&ckp);
 
 	return 0;
