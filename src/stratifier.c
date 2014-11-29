@@ -509,7 +509,7 @@ static void clear_userwb(sdata_t *sdata, int64_t id)
 {
 	user_instance_t *instance, *tmp;
 
-	ck_rlock(&sdata->instance_lock);
+	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->user_instances, instance, tmp) {
 		struct userwb *userwb;
 
@@ -521,7 +521,7 @@ static void clear_userwb(sdata_t *sdata, int64_t id)
 		free(userwb->coinb2);
 		free(userwb);
 	}
-	ck_runlock(&sdata->instance_lock);
+	ck_wunlock(&sdata->instance_lock);
 }
 
 static void clear_workbase(ckpool_t *ckp, workbase_t *wb)
