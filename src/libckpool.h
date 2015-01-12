@@ -191,14 +191,25 @@ static inline void flip_80(void *dest_p, const void *src_p)
 
 void logmsg(int loglevel, const char *fmt, ...);
 
-#define LOGEMERG(fmt, ...) logmsg(LOG_EMERG, fmt, ##__VA_ARGS__)
-#define LOGALERT(fmt, ...) logmsg(LOG_ALERT, fmt, ##__VA_ARGS__)
-#define LOGCRIT(fmt, ...) logmsg(LOG_CRIT, fmt, ##__VA_ARGS__)
-#define LOGERR(fmt, ...) logmsg(LOG_ERR, fmt, ##__VA_ARGS__)
-#define LOGWARNING(fmt, ...) logmsg(LOG_WARNING, fmt, ##__VA_ARGS__)
-#define LOGNOTICE(fmt, ...) logmsg(LOG_NOTICE, fmt, ##__VA_ARGS__)
-#define LOGINFO(fmt, ...) logmsg(LOG_INFO, fmt, ##__VA_ARGS__)
-#define LOGDEBUG(fmt, ...) logmsg(LOG_DEBUG, fmt, ##__VA_ARGS__)
+#define DEFLOGBUFSIZ 512
+
+#define LOGMSGSIZ(__siz, __lvl, __fmt, ...) do { \
+		char tmp42[__siz]; \
+		snprintf(tmp42, sizeof(tmp42), __fmt, ##__VA_ARGS__); \
+		logmsg(__lvl, "%s", tmp42); \
+	} while(0)
+
+#define LOGMSG(_lvl, _fmt, ...) \
+	LOGMSGSIZ(DEFLOGBUFSIZ, _lvl, _fmt, ##__VA_ARGS__)
+
+#define LOGEMERG(fmt, ...) LOGMSG(LOG_EMERG, fmt, ##__VA_ARGS__)
+#define LOGALERT(fmt, ...) LOGMSG(LOG_ALERT, fmt, ##__VA_ARGS__)
+#define LOGCRIT(fmt, ...) LOGMSG(LOG_CRIT, fmt, ##__VA_ARGS__)
+#define LOGERR(fmt, ...) LOGMSG(LOG_ERR, fmt, ##__VA_ARGS__)
+#define LOGWARNING(fmt, ...) LOGMSG(LOG_WARNING, fmt, ##__VA_ARGS__)
+#define LOGNOTICE(fmt, ...) LOGMSG(LOG_NOTICE, fmt, ##__VA_ARGS__)
+#define LOGINFO(fmt, ...) LOGMSG(LOG_INFO, fmt, ##__VA_ARGS__)
+#define LOGDEBUG(fmt, ...) LOGMSG(LOG_DEBUG, fmt, ##__VA_ARGS__)
 
 #define IN_FMT_FFL " in %s %s():%d"
 #define quitfrom(status, _file, _func, _line, fmt, ...) do { \
@@ -478,6 +489,7 @@ void align_len(size_t *len);
 void realloc_strcat(char **ptr, const char *s);
 void trail_slash(char **buf);
 void *_ckalloc(size_t len, const char *file, const char *func, const int line);
+void *json_ckalloc(size_t size);
 void *_ckzalloc(size_t len, const char *file, const char *func, const int line);
 void _dealloc(void **ptr);
 extern const int hex2bin_tbl[];

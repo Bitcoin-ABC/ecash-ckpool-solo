@@ -2752,12 +2752,12 @@ out:
 		if (client->first_invalid < client->last_share.tv_sec || !client->first_invalid)
 			client->first_invalid = now_t;
 		else if (client->first_invalid && client->first_invalid < now_t - 120) {
-			LOGNOTICE("Client %d rejecting for 120s, disconnecting", client->id);
+			LOGNOTICE("Client %ld rejecting for 120s, disconnecting", client->id);
 			stratum_send_message(sdata, client, "Disconnecting for continuous invalid shares");
 			client->reject = 2;
 		} else if (client->first_invalid && client->first_invalid < now_t - 60) {
 			if (!client->reject) {
-				LOGINFO("Client %d rejecting for 60s, sending diff", client->id);
+				LOGINFO("Client %ld rejecting for 60s, sending diff", client->id);
 				stratum_send_diff(sdata, client);
 				client->reject = 1;
 			}
@@ -2927,8 +2927,10 @@ static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindif
 	ck_runlock(&sdata->instance_lock);
 
 	/* They may just have not connected yet */
-	if (!instance)
-		return LOGINFO("Failed to find user %s in set_worker_mindiff", username);
+	if (!instance) {
+		LOGINFO("Failed to find user %s in set_worker_mindiff", username);
+		return;
+	}
 
 	/* Then find the matching worker instance */
 	ck_rlock(&sdata->instance_lock);
@@ -2941,11 +2943,15 @@ static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindif
 	ck_runlock(&sdata->instance_lock);
 
 	/* They may just not be connected at the moment */
-	if (!worker)
-		return LOGINFO("Failed to find worker %s in set_worker_mindiff", workername);
+	if (!worker) {
+		LOGINFO("Failed to find worker %s in set_worker_mindiff", workername);
+		return;
+	}
 
-	if (mindiff < 1)
-		return LOGINFO("Worker %s requested invalid diff %ld", worker->workername, mindiff);
+	if (mindiff < 1) {
+		LOGINFO("Worker %s requested invalid diff %d", worker->workername, mindiff);
+		return;
+	}
 	if (mindiff < ckp->mindiff)
 		mindiff = ckp->mindiff;
 	if (mindiff == worker->mindiff)
@@ -2980,12 +2986,16 @@ static void suggest_diff(stratum_instance_t *client, const char *method, json_t 
 	sdata_t *sdata = client->ckp->data;
 	int64_t sdiff;
 
-	if (unlikely(!client->authorised))
-		return LOGWARNING("Attempted to suggest diff on unauthorised client %ld", client->id);
+	if (unlikely(!client->authorised)) {
+		LOGWARNING("Attempted to suggest diff on unauthorised client %ld", client->id);
+		return;
+	}
 	if (arr_val && json_is_integer(arr_val))
 		sdiff = json_integer_value(arr_val);
-	else if (sscanf(method, "mining.suggest_difficulty(%ld", &sdiff) != 1)
-		return LOGINFO("Failed to parse suggest_difficulty for client %ld", client->id);
+	else if (sscanf(method, "mining.suggest_difficulty(%ld", &sdiff) != 1) {
+		LOGINFO("Failed to parse suggest_difficulty for client %"PRId64, client->id);
+		return;
+	}
 	if (sdiff == client->suggest_diff)
 		return;
 	client->suggest_diff = sdiff;
@@ -3012,7 +3022,7 @@ static void parse_method(sdata_t *sdata, const int64_t client_id, json_t *id_val
 	}
 
 	if (unlikely(client->reject == 2)) {
-		LOGINFO("Dropping client %d tagged for lazy invalidation", client_id);
+		LOGINFO("Dropping client %"PRId64" tagged for lazy invalidation", client_id);
 		snprintf(buf, 255, "dropclient=%ld", client->id);
 		send_proc(client->ckp->connector, buf);
 		goto out;

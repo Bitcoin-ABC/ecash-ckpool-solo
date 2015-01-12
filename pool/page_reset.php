@@ -158,9 +158,9 @@ function doreset($data, $u)
  return resetfail();
 }
 #
-function show_reset($page, $menu, $name, $u)
+function show_reset($info, $page, $menu, $name, $u)
 {
- gopage(array(), 'doreset', $page, $menu, $name, $u, true, true, false);
+ gopage($info, array(), 'doreset', $page, $menu, $name, $u, true, true, false);
 }
 #
 ?>

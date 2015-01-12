@@ -9,7 +9,7 @@ function socktmo($socket, $factor)
 	$factor = 1;
 
  # on a slower server increase this base value
- $tmo = 2;
+ $tmo = 8;
 
  $usetmo = $tmo * $factor;
  $sec = floor($usetmo);

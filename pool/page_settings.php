@@ -33,28 +33,31 @@ function settings($data, $user, $email, $addr, $err)
  $pg .= '</center></td></tr>';
  $pg .= '<tr class=dc><td><center>';
 
- $pg .= makeForm('settings');
- $pg .= '<table cellpadding=5 cellspacing=0 border=0>';
- $pg .= '<tr class=dc><td class=dr colspan=2>';
- $pg .= 'To change your payout address, enter a new address and your password';
- $pg .= '</td></tr>';
- $pg .= '<tr class=dc><td class=dr>';
- $pg .= 'BTC Address:';
- $pg .= '</td><td class=dl>';
- $pg .= "<input type=text name=baddr value='$addr' size=42>";
- $pg .= '</td></tr>';
- $pg .= '<tr class=dc><td class=dr>';
- $pg .= 'Password:';
- $pg .= '</td><td class=dl>';
- $pg .= '<input type=password name=pass size=20>';
- $pg .= '</td></tr>';
- $pg .= '<tr class=dc><td class=dr colspan=2>';
- $pg .= 'Change: <input type=submit name=Change value=Address>';
- $pg .= '</td></tr>';
- $pg .= '</table></form>';
+ if (!isset($data['info']['u_multiaddr']))
+ {
+  $pg .= makeForm('settings');
+  $pg .= '<table cellpadding=5 cellspacing=0 border=0>';
+  $pg .= '<tr class=dc><td class=dr colspan=2>';
+  $pg .= 'To change your payout address, enter a new address and your password';
+  $pg .= '</td></tr>';
+  $pg .= '<tr class=dc><td class=dr>';
+  $pg .= 'BTC Address:';
+  $pg .= '</td><td class=dl>';
+  $pg .= "<input type=text name=baddr value='$addr' size=42>";
+  $pg .= '</td></tr>';
+  $pg .= '<tr class=dc><td class=dr>';
+  $pg .= 'Password:';
+  $pg .= '</td><td class=dl>';
+  $pg .= '<input type=password name=pass size=20>';
+  $pg .= '</td></tr>';
+  $pg .= '<tr class=dc><td class=dr colspan=2>';
+  $pg .= 'Change: <input type=submit name=Change value=Address>';
+  $pg .= '</td></tr>';
+  $pg .= '</table></form>';
 
- $pg .= '</center></td></tr>';
- $pg .= '<tr class=dc><td><center>';
+  $pg .= '</center></td></tr>';
+  $pg .= '<tr class=dc><td><center>';
+ }
 
  $pg .= makeForm('settings');
  $pg .= '<table cellpadding=5 cellspacing=0 border=0>';
@@ -101,10 +104,14 @@ function dosettings($data, $user)
 	$check = true;
 	break;
   case 'Address':
-	$addr = getparam('baddr', false);
-	$pass = getparam('pass', false);
-	$ans = userSettings($user, null, $addr, $pass);
-	$check = true;
+	if (!isset($data['info']['u_multiaddr']))
+	{
+		$addr = getparam('baddr', false);
+		$addrarr = array(array('addr' => $addr));
+		$pass = getparam('pass', false);
+		$ans = userSettings($user, null, $addrarr, $pass);
+		$check = true;
+	}
 	break;
   case 'Password':
 	$oldpass = getparam('oldpass', false);
@@ -139,17 +146,18 @@ function dosettings($data, $user)
 	$email = $ans['email'];
  else
 	$email = '';
- if (isset($ans['addr']))
-	$addr = $ans['addr'];
+ // Use the first one - updating will expire all others
+ if (isset($ans['rows']) and $ans['rows'] > 0)
+	$addr = $ans['addr:0'];
  else
 	$addr = '';
  $pg = settings($data, $user, $email, $addr, $err);
  return $pg;
 }
 #
-function show_settings($page, $menu, $name, $user)
+function show_settings($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'dosettings', $page, $menu, $name, $user);
+ gopage($info, NULL, 'dosettings', $page, $menu, $name, $user);
 }
 #
 ?>

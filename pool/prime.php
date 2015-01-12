@@ -8,7 +8,15 @@ include_once('base.php');
 #
 function process($p, $user, $menu)
 {
- if ($user == 'Kano' || $user == 'ckolivas' || $user == 'wvr2' || $user == 'aphorise')
+ $info = homeInfo($user);
+ if (is_array($info) && isset($info['u_multiaddr']))
+ {
+	if (isset($menu['Account']))
+		$menu['Account']['Addresses'] = 'addrmgt';
+	if (isset($menu['Workers']))
+		$menu['Workers']['Percents'] = 'percent';
+ }
+ if ($user == 'Kano' || $user == 'ckolivas')
  {
 	$menu['Admin']['ckp'] = 'ckp';
 	$menu['Admin']['PPLNS'] = 'pplns';
@@ -26,9 +34,9 @@ function process($p, $user, $menu)
 			}
 
  if ($page === '')
-	showPage('index', $menu, '', $user);
+	showPage($info, 'index', $menu, '', $user);
  else
-	showPage($page, $menu, $n, $user);
+	showPage($info, $page, $menu, $n, $user);
 }
 #
 function def_menu()
@@ -66,7 +74,8 @@ function check()
 	),
 	'Admin' => NULL,
 	'gap' => array( # options not shown
-			'API' => 'api'
+			'API' => 'api',
+			'PBlocks' => 'pblocks'
 	),
 	'Help' => array(
 		'Payouts' => 'payout',
@@ -80,11 +89,11 @@ function check()
  {
 	$p = getparam('k', true);
 	if ($p == 'reset')
-		showPage('reset', $dmenu, '', $who);
+		showPage(NULL, 'reset', $dmenu, '', $who);
 	else
 	{
 		if (requestRegister() == true)
-			showPage('reg', $dmenu, '', $who);
+			showPage(NULL, 'reg', $dmenu, '', $who);
 		else
 		{
 			$p = getparam('k', true);

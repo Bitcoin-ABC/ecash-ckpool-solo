@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2014 Andrew Smith
+ * Copyright 1995-2015 Andrew Smith
  * Copyright 2014 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -154,6 +154,7 @@
 
 static bool socketer_using_data;
 static bool summariser_using_data;
+static bool marker_using_data;
 static bool logger_using_data;
 static bool listener_using_data;
 
@@ -274,6 +275,11 @@ int64_t dbload_workinfoid_start = -1;
 int64_t dbload_workinfoid_finish = MAXID;
 // Only restrict sharesummary, not workinfo
 bool dbload_only_sharesummary = false;
+
+/* If the above restriction - on sharesummaries - is after the last marks
+ *  then this means the sharesummaries can't be summarised into
+ *  markersummaries and pplns payouts may not be correct */
+bool sharesummary_marks_limit = false;
 
 // DB users,workers,auth load is complete
 bool db_auths_complete = false;
@@ -469,10 +475,14 @@ const char *marktype_other_finish = "Other Finish";
 
 const char *marktype_block_fmt = "Block %"PRId32" fin";
 const char *marktype_pplns_fmt = "Payout %"PRId32" stt";
-const char *marktype_shift_begin_fmt = "Shift %s stt";
-const char *marktype_shift_end_fmt = "Shift %s fin";
+const char *marktype_shift_begin_fmt = "Shift stt: %s";
+const char *marktype_shift_end_fmt = "Shift fin: %s";
 const char *marktype_other_begin_fmt = "stt: %s";
 const char *marktype_other_finish_fmt = "fin: %s";
+
+// For getting back the shift code/name
+const char *marktype_shift_begin_skip = "Shift stt: ";
+const char *marktype_shift_end_skip = "Shift fin: ";
 
 static char logname[512];
 static char *dbcode;
@@ -753,6 +763,8 @@ static bool getdata3()
 	}
 	if (!(ok = workinfo_fill(conn)) || everyone_die)
 		goto sukamudai;
+	/* marks must be loaded before sharesummary
+	 * since sharesummary looks at the marks data */
 	if (!(ok = marks_fill(conn)) || everyone_die)
 		goto sukamudai;
 	if (!(ok = workmarkers_fill(conn)) || everyone_die)
@@ -1070,9 +1082,9 @@ static void free_workinfo_data(K_ITEM *item)
 
 	DATA_WORKINFO(workinfo, item);
 	if (workinfo->transactiontree)
-		free(workinfo->transactiontree);
+		FREENULL(workinfo->transactiontree);
 	if (workinfo->merklehash)
-		free(workinfo->merklehash);
+		FREENULL(workinfo->merklehash);
 }
 
 static void free_sharesummary_data(K_ITEM *item)
@@ -1082,8 +1094,7 @@ static void free_sharesummary_data(K_ITEM *item)
 	DATA_SHARESUMMARY(sharesummary, item);
 	if (sharesummary->workername) {
 		LIST_MEM_SUB(sharesummary_free, sharesummary->workername);
-		free(sharesummary->workername);
-		sharesummary->workername = NULL;
+		FREENULL(sharesummary->workername);
 	}
 	SET_CREATEBY(sharesummary_free, sharesummary->createby, EMPTY);
 	SET_CREATECODE(sharesummary_free, sharesummary->createcode, EMPTY);
@@ -1099,7 +1110,7 @@ static void free_optioncontrol_data(K_ITEM *item)
 
 	DATA_OPTIONCONTROL(optioncontrol, item);
 	if (optioncontrol->optionvalue)
-		free(optioncontrol->optionvalue);
+		FREENULL(optioncontrol->optionvalue);
 }
 
 static void free_markersummary_data(K_ITEM *item)
@@ -1108,7 +1119,7 @@ static void free_markersummary_data(K_ITEM *item)
 
 	DATA_MARKERSUMMARY(markersummary, item);
 	if (markersummary->workername)
-		free(markersummary->workername);
+		FREENULL(markersummary->workername);
 	SET_CREATEBY(markersummary_free, markersummary->createby, EMPTY);
 	SET_CREATECODE(markersummary_free, markersummary->createcode, EMPTY);
 	SET_CREATEINET(markersummary_free, markersummary->createinet, EMPTY);
@@ -1123,9 +1134,9 @@ static void free_workmarkers_data(K_ITEM *item)
 
 	DATA_WORKMARKERS(workmarkers, item);
 	if (workmarkers->poolinstance)
-		free(workmarkers->poolinstance);
+		FREENULL(workmarkers->poolinstance);
 	if (workmarkers->description)
-		free(workmarkers->description);
+		FREENULL(workmarkers->description);
 }
 
 static void free_marks_data(K_ITEM *item)
@@ -1134,11 +1145,11 @@ static void free_marks_data(K_ITEM *item)
 
 	DATA_MARKS(marks, item);
 	if (marks->poolinstance && marks->poolinstance != EMPTY)
-		free(marks->poolinstance);
+		FREENULL(marks->poolinstance);
 	if (marks->description && marks->description != EMPTY)
-		free(marks->description);
+		FREENULL(marks->description);
 	if (marks->extra && marks->extra != EMPTY)
-		free(marks->extra);
+		FREENULL(marks->extra);
 }
 
 #define FREE_TREE(_tree) \
@@ -1473,7 +1484,7 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 				STRNCPY(transfer->name, json_key);
 			if (!ok || find_in_ktree(*trf_root, item, cmp_transfer, ctx)) {
 				if (transfer->mvalue != transfer->svalue)
-					free(transfer->mvalue);
+					FREENULL(transfer->mvalue);
 				k_add_head(transfer_free, item);
 			} else {
 				*trf_root = add_to_ktree(*trf_root, item, cmp_transfer);
@@ -1505,7 +1516,7 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 
 			if (find_in_ktree(*trf_root, item, cmp_transfer, ctx)) {
 				if (transfer->mvalue != transfer->svalue)
-					free(transfer->mvalue);
+					FREENULL(transfer->mvalue);
 				k_add_head(transfer_free, item);
 			} else {
 				*trf_root = add_to_ktree(*trf_root, item, cmp_transfer);
@@ -1622,7 +1633,7 @@ static void summarise_blocks()
 	} else {
 		DATA_BLOCKS(prev_blocks, b_prev);
 		wi_start = prev_blocks->workinfoid;
-		wi_item = find_workinfo(wi_start);
+		wi_item = find_workinfo(wi_start, NULL);
 		if (!wi_item) {
 			// This will repeat until fixed ...
 			LOGERR("%s() block %d, but prev %d wid "
@@ -1779,10 +1790,10 @@ static void summarise_userstats()
 	K_ITEM *first, *last, *new, *next, *tmp;
 	USERSTATS *userstats, *us_first, *us_last, *us_next;
 	double statrange, factor;
-	bool locked, upgrade;
+	bool locked, upgrade, issix, sixdiff;
 	tv_t now, process, when;
 	PGconn *conn = NULL;
-	int count;
+	int count, sixcount;
 	char error[1024];
 	char tvbuf1[DATE_BUFSIZ], tvbuf2[DATE_BUFSIZ];
 
@@ -1839,6 +1850,8 @@ static void summarise_userstats()
 		next = next_in_ktree(ctx);
 
 		upgrade = true;
+		issix = us_first->six;
+		sixdiff = false;
 		K_ULOCK(userstats_free);
 		new = k_unlink_head(userstats_free);
 		DATA_USERSTATS(userstats, new);
@@ -1851,6 +1864,7 @@ static void summarise_userstats()
 		k_add_head(userstats_summ, first);
 
 		count = 1;
+		sixcount = issix ? 1 : 0;
 		while (next) {
 			DATA_USERSTATS(us_next, next);
 			statrange = tvdiff(&when, &(us_next->statsdate));
@@ -1862,7 +1876,10 @@ static void summarise_userstats()
 			if (us_next->summarylevel[0] == SUMMARY_NONE &&
 			    us_next->userid == userstats->userid &&
 			    strcmp(us_next->workername, userstats->workername) == 0) {
+				if (us_next->six != issix)
+					sixdiff = true;
 				count++;
+				sixcount += us_next->six ? 1 : 0;
 				userstats->hashrate += us_next->hashrate;
 				userstats->hashrate5m += us_next->hashrate5m;
 				userstats->hashrate1hr += us_next->hashrate1hr;
@@ -1871,8 +1888,10 @@ static void summarise_userstats()
 					userstats->elapsed = us_next->elapsed;
 				userstats->summarycount += us_next->summarycount;
 
-				userstats_root = remove_from_ktree(userstats_root, next, cmp_userstats);
-				userstats_statsdate_root = remove_from_ktree(userstats_statsdate_root, next,
+				userstats_root = remove_from_ktree(userstats_root,
+								   next, cmp_userstats);
+				userstats_statsdate_root = remove_from_ktree(userstats_statsdate_root,
+									     next,
 									     cmp_userstats_statsdate);
 				k_unlink_item(userstats_store, next);
 				k_add_head(userstats_summ, next);
@@ -1896,8 +1915,14 @@ static void summarise_userstats()
 		userstats->summarylevel[0] = SUMMARY_DB;
 		userstats->summarylevel[1] = '\0';
 
-		// Expect 6 per poolinstance
-		factor = (double)count / 6.0;
+		if (issix && !sixdiff) {
+			// Expect 6 per poolinstance
+			factor = (double)count / 6.0;
+		} else {
+			// For now ... new format is still 6 per hour
+			factor = (double)count / 6.0;
+		}
+
 		userstats->hashrate *= factor;
 		userstats->hashrate5m *= factor;
 		userstats->hashrate1hr *= factor;
@@ -1946,7 +1971,7 @@ static void summarise_userstats()
 		//upgrade = false;
 
 		if (error[0])
-			LOGERR(error);
+			LOGERR("%s", error);
 	}
 
 	if (locked) {
@@ -2011,12 +2036,468 @@ static void *summariser(__maybe_unused void *arg)
 	return NULL;
 }
 
+#define SHIFT_WORDS 26
+static char *shift_words[] =
+{
+	"akatsuki",
+	"belldandy",
+	"charlotte",
+	"darkchii",
+	"elen",
+	"felli",
+	"gin",
+	"hitagi",
+	"ichiko",
+	"juvia",
+	"kosaki",
+	"lucy",
+	"mutsumi",
+	"nodoka",
+	"origami",
+	"paru",
+	"quinn",
+	"rika",
+	"sena",
+	"tsubasa",
+	"ur",
+	"valentina",
+	"winry",
+	"xenovia",
+	"yuno",
+	"zekken"
+};
+
+#define ASSERT4(condition) __maybe_unused static char shift_words_must_have_ ## SHIFT_WORDS ## _words[(condition)?1:-1]
+ASSERT4((sizeof(shift_words) == (sizeof(char *) * SHIFT_WORDS)));
+
+// Number of workinfoids per shift
+#define WID_PER_SHIFT 100
+
+static void make_a_shift_mark()
+{
+	K_TREE_CTX ss_ctx[1], m_ctx[1], wi_ctx[1], b_ctx[1];
+	K_ITEM *ss_item = NULL, *m_item = NULL, *m_sh_item = NULL, *wi_item;
+	K_ITEM *b_item = NULL;
+	K_ITEM wi_look, ss_look;
+	SHARESUMMARY *sharesummary, looksharesummary;
+	WORKINFO *workinfo, lookworkinfo;
+	BLOCKS *blocks;
+	MARKS *marks, *sh_marks;
+	int64_t ss_age_wid, last_marks_wid, marks_wid, prev_wid;
+	bool was_block = false, ok;
+	char cd_buf[DATE_BUFSIZ], cd_buf2[DATE_BUFSIZ];
+	int used_wid;
+
+	/* Find the last !new sharesummary workinfoid
+	 * If the shift needs to go beyond this, then it's not ready yet */
+	ss_age_wid = 0;
+	K_RLOCK(sharesummary_free);
+	ss_item = first_in_ktree(sharesummary_workinfoid_root, ss_ctx);
+	while (ss_item) {
+		DATA_SHARESUMMARY(sharesummary, ss_item);
+		if (sharesummary->complete[0] == SUMMARY_NEW)
+			break;
+		if (ss_age_wid < sharesummary->workinfoid)
+			ss_age_wid = sharesummary->workinfoid;
+		ss_item = next_in_ktree(ss_ctx);
+	}
+	K_RUNLOCK(sharesummary_free);
+	if (ss_item) {
+		tv_to_buf(&(sharesummary->lastshare), cd_buf, sizeof(cd_buf));
+		tv_to_buf(&(sharesummary->createdate), cd_buf2, sizeof(cd_buf2));
+		LOGDEBUG("%s() last sharesummary %s/%s/%"PRId64"/%s/%s",
+			 __func__, sharesummary->complete,
+			 sharesummary->workername,
+			 ss_age_wid, cd_buf, cd_buf2);
+	}
+	LOGDEBUG("%s() age sharesummary limit wid %"PRId64, __func__, ss_age_wid);
+
+	// Find the last CURRENT mark, the shift starts after this
+	K_RLOCK(marks_free);
+	m_item = last_in_ktree(marks_root, m_ctx);
+	if (m_item) {
+		DATA_MARKS(marks, m_item);
+		if (!CURRENT(&(marks->expirydate))) {
+			/* This means there are no CURRENT marks
+			 *  since they are sorted all CURRENT last */
+			m_item = NULL;
+		} else {
+			wi_item = find_workinfo(marks->workinfoid, wi_ctx);
+			if (!wi_item) {
+				K_RUNLOCK(marks_free);
+				LOGEMERG("%s() ERR last mark "
+					 "%"PRId64"/%s/%s/%s/%s"
+					 " workinfoid is missing!",
+					 __func__, marks->workinfoid,
+					 marks_marktype(marks->marktype),
+					 marks->status, marks->description,
+					 marks->extra);
+				return;
+			}
+			/* Find the last shift so we can determine
+			 *  the next shift description
+			 * This will normally be the last mark,
+			 *  but manual marks may change that */
+			m_sh_item = m_item;
+			while (m_sh_item) {
+				DATA_MARKS(sh_marks, m_sh_item);
+				if (!CURRENT(&(sh_marks->expirydate))) {
+					m_sh_item = NULL;
+					break;
+				}
+				if (sh_marks->marktype[0] == MARKTYPE_SHIFT_END ||
+				    sh_marks->marktype[0] == MARKTYPE_SHIFT_BEGIN)
+					break;
+				m_sh_item = prev_in_ktree(m_ctx);
+			}
+			if (m_sh_item) {
+				wi_item = find_workinfo(sh_marks->workinfoid, wi_ctx);
+				if (!wi_item) {
+					K_RUNLOCK(marks_free);
+					LOGEMERG("%s() ERR last shift mark "
+						 "%"PRId64"/%s/%s/%s/%s "
+						 "workinfoid is missing!",
+						 __func__,
+						 sh_marks->workinfoid,
+						 marks_marktype(sh_marks->marktype),
+						 sh_marks->status,
+						 sh_marks->description,
+						 sh_marks->extra);
+					return;
+				}
+			}
+		}
+	}
+	K_RUNLOCK(marks_free);
+
+	if (m_item) {
+		last_marks_wid = marks->workinfoid;
+		LOGDEBUG("%s() last mark %"PRId64"/%s/%s/%s/%s",
+			 __func__, marks->workinfoid,
+			 marks_marktype(marks->marktype),
+			 marks->status, marks->description,
+			 marks->extra);
+	} else {
+		last_marks_wid = 0;
+		LOGDEBUG("%s() no last mark", __func__);
+	}
+
+	if (m_sh_item) {
+		if (m_sh_item == m_item)
+			LOGDEBUG("%s() last shift mark = last mark", __func__);
+		else {
+			LOGDEBUG("%s() last shift mark %"PRId64"/%s/%s/%s/%s",
+				 __func__, sh_marks->workinfoid,
+				 marks_marktype(sh_marks->marktype),
+				 sh_marks->status, sh_marks->description,
+				 sh_marks->extra);
+		}
+	} else
+		LOGDEBUG("%s() no last shift mark", __func__);
+
+	if (m_item) {
+		/* First block after the last mark
+		 * Shift must stop at or before this */
+		K_RLOCK(blocks_free);
+		b_item = first_in_ktree(blocks_root, b_ctx);
+		while (b_item) {
+			DATA_BLOCKS(blocks, b_item);
+			if (CURRENT(&(blocks->expirydate)) &&
+			    blocks->workinfoid > marks->workinfoid)
+				break;
+			b_item = next_in_ktree(b_ctx);
+		}
+		K_RUNLOCK(blocks_free);
+	}
+
+	if (b_item) {
+		tv_to_buf(&(blocks->createdate), cd_buf, sizeof(cd_buf));
+		LOGDEBUG("%s() block after last mark %"PRId32"/%"PRId64"/%s",
+			 __func__, blocks->height, blocks->workinfoid,
+			 blocks_confirmed(blocks->confirmed));
+	} else {
+		if (!m_item)
+			LOGDEBUG("%s() no last mark = no last block", __func__);
+		else
+			LOGDEBUG("%s() no block since last mark", __func__);
+	}
+
+	INIT_WORKINFO(&wi_look);
+	INIT_SHARESUMMARY(&ss_look);
+
+	// Start from the workinfoid after the last mark
+	lookworkinfo.workinfoid = last_marks_wid;
+	lookworkinfo.expirydate.tv_sec = default_expiry.tv_sec;
+	lookworkinfo.expirydate.tv_usec = default_expiry.tv_usec;
+	wi_look.data = (void *)(&lookworkinfo);
+	K_RLOCK(workinfo_free);
+	wi_item = find_after_in_ktree(workinfo_root, &wi_look, cmp_workinfo, wi_ctx);
+	K_RUNLOCK(workinfo_free);
+	marks_wid = 0;
+	used_wid = 0;
+	prev_wid = 0;
+	while (wi_item) {
+		DATA_WORKINFO(workinfo, wi_item);
+		if (CURRENT(&(workinfo->expirydate))) {
+			/* Did we meet or exceed the !new ss limit?
+			 *  for now limit it to BEFORE ss_age_wid
+			 * This will mean the shifts are created ~30s later */
+			if (workinfo->workinfoid >= ss_age_wid) {
+				LOGDEBUG("%s() not enough aged workinfos (%d)",
+					 __func__, used_wid);
+				return;
+			}
+			/* Did we find a pool restart? i.e. a wid skip
+			 * These will usually be a much larger jump,
+			 *  however the pool should never skip any */
+			if (prev_wid > 0 &&
+			    (workinfo->workinfoid - prev_wid) > 6) {
+				marks_wid = prev_wid;
+				LOGDEBUG("%s() OK shift stops at pool restart"
+					 " count %d(%d) workinfoid %"PRId64
+					 " next wid %"PRId64,
+					 __func__, used_wid, WID_PER_SHIFT,
+					 marks_wid, workinfo->workinfoid);
+				break;
+			}
+			prev_wid = workinfo->workinfoid;
+			// Did we hit the next block?
+			if (b_item && workinfo->workinfoid == blocks->workinfoid) {
+				LOGDEBUG("%s() OK shift stops at block limit",
+					 __func__);
+				marks_wid = workinfo->workinfoid;
+				was_block = true;
+				break;
+			}
+			// Does workinfo have (aged) sharesummaries?
+			looksharesummary.workinfoid = workinfo->workinfoid;
+			looksharesummary.userid = MAXID;
+			looksharesummary.workername = EMPTY;
+			ss_look.data = (void *)(&looksharesummary);
+			K_RLOCK(sharesummary_free);
+			ss_item = find_before_in_ktree(sharesummary_workinfoid_root, &ss_look,
+							cmp_sharesummary_workinfoid, ss_ctx);
+			K_RUNLOCK(sharesummary_free);
+			DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
+			if (ss_item &&
+			    sharesummary->workinfoid == workinfo->workinfoid) {
+				/* Not aged = shift not complete
+				 * Though, it shouldn't happen */
+				if (sharesummary->complete[0] == SUMMARY_NEW) {
+					tv_to_buf(&(sharesummary->lastshare),
+						  cd_buf, sizeof(cd_buf));
+					tv_to_buf(&(sharesummary->createdate),
+						  cd_buf2, sizeof(cd_buf2));
+					LOGEMERG("%s() ERR unaged sharesummary "
+						 "%s/%s/%"PRId64"/%s/%s",
+						 __func__, sharesummary->complete,
+						 sharesummary->workername,
+						 sharesummary->workinfoid,
+						 cd_buf, cd_buf2);
+					return;
+				}
+			}
+			if (++used_wid >= WID_PER_SHIFT) {
+				// We've got a full shift
+				marks_wid = workinfo->workinfoid;
+				LOGDEBUG("%s() OK shift stops at count"
+					 " %d(%d) workinfoid %"PRId64,
+					 __func__, used_wid,
+					 WID_PER_SHIFT, marks_wid);
+				break;
+			}
+		}
+		K_RLOCK(workinfo_free);
+		wi_item = next_in_ktree(wi_ctx);
+		K_RUNLOCK(workinfo_free);
+	}
+
+	// Create the shift mark
+	if (marks_wid) {
+		char shift[TXT_BIG+1] = { '\0' };
+		char des[TXT_BIG+1] = { '\0' };
+		char extra[TXT_BIG+1] = { '\0' };
+		char shifttype[TXT_FLAG+1] = { MARKTYPE_SHIFT_END, '\0' };
+		char blocktype[TXT_FLAG+1] = { MARKTYPE_BLOCK, '\0' };
+		char status[TXT_FLAG+1] = { MARK_READY, '\0' };
+		int word = 0;
+		char *invalid = NULL, *code, *space;
+		const char *skip = NULL;
+		size_t len;
+		tv_t now;
+
+		/* Shift description is shiftcode(createdate)
+		 *  + a space + shift_words
+		 * shift_words is incremented every shift */
+		if (m_sh_item) {
+			skip = NULL;
+			switch (sh_marks->marktype[0]) {
+				case MARKTYPE_BLOCK:
+				case MARKTYPE_PPLNS:
+				case MARKTYPE_OTHER_BEGIN:
+				case MARKTYPE_OTHER_FINISH:
+					// Reset
+					word = 0;
+					break;
+				case MARKTYPE_SHIFT_END:
+					skip = marktype_shift_end_skip;
+					break;
+				case MARKTYPE_SHIFT_BEGIN:
+					skip = marktype_shift_begin_skip;
+					break;
+				default:
+					invalid = "unkown marktype";
+					break;
+			}
+			if (skip) {
+				len = strlen(skip);
+				if (strncmp(sh_marks->description, skip, len) != 0)
+					invalid = "inv des (skip)";
+				else {
+					code = sh_marks->description + len;
+					space = strchr(code, ' ');
+					if (!space)
+						invalid = "inv des (space)";
+					else {
+						space++;
+						if (*space < 'a' || *space > 'z')
+							invalid = "inv des (a-z)";
+						else
+							word = (*space - 'a' + 1) % SHIFT_WORDS;
+					}
+				}
+			}
+			if (invalid) {
+				LOGEMERG("%s() ERR %s mark %"PRId64"/%s/%s/%s",
+					 __func__, invalid,
+					 sh_marks->workinfoid,
+					 marks_marktype(sh_marks->marktype),
+					 sh_marks->status,
+					 sh_marks->description);
+				return;
+			}
+		}
+		snprintf(shift, sizeof(shift), "%s %s",
+			 shiftcode(&(workinfo->createdate)),
+			 shift_words[word]);
+
+		LOGDEBUG("%s() shift='%s'", __func__, shift);
+
+		if (!marks_description(des, sizeof(des), shifttype, 0, shift, NULL))
+			return;
+
+		LOGDEBUG("%s() des='%s'", __func__, des);
+
+		if (was_block) {
+			// Put the block description in extra
+			if (!marks_description(extra, sizeof(extra), blocktype,
+						blocks->height, NULL, NULL))
+				return;
+
+			LOGDEBUG("%s() extra='%s'", __func__, extra);
+		}
+
+		setnow(&now);
+		ok = marks_process(NULL, true, EMPTY, marks_wid, des, extra,
+				   shifttype, status, (char *)by_default,
+				   (char *)__func__, (char *)inet_default,
+				   &now, NULL);
+
+		if (ok) {
+			LOGWARNING("%s() mark %"PRId64"/%s/%s/%s/%s/",
+				   __func__, marks_wid, shifttype, status,
+				   des, extra);
+		}
+	} else
+		LOGDEBUG("%s() no marks wid", __func__);
+}
+
+static void make_a_workmarker()
+{
+	char msg[1024] = "";
+	tv_t now;
+	bool ok;
+
+	setnow(&now);
+	ok = workmarkers_generate(NULL, msg, sizeof(msg),
+				  (char *)by_default, (char *)__func__,
+				  (char *)inet_default, &now, NULL, false);
+	if (!ok)
+		LOGERR("%s() ERR %s", __func__, msg);
+}
+
+static void *marker(__maybe_unused void *arg)
+{
+	int i;
+
+	pthread_detach(pthread_self());
+
+	rename_proc("db_marker");
+
+	while (!everyone_die && !startup_complete)
+		cksleep_ms(42);
+
+	if (sharesummary_marks_limit) {
+		LOGEMERG("%s() ALERT: dbload -w disables shift processing",
+			 __func__);
+		return NULL;
+	}
+
+	marker_using_data = true;
+
+/* TODO: trigger this every workinfo change?
+ *  note that history catch up would also mean the tigger would
+ *  catch up at most 100 missing marks per shift
+ *  however, also, a workinfo change means a sharesummary DB update,
+ *  so would be best to (usually) wait until that is done
+ * OR: avoid writing the sharesummaries to the DB at all
+ *  and only write the markersummaries? - since 100 workinfoid shifts
+ *  will usually mean that markersummaries are less than every hour
+ *  (and a reload processes more than an hour) */
+
+	while (!everyone_die) {
+		for (i = 0; i < 5; i++) {
+			if (!everyone_die)
+				sleep(1);
+		}
+		if (everyone_die)
+			break;
+		else
+			make_a_shift_mark();
+
+		for (i = 0; i < 4; i++) {
+			if (!everyone_die)
+				sleep(1);
+		}
+		if (everyone_die)
+			break;
+		else
+			make_a_workmarker();
+
+#if 0
+		for (i = 0; i < 4; i++) {
+			if (!everyone_die)
+				sleep(1);
+		}
+		if (everyone_die)
+			break;
+		else
+			make_markersummaries();
+#endif
+	}
+
+	marker_using_data = false;
+
+	return NULL;
+}
+
 static void *logger(__maybe_unused void *arg)
 {
 	K_ITEM *lq_item;
 	LOGQUEUE *lq;
 	char buf[128];
-	tv_t now;
+	tv_t now, then;
+	int count;
 
 	pthread_detach(pthread_self());
 
@@ -2037,7 +2518,7 @@ static void *logger(__maybe_unused void *arg)
 		while (lq_item) {
 			DATA_LOGQUEUE(lq, lq_item);
 			LOGFILE(lq->msg);
-			free(lq->msg);
+			FREENULL(lq->msg);
 
 			K_WLOCK(logqueue_free);
 			k_add_head(logqueue_free, lq_item);
@@ -2051,18 +2532,26 @@ static void *logger(__maybe_unused void *arg)
 	}
 
 	K_WLOCK(logqueue_free);
+	count = logqueue_store->count;
 	setnow(&now);
 	snprintf(buf, sizeof(buf), "logstopping.%d.%ld,%ld",
-				   logqueue_store->count,
-				   now.tv_sec, now.tv_usec);
+				   count, now.tv_sec, now.tv_usec);
 	LOGFILE(buf);
-	if (logqueue_store->count)
+	if (count)
 		LOGERR("%s", buf);
 	lq_item = logqueue_store->head;
+	copy_tv(&then, &now);
 	while (lq_item) {
 		DATA_LOGQUEUE(lq, lq_item);
 		LOGFILE(lq->msg);
-		free(lq->msg);
+		FREENULL(lq->msg);
+		count--;
+		setnow(&now);
+		if ((now.tv_sec - then.tv_sec) > 10) {
+			snprintf(buf, sizeof(buf), "logging ... %d", count);
+			LOGERR("%s", buf);
+			copy_tv(&then, &now);
+		}
 		lq_item = lq_item->next;
 	}
 	K_WUNLOCK(logqueue_free);
@@ -2073,6 +2562,7 @@ static void *logger(__maybe_unused void *arg)
 	snprintf(buf, sizeof(buf), "logstop.%ld,%ld",
 				   now.tv_sec, now.tv_usec);
 	LOGFILE(buf);
+	LOGWARNING("%s", buf);
 
 	return NULL;
 }
@@ -2320,8 +2810,7 @@ static void *socketer(__maybe_unused void *arg)
 						rep = malloc(siz);
 						snprintf(rep, siz, "%s.%ld.%s", id, now.tv_sec, ans);
 						send_unix_msg(sockd, rep);
-						free(ans);
-						ans = NULL;
+						FREENULL(ans);
 						switch (cmdnum) {
 							case CMD_AUTH:
 								STORELASTREPLY(auth);
@@ -2385,8 +2874,7 @@ static void *socketer(__maybe_unused void *arg)
 							rep = malloc(siz);
 							snprintf(rep, siz, "%s.%ld.%s", id, now.tv_sec, ans);
 							send_unix_msg(sockd, rep);
-							free(ans);
-							ans = NULL;
+							FREENULL(ans);
 							if (cmdnum == CMD_DSP)
 								free(rep);
 							else {
@@ -2419,16 +2907,15 @@ static void *socketer(__maybe_unused void *arg)
 							rep = malloc(siz);
 							snprintf(rep, siz, "%s.%ld.%s", id, now.tv_sec, ans);
 							send_unix_msg(sockd, rep);
-							free(ans);
-							ans = NULL;
-							free(rep);
-							rep = NULL;
+							FREENULL(ans);
+							FREENULL(rep);
 						}
 						break;
 					// Always queue (ok.queued)
 					case CMD_SHARELOG:
 					case CMD_POOLSTAT:
 					case CMD_USERSTAT:
+					case CMD_WORKERSTAT:
 					case CMD_BLOCK:
 						// First message from the pool
 						if (want_first) {
@@ -2494,7 +2981,7 @@ static void *socketer(__maybe_unused void *arg)
 			while (item) {
 				DATA_TRANSFER(transfer, item);
 				if (transfer->mvalue != transfer->svalue)
-					free(transfer->mvalue);
+					FREENULL(transfer->mvalue);
 				item = item->next;
 			}
 			K_WLOCK(transfer_free);
@@ -2596,6 +3083,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_HEARTBEAT:
 			case CMD_POOLSTAT:
 			case CMD_USERSTAT:
+			case CMD_WORKERSTAT:
 			case CMD_BLOCK:
 				if (confirm_sharesummary)
 					break;
@@ -2622,7 +3110,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			while (item) {
 				DATA_TRANSFER(transfer, item);
 				if (transfer->mvalue != transfer->svalue)
-					free(transfer->mvalue);
+					FREENULL(transfer->mvalue);
 				item = item->next;
 			}
 			K_WLOCK(transfer_free);
@@ -2641,6 +3129,73 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 #define MAX_READ (10 * 1024 * 1024)
 static char *reload_buf;
 
+static bool logline(char *buf, int siz, FILE *fp, char *filename)
+{
+	char *ret;
+
+	ret = fgets_unlocked(buf, siz, fp);
+	if (!ret && ferror(fp)) {
+		int err = errno;
+		quithere(1, "Read failed on %s (%d) '%s'",
+			    filename, err, strerror(err));
+	}
+	if (ret)
+		return true;
+	else
+		return false;
+}
+
+static struct decomp {
+	char *ext;
+	char *fmt;
+} dec_list[] = {
+	{ ".bz2", "bzcat -q '%s'" },
+	{ ".gz",  "zcat -q '%s'" },
+	{ ".lrz", "lrzip -q -d -o - '%s'" },
+	{ NULL, NULL }
+};
+
+static bool logopen(char **filename, FILE **fp, bool *apipe)
+{
+	char buf[1024];
+	char *name;
+	size_t len;
+	int i;
+
+	*apipe = false;
+
+	*fp = NULL;
+	*fp = fopen(*filename, "re");
+	if (*fp)
+		return true;
+
+	for (i = 0; dec_list[i].ext; i++) {
+		len = strlen(*filename) + strlen(dec_list[i].ext);
+		name = malloc(len + 1);
+		if (!name)
+			quithere(1, "(%d) OOM", (int)len);
+		strcpy(name, *filename);
+		strcat(name, dec_list[i].ext);
+		if (access(name, R_OK))
+			free(name);
+		else {
+			snprintf(buf, sizeof(buf), dec_list[i].fmt, name);
+			*fp = popen(buf, "re");
+			if (!(*fp)) {
+				int errn = errno;
+				quithere(1, "Failed to pipe (%d) \"%s\"",
+					 errn, buf);
+			} else {
+				*apipe = true;
+				free(*filename);
+				*filename = name;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 /* If the reload start file is missing and -r was specified correctly:
  *	touch the filename reported in "Failed to open 'filename'",
  *	if ckdb aborts at the beginning of the reload, then start again */
@@ -2652,7 +3207,7 @@ static bool reload_from(tv_t *start)
 	char *missingfirst = NULL, *missinglast = NULL;
 	int missing_count;
 	int processing;
-	bool finished = false, matched = false, ret = true;
+	bool finished = false, matched = false, ret = true, ok, apipe = false;
 	char *filename = NULL;
 	uint64_t count, total;
 	tv_t now;
@@ -2672,8 +3227,7 @@ static bool reload_from(tv_t *start)
 	LOGWARNING("%s(): from %s (stamp %s)", __func__, buf, run);
 
 	filename = rotating_filename(restorefrom, reload_timestamp.tv_sec);
-	fp = fopen(filename, "re");
-	if (!fp)
+	if (!logopen(&filename, &fp, &apipe))
 		quithere(1, "Failed to open '%s'", filename);
 
 	setnow(&now);
@@ -2690,14 +3244,9 @@ static bool reload_from(tv_t *start)
 		processing++;
 		count = 0;
 
-		while (!everyone_die && !matched && fgets_unlocked(reload_buf, MAX_READ, fp))
-			matched = reload_line(conn, filename, ++count, reload_buf);
-
-		if (ferror(fp)) {
-			int err = errno;
-			quithere(1, "Read failed on %s (%d) '%s'",
-				    filename, err, strerror(err));
-		}
+		while (!everyone_die && !matched &&
+			logline(reload_buf, MAX_READ, fp, filename))
+				matched = reload_line(conn, filename, ++count, reload_buf);
 
 		LOGWARNING("%s(): %sread %"PRIu64" line%s from %s",
 			   __func__,
@@ -2705,7 +3254,15 @@ static bool reload_from(tv_t *start)
 			   count, count == 1 ? "" : "s",
 			   filename);
 		total += count;
-		fclose(fp);
+		if (apipe) {
+			pclose(fp);
+			if (count == 0) {
+				quithere(1, "ABORTING - No data returned from "
+					    "compressed file \"%s\"",
+					    filename);
+			}
+		} else
+			fclose(fp);
 		free(filename);
 		if (everyone_die || matched)
 			break;
@@ -2715,11 +3272,10 @@ static bool reload_from(tv_t *start)
 			break;
 		}
 		filename = rotating_filename(restorefrom, reload_timestamp.tv_sec);
-		fp = fopen(filename, "re");
-		if (!fp) {
+		ok = logopen(&filename, &fp, &apipe);
+		if (!ok) {
 			missingfirst = strdup(filename);
-			free(filename);
-			filename = NULL;
+			FREENULL(filename);
 			errno = 0;
 			missing_count = 1;
 			setnow(&now);
@@ -2736,26 +3292,23 @@ static bool reload_from(tv_t *start)
 					break;
 				}
 				filename = rotating_filename(restorefrom, reload_timestamp.tv_sec);
-				fp = fopen(filename, "re");
-				if (fp)
+				ok = logopen(&filename, &fp, &apipe);
+				if (ok)
 					break;
 				errno = 0;
 				if (missing_count++ > 1)
 					free(missinglast);
 				missinglast = strdup(filename);
-				free(filename);
-				filename = NULL;
+				FREENULL(filename);
 			}
 			if (missing_count == 1)
 				LOGWARNING("%s(): skipped %s", __func__, missingfirst+rflen);
 			else {
 				LOGWARNING("%s(): skipped %d files from %s to %s",
 					   __func__, missing_count, missingfirst+rflen, missinglast+rflen);
-				free(missinglast);
-				missinglast = NULL;
+				FREENULL(missinglast);
 			}
-			free(missingfirst);
-			missingfirst = NULL;
+			FREENULL(missingfirst);
 		}
 	}
 
@@ -2783,10 +3336,7 @@ static bool reload_from(tv_t *start)
 	}
 
 	reloading = false;
-
-	free(reload_buf);
-	reload_buf = NULL;
-
+	FREENULL(reload_buf);
 	return ret;
 }
 
@@ -2818,7 +3368,7 @@ static void process_queued(PGconn *conn, K_ITEM *wq_item)
 	while (item) {
 		DATA_TRANSFER(transfer, item);
 		if (transfer->mvalue != transfer->svalue)
-			free(transfer->mvalue);
+			FREENULL(transfer->mvalue);
 		item = item->next;
 	}
 	K_WLOCK(transfer_free);
@@ -2841,6 +3391,7 @@ static void *listener(void *arg)
 	pthread_t log_pt;
 	pthread_t sock_pt;
 	pthread_t summ_pt;
+	pthread_t mark_pt;
 	K_ITEM *wq_item;
 	time_t now;
 	int wqcount, wqgot;
@@ -2854,6 +3405,8 @@ static void *listener(void *arg)
 	create_pthread(&sock_pt, socketer, arg);
 
 	create_pthread(&summ_pt, summariser, NULL);
+
+	create_pthread(&mark_pt, marker, NULL);
 
 	rename_proc("db_listener");
 
@@ -3150,7 +3703,7 @@ static void confirm_reload()
 	}
 	if (confirm_last_workinfoid == 0) {
 		LOGWARNING("%s(): there are no unconfirmed sharesummary records in the DB",
-			   __func__, buf);
+			   __func__);
 		return;
 	}
 
@@ -3220,7 +3773,7 @@ static void confirm_reload()
 				// last from default
 				if (confirm_last_workinfoid < confirm_first_workinfoid) {
 					LOGWARNING("%s(): no unconfirmed sharesummary records before start",
-						   __func__, buf);
+						   __func__);
 					return;
 				}
 				first_reason = "start range";
@@ -3744,7 +4297,8 @@ int main(int argc, char **argv)
 
 	trigger = start = time(NULL);
 	while (socketer_using_data || summariser_using_data ||
-		logger_using_data || listener_using_data) {
+		logger_using_data || listener_using_data ||
+		marker_using_data) {
 		msg = NULL;
 		curr = time(NULL);
 		if (curr - start > 4) {
@@ -3756,12 +4310,13 @@ int main(int argc, char **argv)
 		}
 		if (msg) {
 			trigger = curr;
-			printf("%s %ds due to%s%s%s%s\n",
+			printf("%s %ds due to%s%s%s%s%s\n",
 				msg, (int)(curr - start),
 				socketer_using_data ? " socketer" : EMPTY,
 				summariser_using_data ? " summariser" : EMPTY,
 				logger_using_data ? " logger" : EMPTY,
-				listener_using_data ? " listener" : EMPTY);
+				listener_using_data ? " listener" : EMPTY,
+				marker_using_data ? " marker" : EMPTY);
 			fflush(stdout);
 		}
 		sleep(1);

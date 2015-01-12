@@ -1203,9 +1203,13 @@ void align_len(size_t *len)
 		*len += 4 - (*len % 4);
 }
 
+/* Malloc failure should be fatal but keep backing off and retrying as the OS
+ * will kill us eventually if it can't recover. */
 void realloc_strcat(char **ptr, const char *s)
 {
 	size_t old, new, len;
+	int backoff = 1;
+	void *new_ptr;
 	char *ofs;
 
 	if (unlikely(!*s)) {
@@ -1223,9 +1227,16 @@ void realloc_strcat(char **ptr, const char *s)
 		old = strlen(*ptr);
 	len = old + new + 1;
 	align_len(&len);
-	*ptr = realloc(*ptr, len);
-	if (!*ptr)
-		quit(1, "Failed to realloc ptr of size %d in realloc_strcat", (int)len);
+	while (42) {
+		new_ptr = realloc(*ptr, len);
+		if (likely(new_ptr))
+			break;
+		if (backoff == 1)
+			fprintf(stderr, "Failed to realloc %d, retrying\n", (int)len);
+		cksleep_ms(backoff);
+		backoff <<= 1;
+	}
+	*ptr = new_ptr;
 	ofs = *ptr + old;
 	sprintf(ofs, "%s", s);
 }
@@ -1241,23 +1252,46 @@ void trail_slash(char **buf)
 
 void *_ckalloc(size_t len, const char *file, const char *func, const int line)
 {
+	int backoff = 1;
 	void *ptr;
 
 	align_len(&len);
-	ptr = malloc(len);
-	if (unlikely(!ptr))
-		quitfrom(1, file, func, line, "Failed to ckalloc!");
+	while (42) {
+		ptr = malloc(len);
+		if (likely(ptr))
+			break;
+		if (backoff == 1) {
+			fprintf(stderr, "Failed to ckalloc %d, retrying from %s %s:%d\n",
+				(int)len, file, func, line);
+		}
+		cksleep_ms(backoff);
+		backoff <<= 1;
+	}
 	return ptr;
+}
+
+void *json_ckalloc(size_t size)
+{
+	return _ckalloc(size, __FILE__, __func__, __LINE__);
 }
 
 void *_ckzalloc(size_t len, const char *file, const char *func, const int line)
 {
+	int backoff = 1;
 	void *ptr;
 
 	align_len(&len);
-	ptr = calloc(len, 1);
-	if (unlikely(!ptr))
-		quitfrom(1, file, func, line, "Failed to ckalloc!");
+	while (42) {
+		ptr = calloc(len, 1);
+		if (likely(ptr))
+			break;
+		if (backoff == 1) {
+			fprintf(stderr, "Failed to ckzalloc %d, retrying from %s %s:%d\n",
+				(int)len, file, func, line);
+		}
+		cksleep_ms(backoff);
+		backoff <<= 1;
+	}
 	return ptr;
 }
 

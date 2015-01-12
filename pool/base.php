@@ -238,7 +238,7 @@ function dbd($data, $user)
 #
 function dbdown()
 {
- gopage(NULL, 'dbd', 'dbd', def_menu(), '', '', true, false, false);
+ gopage(NULL, NULL, 'dbd', 'dbd', def_menu(), '', '', true, false, false);
 }
 #
 function syse($data, $user)
@@ -248,7 +248,7 @@ function syse($data, $user)
 #
 function syserror()
 {
- gopage(NULL, 'syse', 'syse', def_menu(), '', '', true, false, false);
+ gopage(NULL, NULL, 'syse', 'syse', def_menu(), '', '', true, false, false);
 }
 #
 function f404($data)
@@ -258,10 +258,10 @@ function f404($data)
 #
 function do404()
 {
- gopage(NULL, 'f404', 'f404', def_menu(), '', '', true, false, false);
+ gopage(NULL, NULL, 'f404', 'f404', def_menu(), '', '', true, false, false);
 }
 #
-function showPage($page, $menu, $name, $user)
+function showPage($info, $page, $menu, $name, $user)
 {
 # If you are doing development, use without '@'
 # Then switch to '@' when finished
@@ -270,14 +270,14 @@ function showPage($page, $menu, $name, $user)
 
  $fun = 'show_' . $page;
  if (function_exists($fun))
-	$fun($page, $menu, $name, $user);
+	$fun($info, $page, $menu, $name, $user);
  else
 	do404();
 }
 #
 function showIndex()
 {
- showPage('index', def_menu(), '', false);
+ showPage(NULL, 'index', def_menu(), '', false);
 }
 #
 function offline()
@@ -286,7 +286,7 @@ function offline()
  {
 	$ip = $_SERVER['REMOTE_ADDR'];
 	if ($ip != '192.168.1.666')
-		gopage(NULL, file_get_contents('./maintenance.txt'),
+		gopage(NULL, NULL, file_get_contents('./maintenance.txt'),
 			'offline', NULL, '', '', false, false, false);
  }
 }

@@ -88,6 +88,8 @@ function pghead($script_marker, $name)
 
  $head .= "<html><head><title>$page_title$name</title>";
  $head .= "<meta content='text/html; charset=iso-8859-1' http-equiv='Content-Type'>";
+ $head .= "<meta content='IE=edge' http-equiv='X-UA-Compatible'>";
+ $head .= "<meta content='width=device-width, initial-scale=1' name='viewport'>";
 
  $head .= "<script type='text/javascript'>\n";
  $head .= "function jst(){document.getElementById('jst').style.visibility='hidden';}\n";
@@ -95,11 +97,13 @@ function pghead($script_marker, $name)
 
  $head .= "<style type='text/css'>
 form {display: inline-block;}
-html, body {height: 100%; font-family:Arial, Verdana, sans-serif; font-size:12pt; background-color:#eff; text-align: center; background-repeat: no-repeat; background-position: center; }
+html, body {height: 100%; font-family:Arial, Verdana, sans-serif; font-size:12pt; background-color:#eeffff; text-align: center; background-repeat: no-repeat; background-position: center;}
 .page {min-height: 100%; height: auto !important; height: 100%; margin: 0 auto -50px; position: relative;}
 div.jst {color:red; font-weight: bold; font-size: 8; text-align: center; vertical-align: top;}
+div.accwarn {color:red; font-weight: bold; font-size: 8; text-align: center; vertical-align: top;}
 div.topd {background-color:#cff; border-color: #cff; border-style: solid; border-width: 9px;}
 .topdes {color:blue; text-align: right;}
+.topdesl {color:blue; text-align: left;}
 .topwho {color:black; font-weight: bold; margin-right: 8px;}
 .topdat {margin-left: 8px; margin-right: 24px; color:green; font-weight: bold;}
 span.login {float: right; margin-left: 8px; margin-right: 24px;}
@@ -123,6 +127,7 @@ h1 {margin-top: 20px; float:middle; font-size: 20px;}
 .title {background-color: #909090;}
 .even {background-color: #cccccc;}
 .odd {background-color: #a8a8a8;}
+.hid {display: none;}
 .dl {text-align: left; padding: 2px 8px;}
 .dr {text-align: right; padding: 2px 8px;}
 .dc {text-align: center; padding: 2px 8px;}
@@ -133,6 +138,8 @@ h1 {margin-top: 20px; float:middle; font-size: 20px;}
 .st1 {color:red; font-weight:bold; }
 .st2 {color:green; font-weight:bold; }
 .st3 {color:blue; font-weight:bold; }
+.fthi {color:red; font-size:7px; }
+.ftlo {color:green; font-size:7px; }
 .ft {color:blue; font-size:7px; }
 </style>\n";
 
@@ -271,6 +278,12 @@ function pgtop($info, $dotop, $user, $douser)
  $top = "<div class=jst id=jst>&nbsp;Javascript isn't enabled.";
  $top .= " You need to enable javascript to use";
  $top .= " the $site_title web site.</div>";
+
+ if (isset($info['u_nopayaddr']))
+	$top .= '<div class=accwarn>Please set a payout address on your account!</div>';
+ if (isset($info['u_noemail']))
+	$top .= '<div class=accwarn>Please set an email address on your account!</div>';
+
  $top .= '<div class=topd>';
  if ($dotop === true)
  {
@@ -284,9 +297,11 @@ function pgtop($info, $dotop, $user, $douser)
 	$top .= "<td class=topdat>&nbsp;$per</td></tr></table>";
 	$top .= '</td><td>';
 	$top .= '<table cellpadding=1 cellspacing=0 border=0 width=100%>';
-	$top .= '<tr><td class=topdes>Pool, Last Block:&nbsp;</td>';
+	$top .= '<tr><td class=topdes>Last&nbsp;</td>';
+	$top .= '<td class=topdesl>Block</td></tr>';
+	$top .= '<tr><td class=topdes>Pool:&nbsp;</td>';
 	$top .= "<td class=topdat>&nbsp;$plb</td></tr>";
-	$top .= '<tr><td class=topdes>Network, Last Block:&nbsp;</td>';
+	$top .= '<tr><td class=topdes>Network:&nbsp;</td>';
 	$top .= "<td class=topdat>&nbsp;$nlb</td></tr></table>";
 	$top .= '</td><td>';
 	$top .= '<table cellpadding=1 cellspacing=0 border=0 width=100%>';
@@ -324,11 +339,11 @@ function pgtop($info, $dotop, $user, $douser)
 				$extra = '&#133;';
 			}
 			$top .= "
-<span class=topwho>".htmlspecialchars($who)."$extra&nbsp;</span>
-<span class=topdes>Hash Rate:</span>
-<span class=topdat>$uhr$u1hr</span>";
+<span class=topwho>".htmlspecialchars($who)."$extra&nbsp;</span><br>
+<span class=topdes>Hash&nbsp;Rate:</span>
+<span class=topdat>$uhr$u1hr</span><br>";
 			$top .= makeForm('')."
-&nbsp;<input type=submit name=Logout value=Logout>
+<input type=submit name=Logout value=Logout>
 </form>";
 		}
 
@@ -410,14 +425,25 @@ function pgbody($info, $page, $menu, $dotop, $user, $douser)
  return $body;
 }
 #
-function pgfoot()
+function pgfoot($info)
 {
  $foot =      '</div></td></tr>';
  $foot .=    '</table>';
  $foot .=   '</center></td></tr>';
  $foot .=  '</table>';
  $foot .= '<div class=push></div></div>';
- $foot .= '<div class=foot><br>Copyright &copy; Kano 2014';
+ $foot .= '<div class=foot><br>';
+ if (is_array($info) && isset($info['sync']))
+ {
+  $sync = $info['sync'];
+  if ($sync > 5000)
+	$syc = 'hi';
+  else
+	$syc = 'lo';
+  $syncd = number_format($sync);
+  $foot .= "<span class=ft$syc>sync: $syncd</span> ";
+ }
+ $foot .= 'Copyright &copy; Kano 2014';
  $now = date('Y');
  if ($now != '2014')
 	$foot .= "-$now";
@@ -427,7 +453,7 @@ function pgfoot()
  return $foot;
 }
 #
-function gopage($data, $pagefun, $page, $menu, $name, $user, $ispage = true, $dotop = true, $douser = true)
+function gopage($info, $data, $pagefun, $page, $menu, $name, $user, $ispage = true, $dotop = true, $douser = true)
 {
  global $dbg, $stt;
  global $page_scripts;
@@ -440,7 +466,8 @@ function gopage($data, $pagefun, $page, $menu, $name, $user, $ispage = true, $do
  else
 	$pg = '';
 
- $info = homeInfo($user);
+ if ($info === NULL)
+	$info = homeInfo($user);
 
  if ($ispage == true)
  {
@@ -455,7 +482,7 @@ function gopage($data, $pagefun, $page, $menu, $name, $user, $ispage = true, $do
 
  $head = pghead($script_marker, $name);
  $body = pgbody($info, $page, $menu, $dotop, $user, $douser);
- $foot = pgfoot();
+ $foot = pgfoot($info);
 
  if ($dbg === true)
 	$pg = str_replace($dbg_marker, cvtdbg(), $pg);

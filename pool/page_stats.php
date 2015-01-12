@@ -99,9 +99,9 @@ function dostats($data, $user)
  return $pg;
 }
 #
-function show_stats($page, $menu, $name, $user)
+function show_stats($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'dostats', $page, $menu, $name, $user);
+ gopage($info, NULL, 'dostats', $page, $menu, $name, $user);
 }
 #
 ?>

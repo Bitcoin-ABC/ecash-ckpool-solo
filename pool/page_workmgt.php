@@ -86,9 +86,9 @@ function doworkmgt($data, $user)
  return $pg;
 }
 #
-function show_workmgt($page, $menu, $name, $user)
+function show_workmgt($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'doworkmgt', $page, $menu, $name, $user);
+ gopage($info, NULL, 'doworkmgt', $page, $menu, $name, $user);
 }
 #
 ?>

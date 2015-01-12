@@ -827,8 +827,14 @@ K_ITEM *useratts_add(PGconn *conn, char *username, char *attname,
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
-	if (!u_item)
+	if (!u_item) {
+		char *txt;
+		LOGERR("%s(): unknown user '%s'",
+			__func__,
+			txt = safe_text(username));
+		free(txt);
 		goto unitem;
+	}
 	DATA_USERS(users, u_item);
 
 	row->userid = users->userid;
@@ -1427,56 +1433,39 @@ bool workers_fill(PGconn *conn)
 	return ok;
 }
 
-/* Whatever the current paymentaddresses are, replace them with this one
- * Code allows for zero, one or more current payment address
- *  even though there currently can only be zero or one */
-K_ITEM *paymentaddresses_set(PGconn *conn, int64_t userid, char *payaddress,
-				char *by, char *code, char *inet, tv_t *cd,
-				K_TREE *trf_root)
+/* Whatever the current paymentaddresses are, replace them with the list
+ *  in pa_store
+ * Code allows for zero, one or more current payment address */
+bool paymentaddresses_set(PGconn *conn, int64_t userid, K_STORE *pa_store,
+			  char *by, char *code, char *inet, tv_t *cd,
+			  K_TREE *trf_root)
 {
 	ExecStatusType rescode;
 	bool conned = false;
 	PGresult *res;
 	K_TREE_CTX ctx[1];
-	K_ITEM *item, *old, *this, look;
-	PAYMENTADDRESSES *row, pa, *thispa;
-	char *upd, *ins;
-	bool ok = false;
-	char *params[4 + HISTORYDATECOUNT];
-	int n, par = 0;
+	K_ITEM *item, *match, *next, *prev;
+	PAYMENTADDRESSES *row, *pa;
+	char *upd = NULL, *ins;
+	size_t len, off;
+	bool ok = false, first, locked = false;
+	char *params[1002]; // Limit of 999 addresses per user
+	char tmp[1024];
+	int n, par = 0, count, matches;
 
 	LOGDEBUG("%s(): add", __func__);
 
-	K_WLOCK(paymentaddresses_free);
-	item = k_unlink_head(paymentaddresses_free);
-	K_WUNLOCK(paymentaddresses_free);
-
-	DATA_PAYMENTADDRESSES(row, item);
-
-	row->paymentaddressid = nextid(conn, "paymentaddressid", 1,
-					cd, by, code, inet);
-	if (row->paymentaddressid == 0)
-		goto unitem;
-
-	row->userid = userid;
-	STRNCPY(row->payaddress, payaddress);
-	row->payratio = 1000000;
-
-	HISTORYDATEINIT(row, cd, by, code, inet);
-	HISTORYDATETRANSFER(trf_root, row);
-
-	upd = "update paymentaddresses set expirydate=$1 where userid=$2 and expirydate=$3";
-	par = 0;
-	params[par++] = tv_to_buf(cd, NULL, 0);
-	params[par++] = bigint_to_buf(row->userid, NULL, 0);
-	params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
-	PARCHKVAL(par, 3, params);
+	// Quick early abort
+	if (pa_store->count > 999)
+		return false;
 
 	if (conn == NULL) {
 		conn = dbconnect();
 		conned = true;
 	}
 
+	/* This means the nextid updates will rollback on an error, but also
+	 *  means that it will lock the nextid record for the whole update */
 	res = PQexec(conn, "Begin", CKPQ_WRITE);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
@@ -1485,36 +1474,132 @@ K_ITEM *paymentaddresses_set(PGconn *conn, int64_t userid, char *payaddress,
 	}
 	PQclear(res);
 
-	res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-	rescode = PQresultStatus(res);
-	PQclear(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Update", rescode, conn);
-		goto rollback;
+	// First step - DB expire all the old/changed records in RAM
+	LOGDEBUG("%s(): Step 1 userid=%"PRId64, __func__, userid);
+	count = matches = 0;
+	APPEND_REALLOC_INIT(upd, off, len);
+	APPEND_REALLOC(upd, off, len,
+			"update paymentaddresses set expirydate=$1 where "
+			"userid=$2 and expirydate=$3 and payaddress in (");
+	par = 0;
+	params[par++] = tv_to_buf(cd, NULL, 0);
+	params[par++] = bigint_to_buf(userid, NULL, 0);
+	params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+
+	/* Since we are merging the changes in rather than just
+	 *  replacing the db contents, lock the data for the duration
+	 *  of the update to ensure nothing else changes it */
+	K_WLOCK(paymentaddresses_free);
+	locked = true;
+
+	first = true;
+	item = find_paymentaddresses(userid, ctx);
+	DATA_PAYMENTADDRESSES_NULL(row, item);
+	while (item && CURRENT(&(row->expirydate)) && row->userid == userid) {
+		/* This is only possible if the DB was directly updated with
+		 * more than 999 records then reloaded (or a code bug) */
+		if (++count > 999)
+			break;
+
+		// Find the RAM record in pa_store
+		match = pa_store->head;
+		while (match) {
+			DATA_PAYMENTADDRESSES(pa, match);
+			if (strcmp(pa->payaddress, row->payaddress) == 0 &&
+			    pa->payratio == row->payratio) {
+				pa->match = true; // Don't store it
+				matches++;
+				break;
+			}
+			match = match->next;
+		}
+		if (!match) {
+			// No matching replacement, so expire 'row'
+			params[par++] = str_to_buf(row->payaddress, NULL, 0);
+			if (!first)
+				APPEND_REALLOC(upd, off, len, ",");
+			first = false;
+			snprintf(tmp, sizeof(tmp), "$%d", par);
+			APPEND_REALLOC(upd, off, len, tmp);
+		}
+		item = prev_in_ktree(ctx);
+		DATA_PAYMENTADDRESSES_NULL(row, item);
+	}
+	LOGDEBUG("%s(): Step 1 par=%d count=%d matches=%d first=%s", __func__,
+		 par, count, matches, first ? "true" : "false");
+	// Too many, or none need expiring = don't do the update
+	if (count > 999 || first == true) {
+		for (n = 0; n < par; n++)
+			free(params[n]);
+		par = 0;
+		// Too many
+		if (count > 999)
+			goto rollback;
+	} else {
+		APPEND_REALLOC(upd, off, len, ")");
+		PARCHKVAL(par, par, params);
+		res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Update", rescode, conn);
+			goto rollback;
+		}
+
+		LOGDEBUG("%s(): Step 1 expired %d", __func__, par-3);
+
+		for (n = 0; n < par; n++)
+			free(params[n]);
+		par = 0;
 	}
 
-	for (n = 0; n < par; n++)
-		free(params[n]);
-
+	// Second step - add the non-matching records to the DB
+	LOGDEBUG("%s(): Step 2", __func__);
 	ins = "insert into paymentaddresses "
 		"(paymentaddressid,userid,payaddress,payratio"
 		HISTORYDATECONTROL ") values (" PQPARAM9 ")";
 
-	par = 0;
-	params[par++] = bigint_to_buf(row->paymentaddressid, NULL, 0);
-	params[par++] = bigint_to_buf(row->userid, NULL, 0);
-	params[par++] = str_to_buf(row->payaddress, NULL, 0);
-	params[par++] = int_to_buf(row->payratio, NULL, 0);
-	HISTORYDATEPARAMS(params, par, row);
-	PARCHK(par, params);
+	count = 0;
+	match = pa_store->head;
+	while (match) {
+		DATA_PAYMENTADDRESSES(row, match);
+		if (!row->match) {
+			row->paymentaddressid = nextid(conn, "paymentaddressid", 1,
+							cd, by, code, inet);
+			if (row->paymentaddressid == 0)
+				goto rollback;
 
-	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-	rescode = PQresultStatus(res);
-	PQclear(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Insert", rescode, conn);
-		goto rollback;
+			row->userid = userid;
+
+			HISTORYDATEINIT(row, cd, by, code, inet);
+			HISTORYDATETRANSFER(trf_root, row);
+
+			par = 0;
+			params[par++] = bigint_to_buf(row->paymentaddressid, NULL, 0);
+			params[par++] = bigint_to_buf(row->userid, NULL, 0);
+			params[par++] = str_to_buf(row->payaddress, NULL, 0);
+			params[par++] = int_to_buf(row->payratio, NULL, 0);
+			HISTORYDATEPARAMS(params, par, row);
+			PARCHKVAL(par, 9, params); // As per PQPARAM9 above
+
+			res = PQexecParams(conn, ins, par, NULL, (const char **)params,
+					   NULL, NULL, 0, CKPQ_WRITE);
+			rescode = PQresultStatus(res);
+			PQclear(res);
+			if (!PGOK(rescode)) {
+				PGLOGERR("Insert", rescode, conn);
+				goto rollback;
+			}
+
+			for (n = 0; n < par; n++)
+				free(params[n]);
+			par = 0;
+
+			count++;
+		}
+		match = match->next;
 	}
+	LOGDEBUG("%s(): Step 2 inserted %d", __func__, count);
 
 	ok = true;
 rollback:
@@ -1529,46 +1614,63 @@ unparam:
 		PQfinish(conn);
 	for (n = 0; n < par; n++)
 		free(params[n]);
-unitem:
-	K_WLOCK(paymentaddresses_free);
-	if (!ok)
-		k_add_head(paymentaddresses_free, item);
-	else {
-		// Change the expiry on all the old ones
-		pa.userid = userid;
-		pa.expirydate.tv_sec = DATE_S_EOT;
-		pa.payaddress[0] = '\0';
-		INIT_PAYMENTADDRESSES(&look);
-		look.data = (void *)(&pa);
-		// Tree order is expirydate desc
-		old = find_after_in_ktree(paymentaddresses_root, &look,
-					  cmp_paymentaddresses, ctx);
-		while (old) {
-			this = old;
-			DATA_PAYMENTADDRESSES(thispa, this);
-			if (thispa->userid != userid)
-				break;
-			old = next_in_ktree(ctx);
-			/* Tree remove+add below doesn't matter since
-			 * this test will avoid reprocessing */
-			if (CURRENT(&(thispa->expirydate))) {
-				paymentaddresses_root = remove_from_ktree(paymentaddresses_root, this,
+	FREENULL(upd);
+	// Third step - do step 1 and 2 to the RAM version of the DB
+	LOGDEBUG("%s(): Step 3, ok=%s", __func__, ok ? "true" : "false");
+	matches = count = n = 0;
+	if (ok) {
+		// Change the expiry on all records that we expired in the DB
+		item = find_paymentaddresses(userid, ctx);
+		DATA_PAYMENTADDRESSES_NULL(row, item);
+		while (item && CURRENT(&(row->expirydate)) && row->userid == userid) {
+			prev = prev_in_ktree(ctx);
+			// Find the RAM record in pa_store
+			match = pa_store->head;
+			while (match) {
+				DATA_PAYMENTADDRESSES(pa, match);
+				if (strcmp(pa->payaddress, row->payaddress) == 0 &&
+				    pa->payratio == row->payratio) {
+					break;
+				}
+				match = match->next;
+			}
+			if (match)
+				matches++;
+			else {
+				// It wasn't a match, thus it was expired
+				n++;
+				paymentaddresses_root = remove_from_ktree(paymentaddresses_root, item,
 									  cmp_paymentaddresses);
-				copy_tv(&(thispa->expirydate), cd);
-				paymentaddresses_root = add_to_ktree(paymentaddresses_root, this,
+				copy_tv(&(row->expirydate), cd);
+				paymentaddresses_root = add_to_ktree(paymentaddresses_root, item,
 								     cmp_paymentaddresses);
 			}
+			item = prev;
+			DATA_PAYMENTADDRESSES_NULL(row, item);
 		}
-		paymentaddresses_root = add_to_ktree(paymentaddresses_root, item,
-						     cmp_paymentaddresses);
-		k_add_head(paymentaddresses_store, item);
-	}
-	K_WUNLOCK(paymentaddresses_free);
 
-	if (ok)
-		return item;
-	else
-		return NULL;
+		// Add in all the non-matching ps_store
+		match = pa_store->head;
+		while (match) {
+			next = match->next;
+			DATA_PAYMENTADDRESSES(pa, match);
+			if (!pa->match) {
+				paymentaddresses_root = add_to_ktree(paymentaddresses_root, match,
+								     cmp_paymentaddresses);
+				k_unlink_item(pa_store, match);
+				k_add_head(paymentaddresses_store, match);
+				count++;
+			}
+			match = next;
+		}
+	}
+	if (locked)
+		K_WUNLOCK(paymentaddresses_free);
+
+	LOGDEBUG("%s(): Step 3, untouched %d expired %d added %d", __func__, matches, n, count);
+
+	// Calling function must clean up anything left in pa_store
+	return ok;
 }
 
 bool paymentaddresses_fill(PGconn *conn)
@@ -1841,7 +1943,7 @@ K_ITEM *optioncontrol_item_add(PGconn *conn, K_ITEM *oc_item, tv_t *cd, bool beg
 	K_TREE_CTX ctx[1];
 	PGresult *res;
 	K_ITEM *old_item, look;
-	OPTIONCONTROL *row;
+	OPTIONCONTROL *row, *optioncontrol;
 	char *upd, *ins;
 	bool ok = false;
 	char *params[4 + HISTORYDATECOUNT];
@@ -1935,13 +2037,17 @@ nostart:
 		free(params[n]);
 
 	K_WLOCK(optioncontrol_free);
-	if (!ok)
+	if (!ok) {
+		// Cleanup item passed in
+		FREENULL(row->optionvalue);
 		k_add_head(optioncontrol_free, oc_item);
-	else {
-		// Discard it
+	} else {
+		// Discard old
 		if (old_item) {
+			DATA_OPTIONCONTROL(optioncontrol, old_item);
 			optioncontrol_root = remove_from_ktree(optioncontrol_root, old_item,
 							       cmp_optioncontrol);
+			FREENULL(optioncontrol->optionvalue);
 			k_add_head(optioncontrol_free, old_item);
 		}
 		optioncontrol_root = add_to_ktree(optioncontrol_root, oc_item, cmp_optioncontrol);
@@ -1962,7 +2068,6 @@ K_ITEM *optioncontrol_add(PGconn *conn, char *optionname, char *optionvalue,
 {
 	K_ITEM *item;
 	OPTIONCONTROL *row;
-	bool ok = false;
 
 	LOGDEBUG("%s(): add", __func__);
 
@@ -1990,19 +2095,7 @@ K_ITEM *optioncontrol_add(PGconn *conn, char *optionname, char *optionvalue,
 	HISTORYDATEINIT(row, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, row);
 
-	ok = optioncontrol_item_add(conn, item, cd, begun);
-
-	if (!ok) {
-		free(row->optionvalue);
-		K_WLOCK(optioncontrol_free);
-		k_add_head(optioncontrol_free, item);
-		K_WUNLOCK(optioncontrol_free);
-	}
-
-	if (ok)
-		return item;
-	else
-		return NULL;
+	return optioncontrol_item_add(conn, item, cd, begun);
 }
 
 bool optioncontrol_fill(PGconn *conn)
@@ -2084,8 +2177,10 @@ bool optioncontrol_fill(PGconn *conn)
 		optioncontrol_root = add_to_ktree(optioncontrol_root, item, cmp_optioncontrol);
 		k_add_head(optioncontrol_store, item);
 	}
-	if (!ok)
+	if (!ok) {
+		FREENULL(row->optionvalue);
 		k_add_head(optioncontrol_free, item);
+	}
 
 	K_WUNLOCK(optioncontrol_free);
 	PQclear(res);
@@ -2148,10 +2243,8 @@ int64_t workinfo_add(PGconn *conn, char *workinfoidstr, char *poolinstance,
 
 	K_WLOCK(workinfo_free);
 	if (find_in_ktree(workinfo_root, item, cmp_workinfo, ctx)) {
-		free(row->transactiontree);
-		row->transactiontree = NULL;
-		free(row->merklehash);
-		row->merklehash = NULL;
+		FREENULL(row->transactiontree);
+		FREENULL(row->merklehash);
 		workinfoid = row->workinfoid;
 		k_add_head(workinfo_free, item);
 		K_WUNLOCK(workinfo_free);
@@ -2213,10 +2306,8 @@ unparam:
 
 	K_WLOCK(workinfo_free);
 	if (workinfoid == -1) {
-		free(row->transactiontree);
-		row->transactiontree = NULL;
-		free(row->merklehash);
-		row->merklehash = NULL;
+		FREENULL(row->transactiontree);
+		FREENULL(row->merklehash);
 		k_add_head(workinfo_free, item);
 	} else {
 		if (row->transactiontree && *(row->transactiontree)) {
@@ -2255,7 +2346,8 @@ bool workinfo_fill(PGconn *conn)
 	char *params[3];
 	int n, i, par = 0;
 	char *field;
-	char *sel;
+	char *sel = NULL;
+	size_t len, off;
 	int fields = 10;
 	bool ok;
 
@@ -2264,14 +2356,31 @@ bool workinfo_fill(PGconn *conn)
 	// TODO: select the data based on sharesummary since old data isn't needed
 	//  however, the ageing rules for workinfo will decide that also
 	//  keep the last block + current? Rules will depend on payout scheme also
-	sel = "select "
-//		"workinfoid,poolinstance,transactiontree,merklehash,prevhash,"
-		"workinfoid,poolinstance,merklehash,prevhash,"
-		"coinbase1,coinbase2,version,bits,ntime,reward"
-		HISTORYDATECONTROL
-		" from workinfo where expirydate=$1 and"
-		" ((workinfoid>=$2 and workinfoid<=$3) or"
-		"  workinfoid in (select workinfoid from blocks) )";
+
+	APPEND_REALLOC_INIT(sel, off, len);
+	APPEND_REALLOC(sel, off, len,
+			"select "
+//			"workinfoid,poolinstance,transactiontree,merklehash,prevhash,"
+			"workinfoid,poolinstance,merklehash,prevhash,"
+			"coinbase1,coinbase2,version,bits,ntime,reward"
+			HISTORYDATECONTROL
+			" from workinfo where expirydate=$1 and"
+			" ((workinfoid>=$2 and workinfoid<=$3)");
+
+	// If we aren't loading the full range, ensure the necessary ones are loaded
+	if ((!dbload_only_sharesummary && dbload_workinfoid_start != -1) ||
+	    dbload_workinfoid_finish != MAXID) {
+		APPEND_REALLOC(sel, off, len,
+				// we need all blocks workinfoids
+				" or workinfoid in (select workinfoid from blocks)"
+				// we need all marks workinfoids
+				" or workinfoid in (select workinfoid from marks)"
+				// we need all workmarkers workinfoids (start and end)
+				" or workinfoid in (select workinfoidstart from workmarkers)"
+				" or workinfoid in (select workinfoidend from workmarkers)");
+	}
+	APPEND_REALLOC(sel, off, len, ")");
+
 	par = 0;
 	params[par++] = tv_to_buf((tv_t *)(&default_expiry), NULL, 0);
 	if (dbload_only_sharesummary)
@@ -2421,10 +2530,12 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
 	if (!u_item) {
+		char *txt;
 		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 		LOGERR("%s() %s/%ld,%ld %.19s no user! Share discarded!",
-			__func__, username,
+			__func__, txt = safe_text(username),
 			cd->tv_sec, cd->tv_usec, cd_buf);
+		free(txt);
 		goto unitem;
 	}
 	DATA_USERS(users, u_item);
@@ -2457,7 +2568,7 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 	HISTORYDATEINIT(shares, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, shares);
 
-	wi_item = find_workinfo(shares->workinfoid);
+	wi_item = find_workinfo(shares->workinfoid, NULL);
 	if (!wi_item) {
 		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 		// TODO: store it for a few workinfoid changes
@@ -2544,10 +2655,12 @@ bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
 	if (!u_item) {
+		char *txt;
 		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 		LOGERR("%s() %s/%ld,%ld %.19s no user! Shareerror discarded!",
-			__func__, username,
+			__func__, txt = safe_text(username),
 			cd->tv_sec, cd->tv_usec, cd_buf);
+		free(txt);
 		goto unitem;
 	}
 	DATA_USERS(users, u_item);
@@ -2576,7 +2689,7 @@ bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 	HISTORYDATEINIT(shareerrors, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, shareerrors);
 
-	wi_item = find_workinfo(shareerrors->workinfoid);
+	wi_item = find_workinfo(shareerrors->workinfoid, NULL);
 	if (!wi_item) {
 		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 		LOGERR("%s() %"PRId64"/%s/%ld,%ld %.19s no workinfo! Shareerror discarded!",
@@ -2971,9 +3084,11 @@ bool sharesummary_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
 	PGresult *res;
-	K_ITEM *item;
+	K_TREE_CTX ctx[1];
+	K_ITEM *item, *m_item;
 	int n, i, par = 0;
 	SHARESUMMARY *row;
+	MARKS *marks;
 	char *params[2];
 	char *field;
 	char *sel;
@@ -2981,6 +3096,32 @@ bool sharesummary_fill(PGconn *conn)
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
+
+	/* Load needs to go back to the last marks workinfoid(+1)
+	 * If it is later than that, we can't create markersummaries
+	 *  since some of the required data is missing -
+	 *  thus we also can't make the shift markersummaries */
+	m_item = last_in_ktree(marks_root, ctx);
+	if (!m_item) {
+		if (dbload_workinfoid_start != -1) {
+			sharesummary_marks_limit = true;
+			LOGWARNING("WARNING: dbload -w start used "
+				   "but there are no marks ...");
+		}
+	} else {
+		DATA_MARKS(marks, m_item);
+		if (dbload_workinfoid_start > marks->workinfoid) {
+			sharesummary_marks_limit = true;
+			LOGWARNING("WARNING: dbload -w start %"PRId64
+				   " is after the last mark %"PRId64" ...",
+				   dbload_workinfoid_start,
+				   marks->workinfoid);
+		}
+	}
+	if (sharesummary_marks_limit) {
+		LOGWARNING("WARNING: ... markersummaries cannot be created "
+			   "and pplns calculations may be wrong");
+	}
 
 	// TODO: limit how far back
 	sel = "select "
@@ -3165,8 +3306,7 @@ bool sharesummary_fill(PGconn *conn)
 		DATA_SHARESUMMARY(row, item);
 		if (row->workername) {
 			LIST_MEM_SUB(sharesummary_free, row->workername);
-			free(row->workername);
-			row->workername = NULL;
+			FREENULL(row->workername);
 		}
 		k_add_head(sharesummary_free, item);
 	}
@@ -3639,7 +3779,7 @@ flail:
 				break;
 			case BLOCKS_CONFIRM:
 				blk = true;
-				w_item = find_workinfo(row->workinfoid);
+				w_item = find_workinfo(row->workinfoid, NULL);
 				if (w_item) {
 					char wdiffbin[TXT_SML+1];
 					double wdiff;
@@ -3881,8 +4021,14 @@ bool miningpayouts_add(PGconn *conn, char *username, char *height,
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
-	if (!u_item)
+	if (!u_item) {
+		char *txt;
+		LOGERR("%s(): unknown user '%s'",
+			__func__,
+			txt = safe_text(username));
+		free(txt);
 		goto unitem;
+	}
 	DATA_USERS(users, u_item);
 
 	row->userid = users->userid;
@@ -4070,6 +4216,12 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 			}
 			u_item = users_add(conn, username, EMPTY, EMPTY,
 					   by, code, inet, cd, trf_root);
+		} else {
+			char *txt;
+			LOGDEBUG("%s(): unknown user '%s'",
+				 __func__,
+				 txt = safe_text(username));
+			free(txt);
 		}
 		if (!u_item)
 			goto unitem;
@@ -4181,24 +4333,45 @@ bool auths_fill(PGconn *conn)
 	PGresult *res;
 	K_ITEM *item;
 	AUTHS *row;
-	char *params[1];
-	int n, i, par = 0;
+//	char *params[1];
+	int n, i;
+//	int par = 0;
 	char *field;
 	char *sel;
-	int fields = 7;
+	int fields = 7 + 1; // +1 = 'best'
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
 
 	// TODO: add/update a (single) fake auth every ~10min or 10min after the last one?
+#if 0
 	sel = "select "
 		"authid,userid,workername,clientid,enonce1,useragent,preauth"
 		HISTORYDATECONTROL
 		" from auths where expirydate=$1";
+
 	par = 0;
 	params[par++] = tv_to_buf((tv_t *)(&default_expiry), NULL, 0);
 	PARCHK(par, params);
 	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
+	rescode = PQresultStatus(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Select", rescode, conn);
+		PQclear(res);
+		return false;
+	}
+#endif
+
+	// Only load the last record for each workername
+	sel = "with last as ("
+		  "select authid,userid,workername,clientid,enonce1,useragent,preauth"
+		  HISTORYDATECONTROL
+		  ",row_number() over(partition by userid,workername "
+					"order by expirydate desc, createdate desc)"
+		  " as best from auths"
+		") select * from last where best=1";
+
+	res = PQexec(conn, sel, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
 		PGLOGERR("Select", rescode, conn);
@@ -4398,25 +4571,66 @@ bool poolstats_fill(PGconn *conn)
 	PGresult *res;
 	K_ITEM *item;
 	int n, i;
+	struct tm tm;
+	time_t now_t;
+	char tzinfo[16], stamp[128];
 	POOLSTATS *row;
 	char *field;
-	char *sel;
+	char *sel = NULL;
+	size_t len, off;
 	int fields = 8;
+	long minoff, hroff;
+	char tzch;
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
 
-	sel = "select "
-		"poolinstance,elapsed,users,workers,hashrate,hashrate5m,"
-		"hashrate1hr,hashrate24hr"
-		SIMPLEDATECONTROL
-		" from poolstats";
+	// Temoprarily ... load last 24hrs worth
+	now_t = time(NULL);
+	now_t -= 24 * 60 * 60;
+	localtime_r(&now_t, &tm);
+	minoff = tm.tm_gmtoff / 60;
+	if (minoff < 0) {
+		tzch = '-';
+		minoff *= -1;
+	} else
+		tzch = '+';
+	hroff = minoff / 60;
+	if (minoff % 60) {
+		snprintf(tzinfo, sizeof(tzinfo),
+			 "%c%02ld:%02ld",
+			 tzch, hroff, minoff % 60);
+	} else {
+		snprintf(tzinfo, sizeof(tzinfo),
+			 "%c%02ld",
+			 tzch, hroff);
+	}
+	snprintf(stamp, sizeof(stamp),
+			"'%d-%02d-%02d %02d:%02d:%02d%s'",
+			tm.tm_year + 1900,
+			tm.tm_mon + 1,
+			tm.tm_mday,
+			tm.tm_hour,
+			tm.tm_min,
+			tm.tm_sec,
+			tzinfo);
+
+	APPEND_REALLOC_INIT(sel, off, len);
+	APPEND_REALLOC(sel, off, len,
+			"select "
+			"poolinstance,elapsed,users,workers,hashrate,"
+			"hashrate5m,hashrate1hr,hashrate24hr"
+			SIMPLEDATECONTROL
+			" from poolstats where createdate>");
+	APPEND_REALLOC(sel, off, len, stamp);
+
 	res = PQexec(conn, sel, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
 		PGLOGERR("Select", rescode, conn);
 		PQclear(res);
-		return false;
+		ok = false;
+		goto clean;
 	}
 
 	n = PQnfields(res);
@@ -4424,7 +4638,8 @@ bool poolstats_fill(PGconn *conn)
 		LOGERR("%s(): Invalid field count - should be %d, but is %d",
 			__func__, fields + SIMPLEDATECOUNT, n);
 		PQclear(res);
-		return false;
+		ok = false;
+		goto clean;
 	}
 
 	n = PQntuples(res);
@@ -4504,7 +4719,8 @@ bool poolstats_fill(PGconn *conn)
 		LOGDEBUG("%s(): built", __func__);
 		LOGWARNING("%s(): loaded %d poolstats records", __func__, n);
 	}
-
+clean:
+	free(sel);
 	return ok;
 }
 
@@ -4588,8 +4804,14 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
-	if (!u_item)
+	if (!u_item) {
+		char *txt;
+		LOGERR("%s(): unknown user '%s'",
+			__func__,
+			txt = safe_text(username));
+		free(txt);
 		return false;
+	}
 	DATA_USERS(users, u_item);
 	row->userid = users->userid;
 	TXT_TO_STR("workername", workername, row->workername);
@@ -4604,6 +4826,7 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 	SIMPLEDATEINIT(row, cd, by, code, inet);
 	SIMPLEDATETRANSFER(trf_root, row);
 	copy_tv(&(row->statsdate), &(row->createdate));
+	row->six = true;
 
 	if (eos) {
 		// Save it for end processing
@@ -4706,6 +4929,95 @@ advancetogo:
 	return true;
 }
 
+// This is to RAM. The summariser calls the DB I/O functions for userstats
+bool workerstats_add(char *poolinstance, char *elapsed, char *username,
+			char *workername, char *hashrate, char *hashrate5m,
+			char *hashrate1hr, char *hashrate24hr, bool idle,
+			char *by, char *code, char *inet, tv_t *cd,
+			K_TREE *trf_root)
+{
+	K_ITEM *us_item, *u_item, *us_match, look;
+	USERSTATS *row, cmp, *match;
+	USERS *users;
+	K_TREE_CTX ctx[1];
+
+	LOGDEBUG("%s(): add", __func__);
+
+	K_WLOCK(userstats_free);
+	us_item = k_unlink_head(userstats_free);
+	K_WUNLOCK(userstats_free);
+
+	DATA_USERSTATS(row, us_item);
+
+	STRNCPY(row->poolinstance, poolinstance);
+	TXT_TO_BIGINT("elapsed", elapsed, row->elapsed);
+	K_RLOCK(users_free);
+	u_item = find_users(username);
+	K_RUNLOCK(users_free);
+	if (!u_item) {
+		char *txt;
+		LOGERR("%s(): unknown user '%s'",
+			__func__,
+			txt = safe_text(username));
+		free(txt);
+		return false;
+	}
+	DATA_USERS(users, u_item);
+	row->userid = users->userid;
+	TXT_TO_STR("workername", workername, row->workername);
+	TXT_TO_DOUBLE("hashrate", hashrate, row->hashrate);
+	TXT_TO_DOUBLE("hashrate5m", hashrate5m, row->hashrate5m);
+	TXT_TO_DOUBLE("hashrate1hr", hashrate1hr, row->hashrate1hr);
+	TXT_TO_DOUBLE("hashrate24hr", hashrate24hr, row->hashrate24hr);
+	row->idle = idle;
+	row->summarylevel[0] = SUMMARY_NONE;
+	row->summarylevel[1] = '\0';
+	row->summarycount = 1;
+	SIMPLEDATEINIT(row, cd, by, code, inet);
+	SIMPLEDATETRANSFER(trf_root, row);
+	copy_tv(&(row->statsdate), &(row->createdate));
+	row->six = false;
+
+	// confirm_summaries() doesn't call this
+	if (reloading) {
+		memcpy(&cmp, row, sizeof(cmp));
+		INIT_USERSTATS(&look);
+		look.data = (void *)(&cmp);
+		// Just zero it to ensure the DB record is after it, not equal to it
+		cmp.statsdate.tv_usec = 0;
+		/* If there is a matching user+worker DB record summarising this row,
+		 * or a matching user+worker DB record next after this row, discard it */
+		us_match = find_after_in_ktree(userstats_workerstatus_root, &look,
+						cmp_userstats_workerstatus, ctx);
+		DATA_USERSTATS_NULL(match, us_match);
+		if (us_match &&
+		    match->userid == row->userid &&
+		    strcmp(match->workername, row->workername) == 0 &&
+		    match->summarylevel[0] != SUMMARY_NONE) {
+			K_WLOCK(userstats_free);
+			k_add_head(userstats_free, us_item);
+			K_WUNLOCK(userstats_free);
+			return true;
+		}
+	}
+
+	workerstatus_update(NULL, NULL, row);
+
+	K_WLOCK(userstats_free);
+	userstats_root = add_to_ktree(userstats_root, us_item, cmp_userstats);
+	userstats_statsdate_root = add_to_ktree(userstats_statsdate_root, us_item,
+						cmp_userstats_statsdate);
+	if (!startup_complete) {
+		userstats_workerstatus_root = add_to_ktree(userstats_workerstatus_root,
+							   us_item,
+							   cmp_userstats_workerstatus);
+	}
+	k_add_head(userstats_store, us_item);
+	K_WUNLOCK(userstats_free);
+
+	return true;
+}
+
 // TODO: data selection - only require ?
 bool userstats_fill(PGconn *conn)
 {
@@ -4713,26 +5025,68 @@ bool userstats_fill(PGconn *conn)
 	PGresult *res;
 	K_ITEM *item;
 	int n, i;
+	struct tm tm;
+	time_t now_t;
+	char tzinfo[16], stamp[128];
 	USERSTATS *row;
 	tv_t statsdate;
 	char *field;
-	char *sel;
+	char *sel = NULL;
+	size_t len, off;
 	int fields = 10;
+	long minoff, hroff;
+	char tzch;
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
 
-	sel = "select "
-		"userid,workername,elapsed,hashrate,hashrate5m,hashrate1hr,"
-		"hashrate24hr,summarylevel,summarycount,statsdate"
-		SIMPLEDATECONTROL
-		" from userstats";
+	// Temoprarily ... load last 24hrs worth
+	now_t = time(NULL);
+	now_t -= 24 * 60 * 60;
+	localtime_r(&now_t, &tm);
+	minoff = tm.tm_gmtoff / 60;
+	if (minoff < 0) {
+		tzch = '-';
+		minoff *= -1;
+	} else
+		tzch = '+';
+	hroff = minoff / 60;
+	if (minoff % 60) {
+		snprintf(tzinfo, sizeof(tzinfo),
+			 "%c%02ld:%02ld",
+			 tzch, hroff, minoff % 60);
+	} else {
+		snprintf(tzinfo, sizeof(tzinfo),
+			 "%c%02ld",
+			 tzch, hroff);
+	}
+	snprintf(stamp, sizeof(stamp),
+			"'%d-%02d-%02d %02d:%02d:%02d%s'",
+			tm.tm_year + 1900,
+			tm.tm_mon + 1,
+			tm.tm_mday,
+			tm.tm_hour,
+			tm.tm_min,
+			tm.tm_sec,
+			tzinfo);
+
+	APPEND_REALLOC_INIT(sel, off, len);
+	APPEND_REALLOC(sel, off, len,
+			"select "
+			"userid,workername,elapsed,hashrate,hashrate5m,"
+			"hashrate1hr,hashrate24hr,summarylevel,summarycount,"
+			"statsdate"
+			SIMPLEDATECONTROL
+			" from userstats where statsdate>");
+	APPEND_REALLOC(sel, off, len, stamp);
+
 	res = PQexec(conn, sel, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
 		PGLOGERR("Select", rescode, conn);
 		PQclear(res);
-		return false;
+		ok = false;
+		goto clean;
 	}
 
 	n = PQnfields(res);
@@ -4740,7 +5094,8 @@ bool userstats_fill(PGconn *conn)
 		LOGERR("%s(): Invalid field count - should be %d, but is %d",
 			__func__, fields + SIMPLEDATECOUNT, n);
 		PQclear(res);
-		return false;
+		ok = false;
+		goto clean;
 	}
 
 	n = PQntuples(res);
@@ -4844,7 +5199,8 @@ bool userstats_fill(PGconn *conn)
 		LOGDEBUG("%s(): built", __func__);
 		LOGWARNING("%s(): loaded %d userstats records", __func__, n);
 	}
-
+clean:
+	free(sel);
 	return ok;
 }
 
@@ -5100,10 +5456,10 @@ bool _workmarkers_process(PGconn *conn, bool add, int64_t markerid,
 				 WHERE_FFL_PASS);
 			goto rollback;
 		}
-		w_item = find_workinfo(workinfoidend);
+		w_item = find_workinfo(workinfoidend, NULL);
 		if (!w_item)
 			goto rollback;
-		w_item = find_workinfo(workinfoidstart);
+		w_item = find_workinfo(workinfoidstart, NULL);
 		if (!w_item)
 			goto rollback;
 		K_WLOCK(workmarkers_free);
@@ -5412,7 +5768,7 @@ bool _marks_process(PGconn *conn, bool add, char *poolinstance,
 				 WHERE_FFL_PASS);
 			goto rollback;
 		}
-		w_item = find_workinfo(workinfoid);
+		w_item = find_workinfo(workinfoid, NULL);
 		if (!w_item)
 			goto rollback;
 		K_WLOCK(marks_free);

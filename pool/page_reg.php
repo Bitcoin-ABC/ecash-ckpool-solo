@@ -79,7 +79,7 @@ function doreg2($data)
  return $pg;
 }
 #
-function try_reg($page, $menu, $name, $u)
+function try_reg($info, $page, $menu, $name, $u)
 {
  $user = getparam('user', false);
  $mail = trim(getparam('mail', false));
@@ -128,12 +128,12 @@ function try_reg($page, $menu, $name, $u)
  {
 	$ans = userReg($user, $mail, $pass);
 	if ($ans['STATUS'] == 'ok')
-		gopage($data, 'doreg2', $page, $menu, $name, $u, true, true, false);
+		gopage($info, $data, 'doreg2', $page, $menu, $name, $u, true, true, false);
 	else
 		$data['error'] = "Invalid username, password or email address";
  }
 
- gopage($data, 'doregres', $page, $menu, $name, $u, true, true, false);
+ gopage($info, $data, 'doregres', $page, $menu, $name, $u, true, true, false);
 }
 #
 function doreset2($data)
@@ -179,7 +179,7 @@ function doreset2($data)
  return $pg;
 }
 #
-function try_reset($page, $menu, $name, $u)
+function try_reset($info, $page, $menu, $name, $u)
 {
  $user = getparam('user', false);
  $mail = trim(getparam('mail', false));
@@ -199,20 +199,20 @@ function try_reset($page, $menu, $name, $u)
 	{
 		$data = array('user' => $user, 'email' => $mail);
 
-		gopage($data, 'doreset2', $page, $menu, $name, $u, true, true, false);
+		gopage($info, $data, 'doreset2', $page, $menu, $name, $u, true, true, false);
 	}
  }
 
- gopage($data, 'doregres', $page, $menu, $name, $u, true, true, false);
+ gopage($info, $data, 'doregres', $page, $menu, $name, $u, true, true, false);
 }
 #
-function show_reg($page, $menu, $name, $u)
+function show_reg($info, $page, $menu, $name, $u)
 {
  $reg = getparam('Register', false);
  if ($reg !== NULL)
-	try_reg($page, $menu, $name, $u);
+	try_reg($info, $page, $menu, $name, $u);
  else
-	try_reset($page, $menu, $name, $u);
+	try_reset($info, $page, $menu, $name, $u);
 }
 #
 ?>

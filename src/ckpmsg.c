@@ -104,13 +104,17 @@ int main(int argc, char **argv)
 			LOGERR("Failed to get a valid line");
 			break;
 		}
+		mkstamp(stamp, sizeof(stamp));
 		len = strlen(buf);
 		if (len < 2) {
-			LOGERR("No message");
+			LOGERR("%s No message", stamp);
 			continue;
 		}
 		buf[len - 1] = '\0'; // Strip /n
-		mkstamp(stamp, sizeof(stamp));
+		if (buf[0] == '#') {
+			LOGDEBUG("%s Got comment: %s", stamp, buf);
+			continue;
+		}
 		LOGDEBUG("%s Got message: %s", stamp, buf);
 
 		sockd = open_unix_client(socket_dir);
@@ -130,7 +134,7 @@ int main(int argc, char **argv)
 			continue;
 		}
 		mkstamp(stamp, sizeof(stamp));
-		LOGNOTICE("%s Received response: %s", stamp, buf);
+		LOGMSGSIZ(65536, LOG_NOTICE, "%s Received response: %s", stamp, buf);
 	}
 
 	dealloc(buf);

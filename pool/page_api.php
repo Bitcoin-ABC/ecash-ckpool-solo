@@ -9,7 +9,7 @@ function no_api($json = "")
  exit(0);
 }
 #
-function show_api($page, $menu, $name, $user)
+function show_api($info, $page, $menu, $name, $user)
 {
  global $fld_sep;
  $u = getparam('username', true);
@@ -29,27 +29,44 @@ function show_api($page, $menu, $name, $user)
 	no_api($jfu);
  if (nuem($work))
  {
-	$ans = homeInfo($u);
-	if ($ans === false)
+	$info = homeInfo($u);
+	if ($info === false)
 		no_api($jfu);
-	$rep = fldEncode($ans, 'lastbc', true);
-	$rep .= fldEncode($ans, 'lastheight', false);
-	$rep .= fldEncode($ans, 'currndiff', false);
-	$rep .= fldEncode($ans, 'lastblock', false);
-	$rep .= fldEncode($ans, 'lastblockheight', false);
-	$rep .= fldEncode($ans, 'blockacc', false);
-	$rep .= fldEncode($ans, 'blockerr', false);
-	$rep .= fldEncode($ans, 'p_hashrate5m', false);
-	$rep .= fldEncode($ans, 'p_hashrate1hr', false);
-	$rep .= fldEncode($ans, 'u_hashrate5m', false);
-	$rep .= fldEncode($ans, 'u_hashrate1hr', false);
+	$rep = fldEncode($info, 'lastbc', true);
+	$rep .= fldEncode($info, 'lastheight', false);
+	$rep .= fldEncode($info, 'currndiff', false);
+	$rep .= fldEncode($info, 'lastblock', false);
+	$rep .= fldEncode($info, 'lastblockheight', false);
+	$rep .= fldEncode($info, 'blockacc', false);
+	$rep .= fldEncode($info, 'blockerr', false);
+	$rep .= fldEncode($info, 'p_hashrate5m', false);
+	$rep .= fldEncode($info, 'p_hashrate1hr', false);
+	$rep .= fldEncode($info, 'u_hashrate5m', false);
+	$rep .= fldEncode($info, 'u_hashrate1hr', false);
  }
  else
  {
-	$ans = getWorkers($u);
+	$info = homeInfo($u);
+	if ($info === false)
+		no_api($jfu);
+
+	$per = false;
+	if (is_array($info) && isset($info['u_multiaddr']))
+	{
+		$percent = getparam('percent', true);
+		if (!nuem($percent))
+			$per = true;
+	}
+
+	if ($per === true)
+		$ans = getPercents($u);
+	else
+		$ans = getWorkers($u);
+
 	if ($ans === false)
 		no_api($jfu);
-	$rep .= fldEncode($ans, 'rows', true);
+
+	$rep = fldEncode($ans, 'rows', true);
 	$rows = $ans['rows'];
 	$flds = explode(',', $ans['flds']);
 	$zeflds = '';

@@ -241,7 +241,7 @@ for when the notifier is not set up and only polls if the "notify" field is
 not set on a btcd.
 
 "nonce1length" : This is optional allowing the extranonce1 length to be chosen
-from 2 to 8. Default 8
+from 2 to 8. Default 4
 
 "nonce2length" : This is optional allowing the extranonce2 length to be chosen
 from 2 to 8. Default 8

@@ -39,9 +39,9 @@ function doallwork($data, $user)
  return $pg;
 }
 #
-function show_allwork($page, $menu, $name, $user)
+function show_allwork($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'doallwork', $page, $menu, $name, $user);
+ gopage($info, NULL, 'doallwork', $page, $menu, $name, $user);
 }
 #
 ?>

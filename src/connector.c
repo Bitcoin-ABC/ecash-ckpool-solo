@@ -219,7 +219,7 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 	ck_wunlock(&cdata->lock);
 
 	if (fd > -1)
-		LOGINFO("Connector dropped client %d fd %d", client->id, fd);
+		LOGINFO("Connector dropped client %"PRId64" fd %d", client->id, fd);
 
 	return fd;
 }
@@ -320,7 +320,7 @@ reparse:
 	if (!(val = json_loads(msg, 0, NULL))) {
 		char *buf = strdup("Invalid JSON, disconnecting\n");
 
-		LOGINFO("Client id %d sent invalid json message %s", client->id, msg);
+		LOGINFO("Client id %ld sent invalid json message %s", client->id, msg);
 		send_client(cdata, client->id, buf);
 		invalidate_client(ckp, cdata, client);
 		return;
@@ -480,11 +480,11 @@ void *sender(void *arg)
 		ret = wait_write_select(fd, 0);
 		if (ret < 1) {
 			if (ret < 0) {
-				LOGINFO("Client id %d fd %d interrupted", client->id, fd);
+				LOGINFO("Client id %ld fd %d interrupted", client->id, fd);
 				invalidate_client(ckp, cdata, client);
 				goto contfree;
 			}
-			LOGDEBUG("Client %d not ready for writes", client->id);
+			LOGDEBUG("Client %"PRId64" not ready for writes", client->id);
 
 			/* Append it to the tail of the delayed sends list.
 			 * This is the only function that alters it so no
@@ -496,7 +496,7 @@ void *sender(void *arg)
 		while (sender_send->len) {
 			ret = send(fd, sender_send->buf + ofs, sender_send->len , 0);
 			if (unlikely(ret < 0)) {
-				LOGINFO("Client id %d fd %d disconnected", client->id, fd);
+				LOGINFO("Client id %ld fd %d disconnected", client->id, fd);
 				invalidate_client(ckp, cdata, client);
 				break;
 			}
@@ -589,7 +589,7 @@ static void passthrough_client(cdata_t *cdata, client_instance_t *client)
 {
 	char *buf;
 
-	LOGINFO("Connector adding passthrough client %d", client->id);
+	LOGINFO("Connector adding passthrough client %"PRId64, client->id);
 	client->passthrough = true;
 	ASPRINTF(&buf, "{\"result\": true}\n");
 	send_client(cdata, client->id, buf);

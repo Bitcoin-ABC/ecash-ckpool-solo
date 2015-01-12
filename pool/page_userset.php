@@ -92,9 +92,9 @@ function douserset($data, $user)
  return $pg;
 }
 #
-function show_userset($page, $menu, $name, $user)
+function show_userset($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'douserset', $page, $menu, $name, $user);
+ gopage($info, NULL, 'douserset', $page, $menu, $name, $user);
 }
 #
 ?>

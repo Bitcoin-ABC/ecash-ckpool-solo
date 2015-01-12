@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2014 Andrew Smith
+ * Copyright 1995-2015 Andrew Smith
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -488,7 +488,7 @@ K_ITEM *_optional_name(K_TREE *trf_root, char *name, int len, char *patt,
 		dlen = 0;
 	if (!mvalue || (int)dlen < len) {
 		if (!mvalue) {
-			LOGERR("%s(): field '%s' NULL (%d) from %s():%d",
+			LOGERR("%s(): field '%s' NULL (%d:%d) from %s():%d",
 				__func__, name, (int)dlen, len, func, line);
 		} else
 			snprintf(reply, siz, "failed.short %s", name);
@@ -1108,35 +1108,37 @@ void dsp_paymentaddresses(K_ITEM *item, FILE *stream)
 	}
 }
 
-// order by userid asc,expirydate desc,payaddress asc
+// order by expirydate asc,userid asc,payaddress asc
 cmp_t cmp_paymentaddresses(K_ITEM *a, K_ITEM *b)
 {
 	PAYMENTADDRESSES *pa, *pb;
 	DATA_PAYMENTADDRESSES(pa, a);
 	DATA_PAYMENTADDRESSES(pb, b);
-	cmp_t c = CMP_BIGINT(pa->userid, pb->userid);
+	cmp_t c = CMP_TV(pa->expirydate, pb->expirydate);
 	if (c == 0) {
-		c = CMP_TV(pb->expirydate, pa->expirydate);
+		c = CMP_BIGINT(pa->userid, pb->userid);
 		if (c == 0)
 			c = CMP_STR(pa->payaddress, pb->payaddress);
 	}
 	return c;
 }
 
-// Only one for now ...
-K_ITEM *find_paymentaddresses(int64_t userid)
+/* Find the last CURRENT paymentaddresses for the given userid
+ * N.B. there can be more than one
+ *  any more will be prev_in_ktree(ctx): CURRENT and userid matches */
+K_ITEM *find_paymentaddresses(int64_t userid, K_TREE_CTX *ctx)
 {
 	PAYMENTADDRESSES paymentaddresses, *pa;
-	K_TREE_CTX ctx[1];
 	K_ITEM look, *item;
 
-	paymentaddresses.userid = userid;
+	paymentaddresses.expirydate.tv_sec = default_expiry.tv_sec;
+	paymentaddresses.expirydate.tv_usec = default_expiry.tv_usec;
+	paymentaddresses.userid = userid+1;
 	paymentaddresses.payaddress[0] = '\0';
-	paymentaddresses.expirydate.tv_sec = DATE_S_EOT;
 
 	INIT_PAYMENTADDRESSES(&look);
 	look.data = (void *)(&paymentaddresses);
-	item = find_after_in_ktree(paymentaddresses_root, &look, cmp_paymentaddresses, ctx);
+	item = find_before_in_ktree(paymentaddresses_root, &look, cmp_paymentaddresses, ctx);
 	if (item) {
 		DATA_PAYMENTADDRESSES(pa, item);
 		if (pa->userid == userid && CURRENT(&(pa->expirydate)))
@@ -1145,6 +1147,43 @@ K_ITEM *find_paymentaddresses(int64_t userid)
 			return NULL;
 	} else
 		return NULL;
+}
+
+K_ITEM *find_one_payaddress(int64_t userid, char *payaddress, K_TREE_CTX *ctx)
+{
+	PAYMENTADDRESSES paymentaddresses;
+	K_ITEM look;
+
+	paymentaddresses.expirydate.tv_sec = default_expiry.tv_sec;
+	paymentaddresses.expirydate.tv_usec = default_expiry.tv_usec;
+	paymentaddresses.userid = userid;
+	STRNCPY(paymentaddresses.payaddress, payaddress);
+
+	INIT_PAYMENTADDRESSES(&look);
+	look.data = (void *)(&paymentaddresses);
+	return find_in_ktree(paymentaddresses_root, &look, cmp_paymentaddresses, ctx);
+}
+
+/* This will match any user that has the payaddress
+ * This avoids the bitcoind delay of rechecking an address
+ *  that has EVER been seen before
+ * However, also, cmd_userset() that uses it, effectively ensures
+ *  that 2 standard users, that mine to a username rather than
+ *  a bitcoin address, cannot ever use the same bitcoin address */
+K_ITEM *find_any_payaddress(char *payaddress)
+{
+	PAYMENTADDRESSES *pa;
+	K_TREE_CTX ctx[1];
+	K_ITEM *item;
+
+	item = first_in_ktree(paymentaddresses_root, ctx);
+	while (item) {
+		DATA_PAYMENTADDRESSES(pa, item);
+		if (strcmp(pa->payaddress, payaddress) == 0)
+			return item;
+		item = next_in_ktree(ctx);
+	}
+	return NULL;
 }
 
 // order by userid asc,paydate asc,payaddress asc,expirydate desc
@@ -1298,11 +1337,14 @@ cmp_t cmp_workinfo_height(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
-K_ITEM *find_workinfo(int64_t workinfoid)
+K_ITEM *find_workinfo(int64_t workinfoid, K_TREE_CTX *ctx)
 {
 	WORKINFO workinfo;
-	K_TREE_CTX ctx[1];
+	K_TREE_CTX ctx0[1];
 	K_ITEM look, *item;
+
+	if (ctx == NULL)
+		ctx = ctx0;
 
 	workinfo.workinfoid = workinfoid;
 	workinfo.expirydate.tv_sec = default_expiry.tv_sec;
@@ -1338,7 +1380,7 @@ bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 	ss_last->tv_sec = ss_last->tv_usec = 0;
 	*ss_count = *s_count = *s_diff = 0;
 
-	wi_item = find_workinfo(workinfoid);
+	wi_item = find_workinfo(workinfoid, NULL);
 	if (!wi_item) {
 		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 		LOGERR("%s() %"PRId64"/%s/%ld,%ld %.19s no workinfo! Age discarded!",
@@ -1749,8 +1791,8 @@ void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 					 min_buf, max_buf);
 			}
 			LOGWARNING("%s() Auto-aged %"PRId64"(%"PRId64") "
-				   "share%s %d sharesummar%s %d workinfoid%s "
-				   "%s %s",
+				   "share%s %"PRId64" sharesummar%s %"PRId32
+				   " workinfoid%s %s %s",
 				   __func__,
 				   s_count_tot, s_diff_tot,
 				   (s_count_tot == 1) ? "" : "s",
@@ -2028,7 +2070,7 @@ void set_block_share_counters()
 				LOGEMERG("%s(): ERROR workmarker %"PRId64" has an invalid"
 					 " workinfoid range start=%"PRId64" end=%"PRId64
 					 " due to pool lastblock=%"PRId32
-					 " workinfoid="PRId64,
+					 " workinfoid=%"PRId64,
 					 __func__, workmarkers->markerid,
 					 workmarkers->workinfoidstart,
 					 workmarkers->workinfoidend,
@@ -2553,12 +2595,10 @@ static bool gen_workmarkers(PGconn *conn, MARKS *stt, bool after, MARKS *fin,
  * If a mark is found not READY it will stop at that one and
  *  report success with a message regarding the not READY one
  * No checks are done for the validity of the mark status
- *  information, however, until the next step of generating
- *  the markersummaries is completely automated, rather than
- *  simply running the SQL script manually, the existence of
-   a workmarker wont actually do anything automatically */
+ *  information */
 bool workmarkers_generate(PGconn *conn, char *err, size_t siz, char *by,
-			  char *code, char *inet, tv_t *cd, K_TREE *trf_root)
+			  char *code, char *inet, tv_t *cd, K_TREE *trf_root,
+			  bool none_error)
 {
 	K_ITEM *m_item, *m_next_item;
 	MARKS *mused, *mnext;
@@ -2686,8 +2726,10 @@ bool workmarkers_generate(PGconn *conn, char *err, size_t siz, char *by,
 		m_item = m_next_item;
 	}
 	if (!any) {
-		snprintf(err, siz, "%s", "No ready marks found");
-		return false;
+		if (none_error) {
+			snprintf(err, siz, "%s", "No ready marks found");
+			return false;
+		}
 	}
 	return true;
 }
@@ -2825,3 +2867,45 @@ bool _marks_description(char *description, size_t siz, char *marktype,
 	return true;
 }
 
+#define CODEBASE 32
+#define CODESHIFT(_x) ((_x) >> 5)
+#define CODECHAR(_x) (codebase[((_x) & (CODEBASE-1))])
+static char codebase[] = "23456789abcdefghjkmnopqrstuvwxyz";
+
+#define ASSERT3(condition) __maybe_unused static char codebase_length_must_be_CODEBASE[(condition)?1:-1]
+ASSERT3(sizeof(codebase) == (CODEBASE+1));
+
+static int shift_code(long code, char *code_buf)
+{
+	int pos;
+
+	if (code > 0) {
+		pos = shift_code(CODESHIFT(code), code_buf);
+		code_buf[pos++] = codebase[code & (CODEBASE-1)];
+		return(pos);
+	} else
+		return(0);
+
+}
+
+// NON-thread safe
+char *shiftcode(tv_t *createdate)
+{
+	static char code_buf[64];
+	long code;
+	int pos;
+
+	// To reduce the code size, ignore the last 4 bits
+	code = (createdate->tv_sec - DATE_BEGIN) >> 4;
+	LOGDEBUG("%s() code=%ld cd=%ld BEGIN=%ld",
+		 __func__, code, createdate->tv_sec, DATE_BEGIN);
+	if (code <= 0)
+		strcpy(code_buf, "0");
+	else {
+		pos = shift_code(code, code_buf);
+		code_buf[pos] = '\0';
+	}
+
+	LOGDEBUG("%s() code_buf='%s'", __func__, code_buf);
+	return(code_buf);
+}

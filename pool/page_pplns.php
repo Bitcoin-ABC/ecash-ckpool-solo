@@ -42,10 +42,11 @@ function calctx($ans, $count, $miner_sat, $diffacc_total)
 	$payaddress = $ans['payaddress:'.$i];
 	if ($payaddress == 'none')
 	{
-		$len = strlen($username);
 		$c0 = substr($username, 0, 1);
+		$parts = explode('.', $username);
+		$len = strlen($parts[0]);
 		if (($c0 == '1' || $c0 == '3') && $len > 26 && $len < 37)
-			$payaddress = $username;
+			$payaddress = $parts[0];
 		else
 		{
 			if ($pay_sat > 0)
@@ -110,6 +111,22 @@ function calctx($ans, $count, $miner_sat, $diffacc_total)
  return $pg;
 }
 #
+function fmtdata($code, $val)
+{
+ switch ($code)
+ {
+ case ',':
+	$ret = number_format($val);
+	break;
+ case '.':
+	$ret = number_format($val, 1);
+	break;
+ default:
+	$ret = $val;
+ }
+ return $ret;
+}
+#
 function dopplns($data, $user)
 {
  global $send_sep;
@@ -143,8 +160,10 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 		$dotx = true;
 
 	$flds = array('height' => $blk, 'allow_aged' => 'Y');
+	if ($blk > 334106)
+		$flds['diff_times'] = '5';
 	$msg = msgEncode('pplns', 'pplns', $flds, $user);
-	$rep = sendsockreply('pplns', $msg);
+	$rep = sendsockreply('pplns', $msg, 4);
 	if ($rep == false)
 		$ans = array();
 	else
@@ -153,6 +172,9 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 
 	if ($ans['ERROR'] != null)
 		return '<font color=red size=+1><br>'.$ans['STATUS'].': '.$ans['ERROR'].'</font>';
+
+	if (!isset($ans['pplns_last']))
+		return '<font color=red size=+1><br>Partial data returned</font>';
 
 	$reward_sat = $ans['block_reward'];
 	$miner_sat = round($reward_sat * 0.991);
@@ -163,9 +185,9 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 			'Block Hash' => 'block_hash',
 			'Block Reward (Satoshis)' => 'block_reward',
 			'Miner Reward (Satoshis)' => 'miner_sat',
-			'PPLNS Wanted' => 'diff_want',
-			'PPLNS Used' => 'diffacc_total',
-			'Elapsed Seconds' => 'pplns_elapsed',
+			'PPLNS Wanted' => '.diff_want',
+			'PPLNS Used' => '.diffacc_total',
+			'Elapsed Seconds' => ',pplns_elapsed',
 			'Users' => 'rows',
 			'Oldest Workinfoid' => 'begin_workinfoid',
 			'Oldest Time' => 'begin_stamp',
@@ -179,14 +201,21 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 			'Network Difficulty' => 'block_ndiff',
 			'PPLNS Factor' => 'diff_times',
 			'PPLNS Added' => 'diff_add',
-			'Accepted Share Count' => 'acc_share_count',
-			'Total Share Count' => 'total_share_count',
-			'ShareSummary Count' => 'ss_count',
-			'WorkMarkers Count' => 'wm_count',
-			'MarkerSummary Count' => 'ms_count');
+			'Accepted Share Count' => ',acc_share_count',
+			'Total Share Count' => ',total_share_count',
+			'ShareSummary Count' => ',ss_count',
+			'WorkMarkers Count' => ',wm_count',
+			'MarkerSummary Count' => ',ms_count');
 
 	$pg = '<br><a href=https://blockchain.info/block-height/';
 	$pg .= $ans['block'].'>Blockchain '.$ans['block']."</a><br>\n";
+
+	if (strlen($ans['marks_status']) > 0)
+	{
+		$pg .= '<br><span class=err>';
+		$msg = $ans['marks_status'];
+		$pg .= str_replace(' ', '&nbsp;', $msg)."</span><br>\n";
+	}
 
 	if (strlen($ans['block_extra']) > 0)
 	{
@@ -217,7 +246,18 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 
 		$pg .= "<tr class=$row>";
 		$pg .= "<td class=dl>$dsp</td>";
-		$pg .= '<td class=dr>'.$ans[$name].'</td>';
+		switch ($name[0])
+		{
+			case ',':
+			case '.':
+				$nm = substr($name, 1);
+				$fmt = fmtdata($name[0], $ans[$nm]);
+				break;
+			default:
+				$fmt = $ans[$name];
+				break;
+		}
+		$pg .= "<td class=dr>$fmt</td>";
 		$pg .= "</tr>\n";
 	}
 
@@ -281,9 +321,9 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
  return $pg;
 }
 #
-function show_pplns($page, $menu, $name, $user)
+function show_pplns($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'dopplns', $page, $menu, $name, $user);
+ gopage($info, NULL, 'dopplns', $page, $menu, $name, $user);
 }
 #
 ?>

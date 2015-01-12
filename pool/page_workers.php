@@ -188,9 +188,9 @@ function doworkers($data, $user)
  return $pg;
 }
 #
-function show_workers($page, $menu, $name, $user)
+function show_workers($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'doworkers', $page, $menu, $name, $user);
+ gopage($info, NULL, 'doworkers', $page, $menu, $name, $user);
 }
 #
 ?>

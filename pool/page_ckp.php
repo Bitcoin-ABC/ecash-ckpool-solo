@@ -62,9 +62,9 @@ function dockp($data, $user)
  return $pg;
 }
 #
-function show_ckp($page, $menu, $name, $user)
+function show_ckp($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'dockp', $page, $menu, $name, $user);
+ gopage($info, NULL, 'dockp', $page, $menu, $name, $user);
 }
 #
 ?>

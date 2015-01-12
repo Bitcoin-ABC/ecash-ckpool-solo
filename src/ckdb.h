@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2014 Andrew Smith
+ * Copyright 1995-2015 Andrew Smith
  * Copyright 2014 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -52,7 +52,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.6"
-#define CKDB_VERSION DB_VERSION"-0.665"
+#define CKDB_VERSION DB_VERSION"-0.822"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -63,6 +63,13 @@
 
 #define STRINT(x) STRINT2(x)
 #define STRINT2(x) #x
+
+#define FREENULL(mem) do { \
+		if (mem) { \
+			free(mem); \
+			mem = NULL; \
+		} \
+	} while (0)
 
 // So they can fit into a 1 byte flag field
 #define TRUE_STR "Y"
@@ -243,6 +250,11 @@ extern int64_t dbload_workinfoid_finish;
 // Only restrict sharesummary, not workinfo
 extern bool dbload_only_sharesummary;
 
+/* If the above restriction - on sharesummaries - is after the last marks
+ *  then this means the sharesummaries can't be summarised into
+ *  markersummaries and pplns payouts may not be correct */
+extern bool sharesummary_marks_limit;
+
 // DB users,workers,auth load is complete
 extern bool db_auths_complete;
 // DB load is complete
@@ -289,6 +301,7 @@ enum cmd_values {
 	CMD_WORKERSET,
 	CMD_POOLSTAT,
 	CMD_USERSTAT,
+	CMD_WORKERSTAT,
 	CMD_BLOCK,
 	CMD_BLOCKLIST,
 	CMD_BLOCKSTATUS,
@@ -702,6 +715,9 @@ extern K_TREE *useratts_root;
 extern K_LIST *useratts_free;
 extern K_STORE *useratts_store;
 
+// This att means the user uses multiple % based payout addresses
+#define USER_MULTI_PAYOUT "PayAddresses"
+
 // WORKERS
 typedef struct workers {
 	int64_t workerid;
@@ -744,16 +760,20 @@ typedef struct paymentaddresses {
 	char payaddress[TXT_BIG+1];
 	int32_t payratio;
 	HISTORYDATECONTROLFIELDS;
+	bool match; // Non-db field
 } PAYMENTADDRESSES;
 
 #define ALLOC_PAYMENTADDRESSES 1024
 #define LIMIT_PAYMENTADDRESSES 0
 #define INIT_PAYMENTADDRESSES(_item) INIT_GENERIC(_item, paymentaddresses)
 #define DATA_PAYMENTADDRESSES(_var, _item) DATA_GENERIC(_var, _item, paymentaddresses, true)
+#define DATA_PAYMENTADDRESSES_NULL(_var, _item) DATA_GENERIC(_var, _item, paymentaddresses, false)
 
 extern K_TREE *paymentaddresses_root;
 extern K_LIST *paymentaddresses_free;
 extern K_STORE *paymentaddresses_store;
+
+#define PAYRATIODEF 1000000
 
 // PAYMENTS
 typedef struct payments {
@@ -856,6 +876,12 @@ typedef struct optioncontrol {
 #if ((OPTIONCONTROL_HEIGHT+1) != START_POOL_HEIGHT)
 #error "START_POOL_HEIGHT must = (OPTIONCONTROL_HEIGHT+1)"
 #endif
+
+/* If set, then cmd_auth() will create unknown users
+ * It will use the optionvalue as the hex sha256 password hash
+ * A blank or random/invalid hash will mean the accounts created
+ *  are password locked, like an address account is */
+#define OPTIONCONTROL_AUTOADDUSER "AutoAddUser"
 
 extern K_TREE *optioncontrol_root;
 extern K_LIST *optioncontrol_free;
@@ -1153,6 +1179,7 @@ typedef struct userstats {
 	double hashrate1hr;
 	double hashrate24hr;
 	bool idle; // Non-db field
+	bool six; // Non-db field
 	char summarylevel[TXT_FLAG+1]; // Initially SUMMARY_NONE in RAM
 	int32_t summarycount;
 	tv_t statsdate;
@@ -1406,11 +1433,17 @@ extern K_TREE *marks_root;
 extern K_LIST *marks_free;
 extern K_STORE *marks_store;
 
+// 'b' used for manual marks and 'extra' description in shifts
 #define MARKTYPE_BLOCK 'b'
+// 'p' used for manual marks
 #define MARKTYPE_PPLNS 'p'
+// 's' isn't used - but could be needed for manual marks
 #define MARKTYPE_SHIFT_BEGIN 's'
+// 'e' used for shifts
 #define MARKTYPE_SHIFT_END 'e'
+// 'o' used for manual marks
 #define MARKTYPE_OTHER_BEGIN 'o'
+// 'f' used for manual marks
 #define MARKTYPE_OTHER_FINISH 'f'
 
 extern const char *marktype_block;
@@ -1426,6 +1459,10 @@ extern const char *marktype_shift_begin_fmt;
 extern const char *marktype_shift_end_fmt;
 extern const char *marktype_other_begin_fmt;
 extern const char *marktype_other_finish_fmt;
+
+// For getting back the shift code/name
+extern const char *marktype_shift_begin_skip;
+extern const char *marktype_shift_end_skip;
 
 #define MARK_READY 'x'
 #define MARK_READY_STR "x"
@@ -1540,7 +1577,9 @@ extern K_ITEM *new_default_worker(PGconn *conn, bool update, int64_t userid, cha
 				  char *by, char *code, char *inet, tv_t *cd, K_TREE *trf_root);
 extern void dsp_paymentaddresses(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_paymentaddresses(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *find_paymentaddresses(int64_t userid);
+extern K_ITEM *find_paymentaddresses(int64_t userid, K_TREE_CTX *ctx);
+extern K_ITEM *find_one_payaddress(int64_t userid, char *payaddress, K_TREE_CTX *ctx);
+extern K_ITEM *find_any_payaddress(char *payaddress);
 extern cmp_t cmp_payments(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_optioncontrol(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_optioncontrol(char *optionname, tv_t *now);
@@ -1550,7 +1589,7 @@ extern int32_t _coinbase1height(char *coinbase1, WHERE_FFL_ARGS);
 #define cmp_height(_cb1a, _cb1b) _cmp_height(_cb1a, _cb1b, WHERE_FFL_HERE)
 extern cmp_t _cmp_height(char *coinbase1a, char *coinbase1b, WHERE_FFL_ARGS);
 extern cmp_t cmp_workinfo_height(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *find_workinfo(int64_t workinfoid);
+extern K_ITEM *find_workinfo(int64_t workinfoid, K_TREE_CTX *ctx);
 extern bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 			 char *by, char *code, char *inet, tv_t *cd,
 			 tv_t *ss_first, tv_t *ss_last, int64_t *ss_count,
@@ -1601,7 +1640,7 @@ extern K_ITEM *find_workmarkers(int64_t workinfoid, bool anystatus, char status)
 extern K_ITEM *find_workmarkerid(int64_t markerid, bool anystatus, char status);
 extern bool workmarkers_generate(PGconn *conn, char *err, size_t siz,
 				 char *by, char *code, char *inet, tv_t *cd,
-				 K_TREE *trf_root);
+				 K_TREE *trf_root, bool none_error);
 extern cmp_t cmp_marks(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_marks(int64_t workinfoid);
 extern const char *marks_marktype(char *marktype);
@@ -1610,6 +1649,7 @@ extern const char *marks_marktype(char *marktype);
 extern bool _marks_description(char *description, size_t siz, char *marktype,
 				int32_t height, char *shift, char *other,
 				WHERE_FFL_ARGS);
+extern char *shiftcode(tv_t *createdate);
 
 // ***
 // *** PostgreSQL functions ckdb_dbio.c
@@ -1682,9 +1722,9 @@ extern bool workers_update(PGconn *conn, K_ITEM *item, char *difficultydefault,
 			   char *idlenotificationtime, char *by, char *code,
 			   char *inet, tv_t *cd, K_TREE *trf_root, bool check);
 extern bool workers_fill(PGconn *conn);
-extern K_ITEM *paymentaddresses_set(PGconn *conn, int64_t userid, char *payaddress,
-					char *by, char *code, char *inet, tv_t *cd,
-					K_TREE *trf_root);
+extern bool paymentaddresses_set(PGconn *conn, int64_t userid, K_LIST *pa_store,
+				 char *by, char *code, char *inet, tv_t *cd,
+				 K_TREE *trf_root);
 extern bool paymentaddresses_fill(PGconn *conn);
 extern bool payments_fill(PGconn *conn);
 extern bool idcontrol_add(PGconn *conn, char *idname, char *idvalue, char *by,
@@ -1750,6 +1790,11 @@ extern bool userstats_add(char *poolinstance, char *elapsed, char *username,
 			  char *hashrate1hr, char *hashrate24hr, bool idle,
 			  bool eos, char *by, char *code, char *inet, tv_t *cd,
 			  K_TREE *trf_root);
+extern bool workerstats_add(char *poolinstance, char *elapsed, char *username,
+			    char *workername, char *hashrate, char *hashrate5m,
+			    char *hashrate1hr, char *hashrate24hr, bool idle,
+			    char *by, char *code, char *inet, tv_t *cd,
+			    K_TREE *trf_root);
 extern bool userstats_fill(PGconn *conn);
 extern bool markersummary_fill(PGconn *conn);
 #define workmarkers_process(_conn, _add, _markerid, _poolinstance, \

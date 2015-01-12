@@ -329,7 +329,7 @@ void btc_blockstatus(BLOCKS *blocks)
 	len = strlen(blocks->blockhash);
 	if (len != SHA256SIZHEX) {
 		LOGERR("%s() invalid blockhash size %d (%d) for block %d",
-			__func__, len, SHA256SIZHEX, blocks->height);
+			__func__, (int)len, SHA256SIZHEX, blocks->height);
 
 		/* So we don't keep repeating the message
 		 * This should never happen */

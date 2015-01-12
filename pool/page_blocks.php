@@ -42,34 +42,64 @@ function doblocks($data, $user)
 {
  $blink = '<a href=https://blockchain.info/block-height/';
 
- $pg = '<h1>Blocks</h1>';
+ $pg = '';
 
  if ($user === null)
 	$ans = getBlocks('Anon');
  else
 	$ans = getBlocks($user);
 
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
- $pg .= "<tr class=title>";
- $pg .= "<td class=dl>Height</td>";
- if ($user !== null)
-	$pg .= "<td class=dl>Who</td>";
- $pg .= "<td class=dr>Reward</td>";
- $pg .= "<td class=dc>When</td>";
- $pg .= "<td class=dr>Status</td>";
- $pg .= "<td class=dr>Diff</td>";
- $pg .= "<td class=dr>%</td>";
- $pg .= "<td class=dr>CDF</td>";
- $pg .= "</tr>\n";
+ if (nuem(getparam('csv', true)))
+	$wantcsv = false;
+ else
+	$wantcsv = true;
+
+ if ($wantcsv === false)
+ {
+	if ($ans['STATUS'] == 'ok')
+	{
+		$count = $ans['rows'];
+		if ($count == 1)
+		{
+			$num = '';
+			$s = '';
+		}
+		else
+		{
+			$num = " $count";
+			$s = 's';
+		}
+
+		$pg = "<h1>Last$num Block$s</h1>";
+	}
+	else
+		$pg = '<h1>Blocks</h1>';
+
+	$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+	$pg .= "<tr class=title>";
+	$pg .= "<td class=dr>#</td>";
+	$pg .= "<td class=dl>Height</td>";
+	if ($user !== null)
+		$pg .= "<td class=dl>Who</td>";
+	$pg .= "<td class=dr>Reward</td>";
+	$pg .= "<td class=dc>When</td>";
+	$pg .= "<td class=dr>Status</td>";
+	$pg .= "<td class=dr>Diff</td>";
+	$pg .= "<td class=dr>Diff%</td>";
+	$pg .= "<td class=dr>CDF</td>";
+	$pg .= "</tr>\n";
+ }
  $blktot = 0;
  $nettot = 0;
  $i = 0;
  $orph = false;
+ $csv = "Sequence,Height,Status,Timestamp,DiffAcc,NetDiff,Hash\n";
  if ($ans['STATUS'] == 'ok')
  {
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
 	{
+		$seq = $i + 1;
 		if (($i % 2) == 0)
 			$row = 'even';
 		else
@@ -130,18 +160,37 @@ function doblocks($data, $user)
 			$cdf = '?';
 		}
 
-		$pg .= "<tr class=$row>";
-		$pg .= "<td class=dl$ex>$hifld</td>";
-		if ($user !== null)
+		if ($wantcsv === false)
+		{
+		 $pg .= "<tr class=$row>";
+		 $pg .= "<td class=dr$ex>$seq</td>";
+		 $pg .= "<td class=dl$ex>$hifld</td>";
+		 if ($user !== null)
 			$pg .= "<td class=dl$ex>".htmlspecialchars($ans['workername:'.$i]).'</td>';
-		$pg .= "<td class=dr$ex>".btcfmt($ans['reward:'.$i]).'</td>';
-		$pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['firstcreatedate:'.$i]).'</td>';
-		$pg .= "<td class=dr$ex>".$stat.'</td>';
-		$pg .= "<td class=dr>$stara$acc</td>";
-		$pg .= "<td class=dr$bg>$bpct</td>";
-		$pg .= "<td class=dr>$cdf</td>";
-		$pg .= "</tr>\n";
+		 $pg .= "<td class=dr$ex>".btcfmt($ans['reward:'.$i]).'</td>';
+		 $pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['firstcreatedate:'.$i]).'</td>';
+		 $pg .= "<td class=dr$ex>".$stat.'</td>';
+		 $pg .= "<td class=dr>$stara$acc</td>";
+		 $pg .= "<td class=dr$bg>$bpct</td>";
+		 $pg .= "<td class=dr>$cdf</td>";
+		 $pg .= "</tr>\n";
+		}
+		else
+		{
+		 $csv .= "$seq,";
+		 $csv .= "$hi,";
+		 $csv .= "\"$stat\",";
+		 $csv .= $ans['firstcreatedate:'.$i].',';
+		 $csv .= "$diffacc,";
+		 $csv .= "$netdiff,";
+		 $csv .= $ans['blockhash:'.$i]."\n";
+		}
 	}
+ }
+ if ($wantcsv === true)
+ {
+	echo $csv;
+	exit(0);
  }
  if ($nettot > 0)
  {
@@ -156,7 +205,7 @@ function doblocks($data, $user)
 	$bg = " bgcolor=$bg";
 
 	$pg .= "<tr class=$row>";
-	$pg .= '<td class=dr>Total:</td>';
+	$pg .= '<td colspan=2 class=dr>Total:</td>';
 	$pg .= '<td class=dl colspan=';
 	if ($user === null)
 		$pg .= '4';
@@ -182,9 +231,9 @@ function doblocks($data, $user)
  return $pg;
 }
 #
-function show_blocks($page, $menu, $name, $user)
+function show_blocks($info, $page, $menu, $name, $user)
 {
- gopage(NULL, 'doblocks', $page, $menu, $name, $user);
+ gopage($info, NULL, 'doblocks', $page, $menu, $name, $user);
 }
 #
 ?>
