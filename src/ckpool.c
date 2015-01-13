@@ -1272,7 +1272,7 @@ int main(int argc, char **argv)
 		ckp.initial_args[ckp.args] = strdup(argv[ckp.args]);
 	ckp.initial_args[ckp.args] = NULL;
 
-	while ((c = getopt_long(argc, argv, "ABc:d:g:HhkLl:n:PpS:s:", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "ABc:Dd:g:HhkLl:n:PpS:s:", long_options, &i)) != -1) {
 		switch (c) {
 			case 'A':
 				ckp.standalone = true;
