@@ -186,8 +186,6 @@ struct user_instance {
 
 	double best_diff; /* Best share found by this user */
 
-	double best_diff; /* Best share found by this user */
-
 	double dsps1; /* Diff shares per second, 1 minute rolling average */
 	double dsps5; /* ... 5 minute ... */
 	double dsps60;/* etc */
