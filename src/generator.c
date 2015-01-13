@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2015 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -388,13 +388,11 @@ static bool send_json_msg(connsock_t *cs, json_t *json_msg)
 	int len, sent;
 	char *s;
 
-	s = json_dumps(json_msg, JSON_ESCAPE_SLASH);
+	s = json_dumps(json_msg, JSON_ESCAPE_SLASH | JSON_EOL);
 	LOGDEBUG("Sending json msg: %s", s);
 	len = strlen(s);
 	sent = write_socket(cs->fd, s, len);
-	len += 1;
 	dealloc(s);
-	sent += write_socket(cs->fd, "\n", 1);
 	if (sent != len) {
 		LOGWARNING("Failed to send %d bytes sent %d in send_json_msg", len, sent);
 		return false;

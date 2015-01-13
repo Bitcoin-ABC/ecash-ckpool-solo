@@ -427,6 +427,13 @@ static int do_dump(const json_t *json, size_t flags, int depth,
     }
 }
 
+char *json_dump_dup(const char *str, size_t flags)
+{
+	if (flags & JSON_EOL)
+		return jsonp_eolstrdup(str);
+	return jsonp_strdup(str);
+}
+
 char *json_dumps(const json_t *json, size_t flags)
 {
     strbuffer_t strbuff;
@@ -438,7 +445,7 @@ char *json_dumps(const json_t *json, size_t flags)
     if(json_dump_callback(json, dump_to_strbuffer, (void *)&strbuff, flags))
         result = NULL;
     else
-        result = jsonp_strdup(strbuffer_value(&strbuff));
+        result = json_dump_dup(strbuffer_value(&strbuff), flags);
 
     strbuffer_close(&strbuff);
     return result;
