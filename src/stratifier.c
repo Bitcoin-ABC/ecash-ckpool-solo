@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2015 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -184,6 +184,8 @@ struct user_instance {
 	char txnbin[25];
 	struct userwb *userwbs;
 
+	double best_diff; /* Best share found by this user */
+
 	double dsps1; /* Diff shares per second, 1 minute rolling average */
 	double dsps5; /* ... 5 minute ... */
 	double dsps60;/* etc */
@@ -207,6 +209,7 @@ struct worker_instance {
 	tv_t last_share;
 	time_t start_time;
 
+	double best_diff; /* Best share found by this worker */
 	int mindiff; /* User chosen mindiff */
 
 	bool idle;
@@ -267,6 +270,7 @@ struct stratum_instance {
 	time_t last_txns; /* Last time this worker requested txn hashes */
 
 	int64_t suggest_diff; /* Stratum client suggested diff */
+	double best_diff; /* Best share found by this instance */
 };
 
 struct share {
@@ -2649,6 +2653,17 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		nonce2[len] = '\0';
 	}
 	sdiff = submission_diff(client, wb, nonce2, ntime32, nonce, hash);
+	if (sdiff > client->best_diff) {
+		worker_instance_t *worker = client->worker_instance;
+
+		client->best_diff = sdiff;
+		LOGINFO("User %s worker %s client %ld new best diff %lf", user_instance->username,
+			worker->workername, client->id, sdiff);
+		if (sdiff > worker->best_diff)
+			worker->best_diff = sdiff;
+		if (sdiff > user_instance->best_diff)
+			user_instance->best_diff = sdiff;
+	}
 	bswap_256(sharehash, hash);
 	__bin2hex(hexhash, sharehash, 32);
 
@@ -3707,11 +3722,12 @@ static void *statsupdate(void *arg)
 				ghs = worker->dsps1440 * nonces;
 				suffix_string(ghs, suffix1440, 16, 0);
 
-				JSON_CPACK(val, "{ss,ss,ss,ss}",
+				JSON_CPACK(val, "{ss,ss,ss,ss,sf}",
 						"hashrate1m", suffix1,
 						"hashrate5m", suffix5,
 						"hashrate1hr", suffix60,
-						"hashrate1d", suffix1440);
+						"hashrate1d", suffix1440,
+						"bestshare", worker->best_diff);
 
 				snprintf(fname, 511, "%s/workers/%s", ckp->logdir, worker->workername);
 				fp = fopen(fname, "we");
@@ -3751,13 +3767,14 @@ static void *statsupdate(void *arg)
 			ghs = instance->dsps10080 * nonces;
 			suffix_string(ghs, suffix10080, 16, 0);
 
-			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si}",
+			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,sf}",
 					"hashrate1m", suffix1,
 					"hashrate5m", suffix5,
 					"hashrate1hr", suffix60,
 					"hashrate1d", suffix1440,
 					"hashrate7d", suffix10080,
-					"workers", instance->workers);
+					"workers", instance->workers,
+					"bestshare", instance->best_diff);
 
 			snprintf(fname, 511, "%s/users/%s", ckp->logdir, instance->username);
 			fp = fopen(fname, "we");
