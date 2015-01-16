@@ -52,7 +52,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.6"
-#define CKDB_VERSION DB_VERSION"-0.822"
+#define CKDB_VERSION DB_VERSION"-0.832"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -521,6 +521,34 @@ enum cmd_values {
 		SET_MODIFYCODE(_list, _row->modifycode, _code); \
 		SET_MODIFYINET(_list, _row->modifyinet, _inet); \
 		_row->pointers = _row->pointers; \
+	} while (0)
+
+/* Override _row defaults if transfer fields are present
+ * We don't care about the reply so it can be small
+ * This is the pointer version - only one required so far */
+#define MODIFYDATETRANSFER(_list, _root, _row) do { \
+		if (_root) { \
+			char __reply[16]; \
+			size_t __siz = sizeof(__reply); \
+			K_ITEM *__item; \
+			TRANSFER *__transfer; \
+			__item = optional_name(_root, "createby", 1, NULL, __reply, __siz); \
+			if (__item) { \
+				DATA_TRANSFER(__transfer, __item); \
+				SET_CREATEBY(_list, _row->createby, __transfer->mvalue); \
+			} \
+			__item = optional_name(_root, "createcode", 1, NULL, __reply, __siz); \
+			if (__item) { \
+				DATA_TRANSFER(__transfer, __item); \
+				SET_CREATECODE(_list, _row->createcode, __transfer->mvalue); \
+			} \
+			__item = optional_name(_root, "createinet", 1, NULL, __reply, __siz); \
+			if (__item) { \
+				DATA_TRANSFER(__transfer, __item); \
+				SET_CREATEINET(_list, _row->createinet, __transfer->mvalue); \
+			} \
+			_row->pointers = _row->pointers; \
+		} \
 	} while (0)
 
 #define SIMPLEDATECONTROL ",createdate,createby,createcode,createinet"
@@ -1480,6 +1508,14 @@ extern PGconn *dbconnect();
 // *** ckdb_data.c ***
 // ***
 
+// Data free functions (first)
+extern void free_workinfo_data(K_ITEM *item);
+extern void free_sharesummary_data(K_ITEM *item);
+extern void free_optioncontrol_data(K_ITEM *item);
+extern void free_markersummary_data(K_ITEM *item);
+extern void free_workmarkers_data(K_ITEM *item);
+extern void free_marks_data(K_ITEM *item);
+
 extern char *safe_text(char *txt);
 extern void username_trim(USERS *users);
 extern bool like_address(char *username);
@@ -1629,10 +1665,12 @@ extern bool userstats_starttimeband(USERSTATS *row, tv_t *statsdate);
 extern void dsp_markersummary(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_markersummary(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_markersummary_userid(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *find_markersummary(int64_t workinfoid, int64_t userid,
-				  char *workername);
 extern K_ITEM *find_markersummary_userid(int64_t userid, char *workername,
 					 K_TREE_CTX *ctx);
+extern K_ITEM *find_markersummary(int64_t workinfoid, int64_t userid,
+				  char *workername);
+extern bool make_markersummaries(bool msg, char *by, char *code, char *inet,
+				 tv_t *cd, K_TREE *trf_root);
 extern void dsp_workmarkers(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_workmarkers(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_workmarkers_workinfoid(K_ITEM *a, K_ITEM *b);
@@ -1750,6 +1788,9 @@ extern bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 				char *workername, char *clientid, char *errn,
 				char *error, char *secondaryuserid, char *by,
 				char *code, char *inet, tv_t *cd, K_TREE *trf_root);
+extern bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
+						char *by, char *code, char *inet,
+						tv_t *cd, K_TREE *trf_root);
 #define sharesummary_update(_conn, _s_row, _e_row, _ss_item, _by, _code, _inet, _cd) \
 		_sharesummary_update(_conn, _s_row, _e_row, _ss_item, _by, _code, _inet, _cd, \
 					WHERE_FFL_HERE)
@@ -1796,20 +1837,22 @@ extern bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 			    char *by, char *code, char *inet, tv_t *cd,
 			    K_TREE *trf_root);
 extern bool userstats_fill(PGconn *conn);
+extern bool markersummary_add(PGconn *conn, K_ITEM *ms_item, char *by, char *code,
+				char *inet, tv_t *cd, K_TREE *trf_root);
 extern bool markersummary_fill(PGconn *conn);
-#define workmarkers_process(_conn, _add, _markerid, _poolinstance, \
+#define workmarkers_process(_conn, _already, _add, _markerid, _poolinstance, \
 			    _workinfoidend, _workinfoidstart, _description, \
 			    _status, _by, _code, _inet, _cd, _trf_root) \
-	_workmarkers_process(_conn, _add, _markerid, _poolinstance, \
+	_workmarkers_process(_conn, _already, _add, _markerid, _poolinstance, \
 			     _workinfoidend, _workinfoidstart, _description, \
 			     _status, _by, _code, _inet, _cd, _trf_root, \
 			     WHERE_FFL_HERE)
-extern bool _workmarkers_process(PGconn *conn, bool add, int64_t markerid,
-				 char *poolinstance, int64_t workinfoidend,
-				 int64_t workinfoidstart, char *description,
-				 char *status, char *by, char *code,
-				 char *inet, tv_t *cd, K_TREE *trf_root,
-				 WHERE_FFL_ARGS);
+extern bool _workmarkers_process(PGconn *conn, bool already, bool add,
+				 int64_t markerid, char *poolinstance,
+				 int64_t workinfoidend, int64_t workinfoidstart,
+				 char *description, char *status, char *by,
+				 char *code, char *inet, tv_t *cd,
+				 K_TREE *trf_root, WHERE_FFL_ARGS);
 extern bool workmarkers_fill(PGconn *conn);
 #define marks_process(_conn, _add, _poolinstance, _workinfoid, _description, \
 		      _extra, _marktype, _status, _by, _code, _inet, _cd, \

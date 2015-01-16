@@ -9,6 +9,83 @@
 
 #include "ckdb.h"
 
+// Data free functions (added here as needed)
+void free_workinfo_data(K_ITEM *item)
+{
+	WORKINFO *workinfo;
+
+	DATA_WORKINFO(workinfo, item);
+	if (workinfo->transactiontree)
+		FREENULL(workinfo->transactiontree);
+	if (workinfo->merklehash)
+		FREENULL(workinfo->merklehash);
+}
+
+void free_sharesummary_data(K_ITEM *item)
+{
+	SHARESUMMARY *sharesummary;
+
+	DATA_SHARESUMMARY(sharesummary, item);
+	if (sharesummary->workername) {
+		LIST_MEM_SUB(sharesummary_free, sharesummary->workername);
+		FREENULL(sharesummary->workername);
+	}
+	SET_CREATEBY(sharesummary_free, sharesummary->createby, EMPTY);
+	SET_CREATECODE(sharesummary_free, sharesummary->createcode, EMPTY);
+	SET_CREATEINET(sharesummary_free, sharesummary->createinet, EMPTY);
+	SET_MODIFYBY(sharesummary_free, sharesummary->modifyby, EMPTY);
+	SET_MODIFYCODE(sharesummary_free, sharesummary->modifycode, EMPTY);
+	SET_MODIFYINET(sharesummary_free, sharesummary->modifyinet, EMPTY);
+}
+
+void free_optioncontrol_data(K_ITEM *item)
+{
+	OPTIONCONTROL *optioncontrol;
+
+	DATA_OPTIONCONTROL(optioncontrol, item);
+	if (optioncontrol->optionvalue)
+		FREENULL(optioncontrol->optionvalue);
+}
+
+void free_markersummary_data(K_ITEM *item)
+{
+	MARKERSUMMARY *markersummary;
+
+	DATA_MARKERSUMMARY(markersummary, item);
+	if (markersummary->workername)
+		FREENULL(markersummary->workername);
+	SET_CREATEBY(markersummary_free, markersummary->createby, EMPTY);
+	SET_CREATECODE(markersummary_free, markersummary->createcode, EMPTY);
+	SET_CREATEINET(markersummary_free, markersummary->createinet, EMPTY);
+	SET_MODIFYBY(markersummary_free, markersummary->modifyby, EMPTY);
+	SET_MODIFYCODE(markersummary_free, markersummary->modifycode, EMPTY);
+	SET_MODIFYINET(markersummary_free, markersummary->modifyinet, EMPTY);
+}
+
+void free_workmarkers_data(K_ITEM *item)
+{
+	WORKMARKERS *workmarkers;
+
+	DATA_WORKMARKERS(workmarkers, item);
+	if (workmarkers->poolinstance)
+		FREENULL(workmarkers->poolinstance);
+	if (workmarkers->description)
+		FREENULL(workmarkers->description);
+}
+
+void free_marks_data(K_ITEM *item)
+{
+	MARKS *marks;
+
+	DATA_MARKS(marks, item);
+	if (marks->poolinstance && marks->poolinstance != EMPTY)
+		FREENULL(marks->poolinstance);
+	if (marks->description && marks->description != EMPTY)
+		FREENULL(marks->description);
+	if (marks->extra && marks->extra != EMPTY)
+		FREENULL(marks->extra);
+}
+
 // Clear text printable version of txt up to first '\0'
 char *safe_text(char *txt)
 {
@@ -2390,6 +2467,58 @@ K_ITEM *find_markersummary(int64_t workinfoid, int64_t userid, char *workername)
 	return ms_item;
 }
 
+bool make_markersummaries(bool msg, char *by, char *code, char *inet,
+			  tv_t *cd, K_TREE *trf_root)
+{
+	K_TREE_CTX ctx[1];
+	WORKMARKERS *workmarkers;
+	K_ITEM *wm_item, *wm_last = NULL;
+	tv_t now;
+
+	K_RLOCK(workmarkers_free);
+	wm_item = last_in_ktree(workmarkers_workinfoid_root, ctx);
+	while (wm_item) {
+		DATA_WORKMARKERS(workmarkers, wm_item);
+		if (!CURRENT(&(workmarkers->expirydate)))
+			break;
+		// find the oldest READY workinfoid
+		if (WMREADY(workmarkers->status))
+			wm_last = wm_item;
+		wm_item = prev_in_ktree(ctx);
+	}
+	K_RUNLOCK(workmarkers_free);
+
+	if (!wm_last) {
+		if (!msg)
+			LOGDEBUG("%s() no READY workmarkers", __func__);
+		else
+			LOGWARNING("%s() no READY workmarkers", __func__);
+		return false;
+	}
+
+	DATA_WORKMARKERS(workmarkers, wm_last);
+
+	LOGDEBUG("%s() processing workmarkers %"PRId64"/%s/End %"PRId64"/"
+		 "Stt %"PRId64"/%s/%s",
+		 __func__, workmarkers->markerid, workmarkers->poolinstance,
+		 workmarkers->workinfoidend, workmarkers->workinfoidstart,
+		 workmarkers->description, workmarkers->status);
+
+	if (by == NULL)
+		by = (char *)by_default;
+	if (code == NULL)
+		code = (char *)__func__;
+	if (inet == NULL)
+		inet = (char *)inet_default;
+	if (cd)
+		copy_tv(&now, cd);
+	else
+		setnow(&now);
+
+	return sharesummaries_to_markersummaries(NULL, workmarkers, by, code,
+						 inet, &now, trf_root);
+}
+
 void dsp_workmarkers(K_ITEM *item, FILE *stream)
 {
 	WORKMARKERS *wm;
@@ -2573,7 +2702,7 @@ static bool gen_workmarkers(PGconn *conn, MARKS *stt, bool after, MARKS *fin,
 			 stt->description, after ? "++" : "",
 			 fin->description, before ? "--" : "");
 
-		ok = workmarkers_process(conn, true, 0, EMPTY,
+		ok = workmarkers_process(conn, false, true, 0, EMPTY,
 					 wi_fin->workinfoid, wi_stt->workinfoid,
 					 description, MARKER_READY_STR,
 					 by, code, inet, cd, trf_root);

@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2014 Andrew Smith
+ * Copyright 1995-2015 Andrew Smith
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -168,7 +168,8 @@ char *pqerrmsg(PGconn *conn)
 #define PQPARAM15 PQPARAM8 ",$9,$10,$11,$12,$13,$14,$15"
 #define PQPARAM16 PQPARAM8 ",$9,$10,$11,$12,$13,$14,$15,$16"
 #define PQPARAM22 PQPARAM16 ",$17,$18,$19,$20,$21,$22"
-#define PQPARAM27 PQPARAM22 ",$23,$24,$25,$26,$27"
+#define PQPARAM26 PQPARAM22 ",$23,$24,$25,$26"
+#define PQPARAM27 PQPARAM26 ",$27"
 
 #define PARCHK(_par, _params) do { \
 		if (_par != (int)(sizeof(_params)/sizeof(_params[0]))) { \
@@ -2751,6 +2752,316 @@ bool shareerrors_fill()
 	return true;
 }
 
+/* TODO: what to do about a failure?
+ *  since it will repeat every ~13s
+ * Of course manual intervention is possible via cmd_marks,
+ *  so that is probably the best solution since
+ *  we should be watching the pool all the time :)
+ * The cause would most likely be either a code bug or a DB problem
+ *  so there many be no obvious automated fix
+ *  and flagging the workmarkers to be skipped may or may not be the solution,
+ *  thus manual intervention will be the rule for now */
+bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
+				       char *by, char *code, char *inet, tv_t *cd,
+				       K_TREE *trf_root)
+{
+	// shorter name for log messages
+	const char *shortname = "SS_to_MS";
+	ExecStatusType rescode;
+	PGresult *res;
+	K_TREE_CTX ss_ctx[1], ms_ctx[1];
+	SHARESUMMARY *sharesummary, looksharesummary;
+	MARKERSUMMARY *markersummary, lookmarkersummary;
+	K_ITEM *ss_item, *ss_prev, ss_look, *ms_item, ms_look;
+	bool ok = false, conned = false;
+	int64_t diffacc, shareacc;
+	char *reason = NULL, *tuples = NULL;
+	char *params[2];
+	int n, par = 0, deleted = -7;
+	int ss_count, ms_count;
+	char *del;
+
+	LOGWARNING("%s() Processing: workmarkers %"PRId64"/%s/"
+		   "End %"PRId64"/Stt %"PRId64"/%s/%s",
+		   shortname, workmarkers->markerid, workmarkers->poolinstance,
+		   workmarkers->workinfoidend, workmarkers->workinfoidstart,
+		   workmarkers->description, workmarkers->status);
+
+	K_STORE *old_sharesummary_store = k_new_store(sharesummary_free);
+	K_STORE *new_markersummary_store = k_new_store(markersummary_free);
+	K_TREE *ms_root = new_ktree();
+
+	if (!CURRENT(&(workmarkers->expirydate))) {
+		reason = "unexpired";
+		goto flail;
+	}
+
+	if (!WMREADY(workmarkers->status)) {
+		reason = "not ready";
+		goto flail;
+	}
+
+	// Check there aren't already any matching markersummaries
+	lookmarkersummary.markerid = workmarkers->markerid;
+	lookmarkersummary.userid = 0;
+	lookmarkersummary.workername = EMPTY;
+
+	INIT_MARKERSUMMARY(&ms_look);
+	ms_look.data = (void *)(&lookmarkersummary);
+	K_RLOCK(markersummary_free);
+	ms_item = find_after_in_ktree(markersummary_root, &ms_look,
+					cmp_markersummary, ms_ctx);
+	K_RUNLOCK(markersummary_free);
+	DATA_MARKERSUMMARY_NULL(markersummary, ms_item);
+	if (ms_item && markersummary->markerid == workmarkers->markerid) {
+		reason = "markersummaries already exist";
+		goto flail;
+	}
+
+	diffacc = shareacc = 0;
+	ms_item = NULL;
+
+	looksharesummary.workinfoid = workmarkers->workinfoidend;
+	looksharesummary.userid = MAXID;
+	looksharesummary.workername = EMPTY;
+
+	INIT_SHARESUMMARY(&ss_look);
+	ss_look.data = (void *)(&looksharesummary);
+	/* Since shares come in from ckpool at a high rate,
+	 *  we don't want to lock sharesummary for long
+	 * Those incoming shares will not be touching the sharesummaries
+	 *  we are processing here */
+	K_RLOCK(sharesummary_free);
+	ss_item = find_before_in_ktree(sharesummary_workinfoid_root, &ss_look,
+					cmp_sharesummary_workinfoid, ss_ctx);
+	K_RUNLOCK(sharesummary_free);
+	while (ss_item) {
+		DATA_SHARESUMMARY(sharesummary, ss_item);
+		if (sharesummary->workinfoid < workmarkers->workinfoidstart)
+			break;
+		K_RLOCK(sharesummary_free);
+		ss_prev = prev_in_ktree(ss_ctx);
+		K_RUNLOCK(sharesummary_free);
+
+		// Find/create the markersummary only once per worker change
+		if (!ms_item || markersummary->userid != sharesummary->userid ||
+		    strcmp(markersummary->workername, sharesummary->workername) != 0) {
+			lookmarkersummary.markerid = workmarkers->markerid;
+			lookmarkersummary.userid = sharesummary->userid;
+			lookmarkersummary.workername = sharesummary->workername;
+
+			ms_look.data = (void *)(&lookmarkersummary);
+			ms_item = find_in_ktree(ms_root, &ms_look,
+						cmp_markersummary, ms_ctx);
+			if (!ms_item) {
+				K_WLOCK(markersummary_free);
+				ms_item = k_unlink_head(markersummary_free);
+				K_WUNLOCK(markersummary_free);
+				k_add_head(new_markersummary_store, ms_item);
+				DATA_MARKERSUMMARY(markersummary, ms_item);
+				bzero(markersummary, sizeof(*markersummary));
+				markersummary->markerid = workmarkers->markerid;
+				markersummary->userid = sharesummary->userid;
+				markersummary->workername = strdup(sharesummary->workername);
+				LIST_MEM_ADD(markersummary_free, markersummary->workername);
+				ms_root = add_to_ktree(ms_root, ms_item, cmp_markersummary);
+
+				LOGDEBUG("%s() new ms %"PRId64"/%"PRId64"/%s",
+					 shortname, markersummary->markerid,
+					 markersummary->userid,
+					 markersummary->workername);
+			} else {
+				DATA_MARKERSUMMARY(markersummary, ms_item);
+			}
+		}
+		markersummary->diffacc += sharesummary->diffacc;
+		markersummary->diffsta += sharesummary->diffsta;
+		markersummary->diffdup += sharesummary->diffdup;
+		markersummary->diffhi += sharesummary->diffhi;
+		markersummary->diffrej += sharesummary->diffrej;
+		markersummary->shareacc += sharesummary->shareacc;
+		markersummary->sharesta += sharesummary->sharesta;
+		markersummary->sharedup += sharesummary->sharedup;
+		markersummary->sharehi += sharesummary->sharehi;
+		markersummary->sharerej += sharesummary->sharerej;
+		markersummary->sharecount += sharesummary->sharecount;
+		markersummary->errorcount += sharesummary->errorcount;
+		if (!markersummary->firstshare.tv_sec ||
+		     !tv_newer(&(markersummary->firstshare), &(sharesummary->firstshare))) {
+			copy_tv(&(markersummary->firstshare), &(sharesummary->firstshare));
+		}
+		if (tv_newer(&(markersummary->lastshare), &(sharesummary->lastshare))) {
+			copy_tv(&(markersummary->lastshare), &(sharesummary->lastshare));
+			markersummary->lastdiffacc = sharesummary->lastdiffacc;
+		}
+
+		diffacc += sharesummary->diffacc;
+		shareacc += sharesummary->shareacc;
+
+		k_unlink_item(sharesummary_store, ss_item);
+		k_add_head(old_sharesummary_store, ss_item);
+
+		ss_item = ss_prev;
+	}
+
+	if (conn == NULL) {
+		conn = dbconnect();
+		conned = true;
+	}
+
+	res = PQexec(conn, "Begin", CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Begin", rescode, conn);
+		goto flail;
+	}
+
+	ms_item = new_markersummary_store->head;
+	while (ms_item) {
+		if (!(markersummary_add(conn, ms_item, by, code, inet,
+					cd, trf_root))) {
+			reason = "db error";
+			goto rollback;
+		}
+		ms_item = ms_item->next;
+	}
+
+	if (old_sharesummary_store->count > 0) {
+		par = 0;
+		params[par++] = bigint_to_buf(workmarkers->workinfoidstart, NULL, 0);
+		params[par++] = bigint_to_buf(workmarkers->workinfoidend, NULL, 0);
+		PARCHK(par, params);
+
+		del = "delete from sharesummary "
+			"where workinfoid >= $1 and workinfoid <= $2";
+
+		res = PQexecParams(conn, del, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		if (PGOK(rescode)) {
+			tuples = PQcmdTuples(res);
+			if (tuples && *tuples)
+				deleted = atoi(tuples);
+		}
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Delete", rescode, conn);
+			reason = "delete failure";
+			goto rollback;
+		}
+
+		if (deleted != old_sharesummary_store->count) {
+			LOGERR("%s() processed sharesummaries=%d but deleted=%d",
+				shortname, old_sharesummary_store->count, deleted);
+			reason = "delete mismatch";
+			goto rollback;
+		}
+	}
+
+	ok = workmarkers_process(conn, true, true,
+				 workmarkers->markerid,
+				 workmarkers->poolinstance,
+				 workmarkers->workinfoidend,
+				 workmarkers->workinfoidstart,
+				 workmarkers->description,
+				 MARKER_PROCESSED_STR,
+				 by, code, inet, cd, trf_root);
+rollback:
+	if (ok)
+		res = PQexec(conn, "Commit", CKPQ_WRITE);
+	else
+		res = PQexec(conn, "Rollback", CKPQ_WRITE);
+
+	PQclear(res);
+flail:
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	if (conned)
+		PQfinish(conn);
+
+	if (reason) {
+		// already displayed the full workmarkers detail at the top
+		LOGERR("%s() %s: workmarkers %"PRId64"/%s/%s",
+			shortname, reason, workmarkers->markerid,
+			workmarkers->description, workmarkers->status);
+
+		ok = false;
+	}
+
+	if (!ok) {
+		if (new_markersummary_store->count > 0) {
+			// Throw them away (they don't exist anywhere else)
+			ms_item = new_markersummary_store->head;
+			while (ms_item) {
+				free_markersummary_data(ms_item);
+				ms_item = ms_item->next;
+			}
+			K_WLOCK(markersummary_free);
+			k_list_transfer_to_head(new_markersummary_store, markersummary_free);
+			K_WUNLOCK(markersummary_free);
+		}
+		if (old_sharesummary_store->count > 0) {
+			// Put them back in the store where they came from
+			K_WLOCK(sharesummary_free);
+			k_list_transfer_to_head(old_sharesummary_store, sharesummary_store);
+			K_WUNLOCK(sharesummary_free);
+		}
+	} else {
+		ms_count = new_markersummary_store->count;
+		ss_count = old_sharesummary_store->count;
+		// Deadlock alert for other newer code ...
+		K_WLOCK(sharesummary_free);
+		K_WLOCK(markersummary_free);
+		ms_item = new_markersummary_store->head;
+		while (ms_item) {
+			// Move the new markersummaries into the trees/stores
+			markersummary_root = add_to_ktree(markersummary_root,
+							  ms_item,
+							  cmp_markersummary);
+			markersummary_userid_root = add_to_ktree(markersummary_userid_root,
+								 ms_item,
+								 cmp_markersummary_userid);
+			ms_item = ms_item->next;
+		}
+		k_list_transfer_to_head(new_markersummary_store, markersummary_store);
+
+		/* For normal shift processing this wont be very quick
+		 *  so it will be a 'long' LOCK */
+		ss_item = old_sharesummary_store->head;
+		while (ss_item) {
+			// remove the old sharesummaries from the trees
+			sharesummary_root = remove_from_ktree(sharesummary_root,
+							      ss_item,
+							      cmp_sharesummary);
+			sharesummary_workinfoid_root = remove_from_ktree(sharesummary_workinfoid_root,
+									 ss_item,
+									 cmp_sharesummary_workinfoid);
+			free_sharesummary_data(ss_item);
+
+			ss_item = ss_item->next;
+		}
+		k_list_transfer_to_head(old_sharesummary_store, sharesummary_free);
+		K_WUNLOCK(markersummary_free);
+		K_WUNLOCK(sharesummary_free);
+
+		LOGWARNING("%s() Processed: %d ms %d ss %"PRId64" shares "
+			   "%"PRId64" diff for workmarkers %"PRId64"/%s/"
+			   "End %"PRId64"/Stt %"PRId64"/%s/%s",
+			   shortname, ms_count, ss_count, shareacc, diffacc,
+			   workmarkers->markerid, workmarkers->poolinstance,
+			   workmarkers->workinfoidend,
+			   workmarkers->workinfoidstart,
+			   workmarkers->description,
+			   workmarkers->status);
+	}
+	ms_root = free_ktree(ms_root, NULL);
+	new_markersummary_store = k_free_store(new_markersummary_store);
+	old_sharesummary_store = k_free_store(old_sharesummary_store);
+
+	return ok;
+}
+
 bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITEM *ss_item,
 				char *by, char *code, char *inet, tv_t *cd, WHERE_FFL_ARGS)
 {
@@ -5204,6 +5515,82 @@ clean:
 	return ok;
 }
 
+bool markersummary_add(PGconn *conn, K_ITEM *ms_item, char *by, char *code,
+			char *inet, tv_t *cd, K_TREE *trf_root)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	PGresult *res;
+	MARKERSUMMARY *row;
+	char *params[18 + MODIFYDATECOUNT];
+	int n, par = 0;
+	char *ins;
+	bool ok = false;
+
+	LOGDEBUG("%s(): add", __func__);
+
+	DATA_MARKERSUMMARY(row, ms_item);
+
+	MODIFYDATEPOINTERS(markersummary_free, row, cd, by, code, inet);
+	MODIFYDATETRANSFER(markersummary_free, trf_root, row);
+
+	par = 0;
+	params[par++] = bigint_to_buf(row->markerid, NULL, 0);
+	params[par++] = bigint_to_buf(row->userid, NULL, 0);
+	params[par++] = str_to_buf(row->workername, NULL, 0);
+	params[par++] = double_to_buf(row->diffacc, NULL, 0);
+	params[par++] = double_to_buf(row->diffsta, NULL, 0);
+	params[par++] = double_to_buf(row->diffdup, NULL, 0);
+	params[par++] = double_to_buf(row->diffhi, NULL, 0);
+	params[par++] = double_to_buf(row->diffrej, NULL, 0);
+	params[par++] = double_to_buf(row->shareacc, NULL, 0);
+	params[par++] = double_to_buf(row->sharesta, NULL, 0);
+	params[par++] = double_to_buf(row->sharedup, NULL, 0);
+	params[par++] = double_to_buf(row->sharehi, NULL, 0);
+	params[par++] = double_to_buf(row->sharerej, NULL, 0);
+	params[par++] = bigint_to_buf(row->sharecount, NULL, 0);
+	params[par++] = bigint_to_buf(row->errorcount, NULL, 0);
+	params[par++] = tv_to_buf(&(row->firstshare), NULL, 0);
+	params[par++] = tv_to_buf(&(row->lastshare), NULL, 0);
+	params[par++] = double_to_buf(row->lastdiffacc, NULL, 0);
+	MODIFYDATEPARAMS(params, par, row);
+	PARCHK(par, params);
+
+	ins = "insert into markersummary "
+		"(markerid,userid,workername,diffacc,diffsta,diffdup,diffhi,"
+		"diffrej,shareacc,sharesta,sharedup,sharehi,sharerej,"
+		"sharecount,errorcount,firstshare,lastshare,lastdiffacc"
+		MODIFYDATECONTROL ") values (" PQPARAM26 ")";
+
+	LOGDEBUG("%s() adding ms %"PRId64"/%"PRId64"/%s/%.0f",
+		 __func__, row->markerid, row->userid, row->workername,
+		 row->diffacc);
+
+	if (!conn) {
+		conn = dbconnect();
+		conned = true;
+	}
+
+	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Insert", rescode, conn);
+		goto unparam;
+	}
+
+	ok = true;
+unparam:
+	PQclear(res);
+	if (conned)
+		PQfinish(conn);
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	// caller must do tree/list/store changes
+
+	return ok;
+}
+
 bool markersummary_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
@@ -5367,7 +5754,9 @@ bool markersummary_fill(PGconn *conn)
 	return ok;
 }
 
-/* Add means create a new one and expire the old one if it exists,
+/* Already means there is a transaction already in progress
+ *  so don't begin or commit/rollback
+ * Add means create a new one and expire the old one if it exists,
  *  otherwise we only expire the old one if it exists
  * Add requires all db fields except markerid, however if markerid
  *  is non-zero, it will be used instead of getting a new one
@@ -5380,10 +5769,10 @@ bool markersummary_fill(PGconn *conn)
  *  since we only check for a CURRENT workmarkers
  * N.B. also, this returns success if !add and there is no matching
  *  old workmarkers */
-bool _workmarkers_process(PGconn *conn, bool add, int64_t markerid,
-			  char *poolinstance, int64_t workinfoidend,
-			  int64_t workinfoidstart, char *description,
-			  char *status, char *by, char *code,
+bool _workmarkers_process(PGconn *conn, bool already, bool add,
+			  int64_t markerid, char *poolinstance,
+			  int64_t workinfoidend, int64_t workinfoidstart,
+			  char *description, char *status, char *by, char *code,
 			  char *inet, tv_t *cd, K_TREE *trf_root,
 			  WHERE_FFL_ARGS)
 {
@@ -5391,7 +5780,7 @@ bool _workmarkers_process(PGconn *conn, bool add, int64_t markerid,
 	bool conned = false;
 	PGresult *res = NULL;
 	K_ITEM *wm_item = NULL, *old_wm_item = NULL, *w_item;
-	WORKMARKERS *row, *oldworkmarkers;
+	WORKMARKERS *row, *oldworkmarkers = NULL;
 	char *upd, *ins;
 	char *params[6 + HISTORYDATECOUNT];
 	bool ok = false, begun = false;
@@ -5414,15 +5803,17 @@ bool _workmarkers_process(PGconn *conn, bool add, int64_t markerid,
 			conn = dbconnect();
 			conned = true;
 		}
-		res = PQexec(conn, "Begin", CKPQ_WRITE);
-		rescode = PQresultStatus(res);
-		PQclear(res);
-		if (!PGOK(rescode)) {
-			PGLOGERR("Begin", rescode, conn);
-			goto unparam;
-		}
+		if (!already) {
+			res = PQexec(conn, "Begin", CKPQ_WRITE);
+			rescode = PQresultStatus(res);
+			PQclear(res);
+			if (!PGOK(rescode)) {
+				PGLOGERR("Begin", rescode, conn);
+				goto unparam;
+			}
 
-		begun = true;
+			begun = true;
+		}
 
 		upd = "update workmarkers set expirydate=$1 where markerid=$2"
 			" and expirydate=$3";
@@ -5473,7 +5864,7 @@ bool _workmarkers_process(PGconn *conn, bool add, int64_t markerid,
 			conned = true;
 		}
 
-		if (!begun) {
+		if (!already && !begun) {
 			res = PQexec(conn, "Begin", CKPQ_WRITE);
 			rescode = PQresultStatus(res);
 			PQclear(res);
@@ -5707,7 +6098,7 @@ bool _marks_process(PGconn *conn, bool add, char *poolinstance,
 	bool conned = false;
 	PGresult *res = NULL;
 	K_ITEM *m_item = NULL, *old_m_item = NULL, *w_item;
-	MARKS *row, *oldmarks;
+	MARKS *row, *oldmarks = NULL;
 	char *upd, *ins;
 	char *params[6 + HISTORYDATECOUNT];
 	bool ok = false, begun = false;

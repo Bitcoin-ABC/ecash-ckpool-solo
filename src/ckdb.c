@@ -169,6 +169,9 @@ static char *status_chars = "|/-\\";
 
 static char *restorefrom;
 
+// Only accessed in here
+static bool markersummary_auto;
+
 // disallow: '/' '.' '_' and FLDSEP
 const char *userpatt = "^[^/\\._"FLDSEPSTR"]*$";
 const char *mailpatt = "^[A-Za-z0-9_-][A-Za-z0-9_\\.-]*@[A-Za-z0-9][A-Za-z0-9\\.-]*[A-Za-z0-9]$";
@@ -1074,82 +1077,6 @@ static void alloc_storage()
 				ALLOC_MARKS, LIMIT_MARKS, true);
 	marks_store = k_new_store(marks_free);
 	marks_root = new_ktree();
-}
-
-static void free_workinfo_data(K_ITEM *item)
-{
-	WORKINFO *workinfo;
-
-	DATA_WORKINFO(workinfo, item);
-	if (workinfo->transactiontree)
-		FREENULL(workinfo->transactiontree);
-	if (workinfo->merklehash)
-		FREENULL(workinfo->merklehash);
-}
-
-static void free_sharesummary_data(K_ITEM *item)
-{
-	SHARESUMMARY *sharesummary;
-
-	DATA_SHARESUMMARY(sharesummary, item);
-	if (sharesummary->workername) {
-		LIST_MEM_SUB(sharesummary_free, sharesummary->workername);
-		FREENULL(sharesummary->workername);
-	}
-	SET_CREATEBY(sharesummary_free, sharesummary->createby, EMPTY);
-	SET_CREATECODE(sharesummary_free, sharesummary->createcode, EMPTY);
-	SET_CREATEINET(sharesummary_free, sharesummary->createinet, EMPTY);
-	SET_MODIFYBY(sharesummary_free, sharesummary->modifyby, EMPTY);
-	SET_MODIFYCODE(sharesummary_free, sharesummary->modifycode, EMPTY);
-	SET_MODIFYINET(sharesummary_free, sharesummary->modifyinet, EMPTY);
-}
-
-static void free_optioncontrol_data(K_ITEM *item)
-{
-	OPTIONCONTROL *optioncontrol;
-
-	DATA_OPTIONCONTROL(optioncontrol, item);
-	if (optioncontrol->optionvalue)
-		FREENULL(optioncontrol->optionvalue);
-}
-
-static void free_markersummary_data(K_ITEM *item)
-{
-	MARKERSUMMARY *markersummary;
-
-	DATA_MARKERSUMMARY(markersummary, item);
-	if (markersummary->workername)
-		FREENULL(markersummary->workername);
-	SET_CREATEBY(markersummary_free, markersummary->createby, EMPTY);
-	SET_CREATECODE(markersummary_free, markersummary->createcode, EMPTY);
-	SET_CREATEINET(markersummary_free, markersummary->createinet, EMPTY);
-	SET_MODIFYBY(markersummary_free, markersummary->modifyby, EMPTY);
-	SET_MODIFYCODE(markersummary_free, markersummary->modifycode, EMPTY);
-	SET_MODIFYINET(markersummary_free, markersummary->modifyinet, EMPTY);
-}
-
-static void free_workmarkers_data(K_ITEM *item)
-{
-	WORKMARKERS *workmarkers;
-
-	DATA_WORKMARKERS(workmarkers, item);
-	if (workmarkers->poolinstance)
-		FREENULL(workmarkers->poolinstance);
-	if (workmarkers->description)
-		FREENULL(workmarkers->description);
-}
-
-static void free_marks_data(K_ITEM *item)
-{
-	MARKS *marks;
-
-	DATA_MARKS(marks, item);
-	if (marks->poolinstance && marks->poolinstance != EMPTY)
-		FREENULL(marks->poolinstance);
-	if (marks->description && marks->description != EMPTY)
-		FREENULL(marks->description);
-	if (marks->extra && marks->extra != EMPTY)
-		FREENULL(marks->extra);
 }
 
 #define FREE_TREE(_tree) \
@@ -2081,8 +2008,8 @@ static void make_a_shift_mark()
 	K_ITEM wi_look, ss_look;
 	SHARESUMMARY *sharesummary, looksharesummary;
 	WORKINFO *workinfo, lookworkinfo;
-	BLOCKS *blocks;
-	MARKS *marks, *sh_marks;
+	BLOCKS *blocks = NULL;
+	MARKS *marks = NULL, *sh_marks = NULL;
 	int64_t ss_age_wid, last_marks_wid, marks_wid, prev_wid;
 	bool was_block = false, ok;
 	char cd_buf[DATE_BUFSIZ], cd_buf2[DATE_BUFSIZ];
@@ -2197,7 +2124,8 @@ static void make_a_shift_mark()
 
 	if (m_item) {
 		/* First block after the last mark
-		 * Shift must stop at or before this */
+		 * Shift must stop at or before this
+		 * N.B. any block, even 'New' */
 		K_RLOCK(blocks_free);
 		b_item = first_in_ktree(blocks_root, b_ctx);
 		while (b_item) {
@@ -2474,16 +2402,16 @@ static void *marker(__maybe_unused void *arg)
 		else
 			make_a_workmarker();
 
-#if 0
 		for (i = 0; i < 4; i++) {
 			if (!everyone_die)
 				sleep(1);
 		}
 		if (everyone_die)
 			break;
-		else
-			make_markersummaries();
-#endif
+		else {
+			if (markersummary_auto)
+				make_markersummaries(false, NULL, NULL, NULL, NULL, NULL);
+		}
 	}
 
 	marker_using_data = false;
@@ -4044,6 +3972,8 @@ static struct option long_options[] = {
 	{ "help",		no_argument,		0,	'h' },
 	{ "killold",		no_argument,		0,	'k' },
 	{ "loglevel",		required_argument,	0,	'l' },
+	// markersummary = enable markersummary auto generation
+	{ "markersummary",	no_argument,		0,	'm' },
 	{ "name",		required_argument,	0,	'n' },
 	{ "dbpass",		required_argument,	0,	'p' },
 	{ "btc-pass",		required_argument,	0,	'P' },
@@ -4088,7 +4018,7 @@ int main(int argc, char **argv)
 	memset(&ckp, 0, sizeof(ckp));
 	ckp.loglevel = LOG_NOTICE;
 
-	while ((c = getopt_long(argc, argv, "c:d:hkl:n:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "c:d:hkl:mn:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
 		switch(c) {
 			case 'c':
 				ckp.config = strdup(optarg);
@@ -4125,6 +4055,9 @@ int main(int argc, char **argv)
 					quit(1, "Invalid loglevel (range %d - %d): %d",
 					     LOG_EMERG, LOG_DEBUG, ckp.loglevel);
 				}
+				break;
+			case 'm':
+				markersummary_auto = true;
 				break;
 			case 'n':
 				ckp.name = strdup(optarg);

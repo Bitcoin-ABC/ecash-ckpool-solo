@@ -192,6 +192,7 @@ struct user_instance {
 	double dsps1440;
 	double dsps10080;
 	tv_t last_share;
+	time_t auth_time;
 };
 
 /* Combined data from workers with the same workername */
@@ -1348,7 +1349,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 	}
 	/* Discard any dead instances that no longer hold any reference counts,
 	 * freeing up their memory safely */
-	DL_FOREACH_SAFE(sdata->dead_instances, client, tmp) {
+	LL_FOREACH_SAFE(sdata->dead_instances, client, tmp) {
 		if (!client->ref) {
 			LOGINFO("Stratifier discarding instance %ld", client->id);
 			LL_DELETE(sdata->dead_instances, client);
@@ -2053,6 +2054,8 @@ static int send_recv_auth(stratum_instance_t *client)
 			json_get_string(&secondaryuserid, val, "secondaryuserid");
 			json_get_int(&worker->mindiff, val, "difficultydefault");
 			client->suggest_diff = worker->mindiff;
+			if (!user_instance->auth_time)
+				user_instance->auth_time = time(NULL);
 		}
 		if (secondaryuserid && (!safecmp(response, "ok.authorise") ||
 					!safecmp(response, "ok.addrauth"))) {
@@ -2170,7 +2173,13 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 		if (!ckp->btcsolo || client->user_instance->btcaddress)
 			ret = true;
 	} else {
-		*errnum = send_recv_auth(client);
+		/* Preauth workers for the first 10 minutes after the user is
+		 * first authorised by ckdb to avoid floods of worker auths.
+		 * *errnum is implied zero already so ret will be set true */
+		if (user_instance->auth_time && time(NULL) - user_instance->auth_time < 600)
+			queue_delayed_auth(client);
+		else
+			*errnum = send_recv_auth(client);
 		if (!*errnum)
 			ret = true;
 		else if (*errnum < 0 && user_instance->secondaryuserid) {
