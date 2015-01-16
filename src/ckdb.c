@@ -1117,6 +1117,8 @@ static void alloc_storage()
 
 static void dealloc_storage()
 {
+	LOGWARNING("%s() logqueue ...", __func__);
+
 	FREE_LISTS(logqueue);
 
 	FREE_TREE(marks);
@@ -1128,12 +1130,16 @@ static void dealloc_storage()
 	FREE_STORE_DATA(workmarkers);
 	FREE_LIST_DATA(workmarkers);
 
+	LOGWARNING("%s() markersummary ...", __func__);
+
 	FREE_TREE(markersummary_userid);
 	FREE_TREE(markersummary);
 	FREE_STORE_DATA(markersummary);
 	FREE_LIST_DATA(markersummary);
 
 	FREE_ALL(workerstatus);
+
+	LOGWARNING("%s() userstats ...", __func__);
 
 	FREE_TREE(userstats_workerstatus);
 	FREE_TREE(userstats_statsdate);
@@ -1142,10 +1148,14 @@ static void dealloc_storage()
 	FREE_STORE(userstats_eos);
 	FREE_ALL(userstats);
 
+	LOGWARNING("%s() poolstats ...", __func__);
+
 	FREE_ALL(poolstats);
 	FREE_ALL(auths);
 	FREE_ALL(miningpayouts);
 	FREE_ALL(blocks);
+
+	LOGWARNING("%s() sharesummary ...", __func__);
 
 	FREE_TREE(sharesummary_workinfoid);
 	FREE_TREE(sharesummary);
@@ -1154,6 +1164,8 @@ static void dealloc_storage()
 
 	FREE_ALL(shareerrors);
 	FREE_ALL(shares);
+
+	LOGWARNING("%s() workinfo ...", __func__);
 
 	FREE_TREE(workinfo_height);
 	FREE_TREE(workinfo);
@@ -1174,9 +1186,13 @@ static void dealloc_storage()
 	FREE_TREE(userid);
 	FREE_ALL(users);
 
+	LOGWARNING("%s() transfer/heartbeatqueue/workqueue ...", __func__);
+
 	FREE_LIST(transfer);
 	FREE_LISTS(heartbeatqueue);
 	FREE_LISTS(workqueue);
+
+	LOGWARNING("%s() finished", __func__);
 }
 
 static bool setup_data()

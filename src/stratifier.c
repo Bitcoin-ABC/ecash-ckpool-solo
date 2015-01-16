@@ -1182,7 +1182,7 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, int
 }
 
 /* Add a stratum instance to the dead instances list */
-static void kill_instance(sdata_t *sdata, stratum_instance_t *client)
+static void __kill_instance(sdata_t *sdata, stratum_instance_t *client)
 {
 	user_instance_t *instance = client->user_instance;
 
@@ -1190,10 +1190,8 @@ static void kill_instance(sdata_t *sdata, stratum_instance_t *client)
 		worker_instance_t *worker = client->worker_instance;
 
 		DL_DELETE(instance->instances, client);
-		if (worker) {
+		if (worker)
 			DL_DELETE(instance->worker_instances, worker);
-			free(worker);
-		}
 	}
 	LL_PREPEND(sdata->dead_instances, client);
 	sdata->stats.dead++;
@@ -1228,7 +1226,7 @@ static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid,
 		/* If we've found a matching disconnected instance, use it only
 		 * once and discard it */
 		__del_disconnected(sdata, instance);
-		kill_instance(sdata, instance);
+		__kill_instance(sdata, instance);
 		ret = true;
 	}
 out_unlock:
@@ -1339,7 +1337,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 			sdata->stats.disconnected++;
 			client->disconnected_time = time(NULL);
 		} else
-			kill_instance(sdata, client);
+			__kill_instance(sdata, client);
 	}
 	ck_wunlock(&sdata->instance_lock);
 
@@ -1361,7 +1359,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 			continue;
 		LOGINFO("Discarding aged disconnected instance %ld", client->id);
 		__del_disconnected(sdata, client);
-		kill_instance(sdata, client);
+		__kill_instance(sdata, client);
 	}
 	/* Discard any dead instances that no longer hold any reference counts,
 	 * freeing up their memory safely */
