@@ -1195,7 +1195,7 @@ static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid,
 	/* Number is in BE but we don't swap either of them */
 	hex2bin(&session64, sessionid, 8);
 
-	ck_ilock(&sdata->instance_lock);
+	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, instance, tmp) {
 		if (instance->id == id)
 			continue;
@@ -1209,15 +1209,12 @@ static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid,
 	if (instance) {
 		/* If we've found a matching disconnected instance, use it only
 		 * once and discard it */
-		ck_ulock(&sdata->instance_lock);
 		HASH_DEL(sdata->disconnected_instances, instance);
 		kill_instance(sdata, instance);
-		ck_dwilock(&sdata->instance_lock);
-
 		ret = true;
 	}
 out_unlock:
-	ck_uilock(&sdata->instance_lock);
+	ck_wunlock(&sdata->instance_lock);
 out:
 	return ret;
 }
