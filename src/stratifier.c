@@ -41,6 +41,8 @@ struct pool_stats {
 
 	int workers;
 	int users;
+	int disconnected;
+	int dead;
 
 	/* Absolute shares stats */
 	int64_t unaccounted_shares;
@@ -924,6 +926,12 @@ static void update_base(ckpool_t *ckp, int prio)
 	create_pthread(pth, do_update, ur);
 }
 
+static void __del_disconnected(sdata_t *sdata, stratum_instance_t *client)
+{
+	HASH_DEL(sdata->disconnected_instances, client);
+	sdata->stats.disconnected--;
+}
+
 static void drop_allclients(ckpool_t *ckp)
 {
 	stratum_instance_t *client, *tmp;
@@ -937,7 +945,7 @@ static void drop_allclients(ckpool_t *ckp)
 		send_proc(ckp->connector, buf);
 	}
 	HASH_ITER(hh, sdata->disconnected_instances, client, tmp)
-		HASH_DEL(sdata->disconnected_instances, client);
+		__del_disconnected(sdata, client);
 	sdata->stats.users = sdata->stats.workers = 0;
 	ck_wunlock(&sdata->instance_lock);
 }
@@ -1179,6 +1187,7 @@ static void kill_instance(sdata_t *sdata, stratum_instance_t *client)
 	if (client->user_instance)
 		DL_DELETE(client->user_instance->instances, client);
 	LL_PREPEND(sdata->dead_instances, client);
+	sdata->stats.dead++;
 }
 
 /* Only supports a full ckpool instance sessionid with an 8 byte sessionid */
@@ -1209,7 +1218,7 @@ static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid,
 	if (instance) {
 		/* If we've found a matching disconnected instance, use it only
 		 * once and discard it */
-		HASH_DEL(sdata->disconnected_instances, instance);
+		__del_disconnected(sdata, instance);
 		kill_instance(sdata, instance);
 		ret = true;
 	}
@@ -1318,6 +1327,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		/* Only keep around one copy of the old client in server mode */
 		if (!client->ckp->proxy && !old_client && client->enonce1_64) {
 			HASH_ADD(hh, sdata->disconnected_instances, enonce1_64, sizeof(uint64_t), client);
+			sdata->stats.disconnected++;
 			client->disconnected_time = time(NULL);
 		} else
 			kill_instance(sdata, client);
@@ -1341,7 +1351,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		if (now_t - client->disconnected_time < 600)
 			continue;
 		LOGINFO("Discarding aged disconnected instance %ld", client->id);
-		HASH_DEL(sdata->disconnected_instances, client);
+		__del_disconnected(sdata, client);
 		kill_instance(sdata, client);
 	}
 	/* Discard any dead instances that no longer hold any reference counts,
@@ -1350,6 +1360,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		if (!client->ref) {
 			LOGINFO("Stratifier discarding instance %ld", client->id);
 			LL_DELETE(sdata->dead_instances, client);
+			sdata->stats.dead--;
 			free(client->workername);
 			free(client->useragent);
 			free(client);
@@ -3626,6 +3637,7 @@ static void *statsupdate(void *arg)
 		user_instance_t *instance, *tmpuser;
 		stratum_instance_t *client, *tmp;
 		double sps1, sps5, sps15, sps60;
+		int idle_workers = 0;
 		char fname[512] = {};
 		tv_t now, diff;
 		ts_t ts_now;
@@ -3637,78 +3649,6 @@ static void *statsupdate(void *arg)
 		tv_time(&now);
 		timersub(&now, &stats->start_time, &diff);
 		tdiff = diff.tv_sec + (double)diff.tv_usec / 1000000;
-
-		ghs1 = stats->dsps1 * nonces;
-		suffix_string(ghs1, suffix1, 16, 0);
-		sps1 = stats->sps1;
-
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 300);
-		ghs5 = stats->dsps5 * nonces / bias;
-		sps5 = stats->sps5 / bias;
-		suffix_string(ghs5, suffix5, 16, 0);
-
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 900);
-		ghs15 = stats->dsps15 * nonces / bias;
-		suffix_string(ghs15, suffix15, 16, 0);
-		sps15 = stats->sps15 / bias;
-
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 3600);
-		ghs60 = stats->dsps60 * nonces / bias;
-		sps60 = stats->sps60 / bias;
-		suffix_string(ghs60, suffix60, 16, 0);
-
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 21600);
-		ghs360 = stats->dsps360 * nonces / bias;
-		suffix_string(ghs360, suffix360, 16, 0);
-
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 86400);
-		ghs1440 = stats->dsps1440 * nonces / bias;
-		suffix_string(ghs1440, suffix1440, 16, 0);
-
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 604800);
-		ghs10080 = stats->dsps10080 * nonces / bias;
-		suffix_string(ghs10080, suffix10080, 16, 0);
-
-		snprintf(fname, 511, "%s/pool/pool.status", ckp->logdir);
-		fp = fopen(fname, "we");
-		if (unlikely(!fp))
-			LOGERR("Failed to fopen %s", fname);
-
-		JSON_CPACK(val, "{si,si,si}",
-				"runtime", diff.tv_sec,
-				"Users", stats->users,
-				"Workers", stats->workers);
-		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-		json_decref(val);
-		LOGNOTICE("Pool:%s", s);
-		fprintf(fp, "%s\n", s);
-		dealloc(s);
-
-		JSON_CPACK(val, "{ss,ss,ss,ss,ss,ss,ss}",
-				"hashrate1m", suffix1,
-				"hashrate5m", suffix5,
-				"hashrate15m", suffix15,
-				"hashrate1hr", suffix60,
-				"hashrate6hr", suffix360,
-				"hashrate1d", suffix1440,
-				"hashrate7d", suffix10080);
-		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-		json_decref(val);
-		LOGNOTICE("Pool:%s", s);
-		fprintf(fp, "%s\n", s);
-		dealloc(s);
-
-		JSON_CPACK(val, "{sf,sf,sf,sf}",
-				"SPS1m", sps1,
-				"SPS5m", sps5,
-				"SPS15m", sps15,
-				"SPS1h", sps60);
-		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-		json_decref(val);
-		LOGNOTICE("Pool:%s", s);
-		fprintf(fp, "%s\n", s);
-		dealloc(s);
-		fclose(fp);
 
 		ck_rlock(&sdata->instance_lock);
 		HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
@@ -3742,6 +3682,7 @@ static void *statsupdate(void *arg)
 					decay_time(&worker->dsps5, 0, per_tdiff, 300);
 					decay_time(&worker->dsps60, 0, per_tdiff, 3600);
 					decay_time(&worker->dsps1440, 0, per_tdiff, 86400);
+					idle_workers++;
 					worker->idle = true;
 				}
 				ghs = worker->dsps1 * nonces;
@@ -3825,6 +3766,81 @@ static void *statsupdate(void *arg)
 			fclose(fp);
 		}
 		ck_runlock(&sdata->instance_lock);
+
+		ghs1 = stats->dsps1 * nonces;
+		suffix_string(ghs1, suffix1, 16, 0);
+		sps1 = stats->sps1;
+
+		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 300);
+		ghs5 = stats->dsps5 * nonces / bias;
+		sps5 = stats->sps5 / bias;
+		suffix_string(ghs5, suffix5, 16, 0);
+
+		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 900);
+		ghs15 = stats->dsps15 * nonces / bias;
+		suffix_string(ghs15, suffix15, 16, 0);
+		sps15 = stats->sps15 / bias;
+
+		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 3600);
+		ghs60 = stats->dsps60 * nonces / bias;
+		sps60 = stats->sps60 / bias;
+		suffix_string(ghs60, suffix60, 16, 0);
+
+		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 21600);
+		ghs360 = stats->dsps360 * nonces / bias;
+		suffix_string(ghs360, suffix360, 16, 0);
+
+		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 86400);
+		ghs1440 = stats->dsps1440 * nonces / bias;
+		suffix_string(ghs1440, suffix1440, 16, 0);
+
+		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 604800);
+		ghs10080 = stats->dsps10080 * nonces / bias;
+		suffix_string(ghs10080, suffix10080, 16, 0);
+
+		snprintf(fname, 511, "%s/pool/pool.status", ckp->logdir);
+		fp = fopen(fname, "we");
+		if (unlikely(!fp))
+			LOGERR("Failed to fopen %s", fname);
+
+		JSON_CPACK(val, "{si,si,si,si,si,si}",
+				"runtime", diff.tv_sec,
+				"Users", stats->users,
+				"Workers", stats->workers,
+				"Idle", idle_workers,
+				"Disconnected", stats->disconnected,
+				"Dead", stats->dead);
+		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
+		json_decref(val);
+		LOGNOTICE("Pool:%s", s);
+		fprintf(fp, "%s\n", s);
+		dealloc(s);
+
+		JSON_CPACK(val, "{ss,ss,ss,ss,ss,ss,ss}",
+				"hashrate1m", suffix1,
+				"hashrate5m", suffix5,
+				"hashrate15m", suffix15,
+				"hashrate1hr", suffix60,
+				"hashrate6hr", suffix360,
+				"hashrate1d", suffix1440,
+				"hashrate7d", suffix10080);
+		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
+		json_decref(val);
+		LOGNOTICE("Pool:%s", s);
+		fprintf(fp, "%s\n", s);
+		dealloc(s);
+
+		JSON_CPACK(val, "{sf,sf,sf,sf}",
+				"SPS1m", sps1,
+				"SPS5m", sps5,
+				"SPS15m", sps15,
+				"SPS1h", sps60);
+		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
+		json_decref(val);
+		LOGNOTICE("Pool:%s", s);
+		fprintf(fp, "%s\n", s);
+		dealloc(s);
+		fclose(fp);
 
 		ts_realtime(&ts_now);
 		sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
