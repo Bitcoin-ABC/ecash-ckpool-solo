@@ -1325,7 +1325,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		HASH_DEL(sdata->stratum_instances, client);
 		HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
 		/* Only keep around one copy of the old client in server mode */
-		if (!client->ckp->proxy && !old_client && client->enonce1_64) {
+		if (!client->ckp->proxy && !old_client && client->enonce1_64 && dec) {
 			HASH_ADD(hh, sdata->disconnected_instances, enonce1_64, sizeof(uint64_t), client);
 			sdata->stats.disconnected++;
 			client->disconnected_time = time(NULL);
