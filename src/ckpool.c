@@ -1220,6 +1220,7 @@ static struct option long_options[] = {
 };
 #else
 static struct option long_options[] = {
+	{"btcsolo",	no_argument,		0,	'B'},
 	{"config",	required_argument,	0,	'c'},
 	{"daemonise",	no_argument,		0,	'D'},
 	{"group",	required_argument,	0,	'g'},
