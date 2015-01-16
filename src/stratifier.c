@@ -1184,8 +1184,17 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, int
 /* Add a stratum instance to the dead instances list */
 static void kill_instance(sdata_t *sdata, stratum_instance_t *client)
 {
-	if (client->user_instance)
-		DL_DELETE(client->user_instance->instances, client);
+	user_instance_t *instance = client->user_instance;
+
+	if (instance) {
+		worker_instance_t *worker = client->worker_instance;
+
+		DL_DELETE(instance->instances, client);
+		if (worker) {
+			DL_DELETE(instance->worker_instances, worker);
+			free(worker);
+		}
+	}
 	LL_PREPEND(sdata->dead_instances, client);
 	sdata->stats.dead++;
 }
