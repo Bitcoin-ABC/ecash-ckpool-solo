@@ -22,6 +22,7 @@ function process($p, $user, $menu)
 	$menu['Admin']['PPLNS'] = 'pplns';
 	$menu['Admin']['AllWork'] = 'allwork';
  }
+bp:
  $page = '';
  $n = '';
  foreach ($menu as $item => $options)
@@ -33,6 +34,11 @@ function process($p, $user, $menu)
 				$n = " - $name";
 			}
 
+ if ($page === '' and $p == 'blocks')
+ {
+	$p = 'pblocks';
+	goto bp;
+ }
  if ($page === '')
 	showPage($info, 'index', $menu, '', $user);
  else

@@ -4627,12 +4627,18 @@ unitem:
 	if (conned)
 		PQfinish(conn);
 	K_WLOCK(auths_free);
+#if 1
+	/* To save ram for now, don't store them,
+	 * we don't actually use them anywhere yet */
+	k_add_head(auths_free, a_item);
+#else
 	if (!ok)
 		k_add_head(auths_free, a_item);
 	else {
 		auths_root = add_to_ktree(auths_root, a_item, cmp_auths);
 		k_add_head(auths_store, a_item);
 	}
+#endif
 	K_WUNLOCK(auths_free);
 
 	return ok;
@@ -4644,25 +4650,30 @@ bool auths_fill(PGconn *conn)
 	PGresult *res;
 	K_ITEM *item;
 	AUTHS *row;
-//	char *params[1];
+	char *params[2];
 	int n, i;
-//	int par = 0;
+	int par = 0;
 	char *field;
 	char *sel;
-	int fields = 7 + 1; // +1 = 'best'
+	int fields = 7;
 	bool ok;
+	tv_t now;
 
 	LOGDEBUG("%s(): select", __func__);
 
 	// TODO: add/update a (single) fake auth every ~10min or 10min after the last one?
-#if 0
+
 	sel = "select "
 		"authid,userid,workername,clientid,enonce1,useragent,preauth"
 		HISTORYDATECONTROL
-		" from auths where expirydate=$1";
+		" from auths where expirydate=$1 and createdate>=$2";
+
+	setnow(&now);
+	now.tv_sec -= (24 * 60 * 60); // last day worth
 
 	par = 0;
 	params[par++] = tv_to_buf((tv_t *)(&default_expiry), NULL, 0);
+	params[par++] = tv_to_buf((tv_t *)(&now), NULL, 0);
 	PARCHK(par, params);
 	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
 	rescode = PQresultStatus(res);
@@ -4671,8 +4682,8 @@ bool auths_fill(PGconn *conn)
 		PQclear(res);
 		return false;
 	}
-#endif
 
+#if 0
 	// Only load the last record for each workername
 	sel = "with last as ("
 		  "select authid,userid,workername,clientid,enonce1,useragent,preauth"
@@ -4689,6 +4700,7 @@ bool auths_fill(PGconn *conn)
 		PQclear(res);
 		return false;
 	}
+#endif
 
 	n = PQnfields(res);
 	if (n != (fields + HISTORYDATECOUNT)) {

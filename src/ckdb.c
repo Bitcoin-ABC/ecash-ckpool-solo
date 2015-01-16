@@ -2720,6 +2720,17 @@ static void *socketer(__maybe_unused void *arg)
 						}
 						send_unix_msg(sockd, reply);
 						break;
+					case CMD_FLUSH:
+						LOGDEBUG("Listener received flush request");
+						snprintf(reply, sizeof(reply),
+							 "%s.%ld.ok.splash",
+							 id, now.tv_sec);
+						send_unix_msg(sockd, reply);
+						fflush(stdout);
+						fflush(stderr);
+						if (global_ckp && global_ckp->logfd)
+							fflush(global_ckp->logfp);
+						break;
 					// Always process immediately:
 					case CMD_AUTH:
 					case CMD_ADDRAUTH:
@@ -2996,6 +3007,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_PING:
 			case CMD_VERSION:
 			case CMD_LOGLEVEL:
+			case CMD_FLUSH:
 			// Non pool commands, shouldn't be there
 			case CMD_ADDUSER:
 			case CMD_NEWPASS:
