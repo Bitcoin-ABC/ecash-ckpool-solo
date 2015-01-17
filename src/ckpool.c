@@ -997,6 +997,26 @@ out:
 	return ret;
 }
 
+bool json_get_double(double *store, json_t *val, const char *res)
+{
+	json_t *entry = json_object_get(val, res);
+	bool ret = false;
+
+	if (!entry) {
+		LOGDEBUG("Json did not find entry %s", res);
+		goto out;
+	}
+	if (!json_is_real(entry)) {
+		LOGWARNING("Json entry %s is not a double", res);
+		goto out;
+	}
+	*store = json_real_value(entry);
+	LOGDEBUG("Json found entry %s: %f", res, *store);
+	ret = true;
+out:
+	return ret;
+}
+
 static bool json_get_bool(bool *store, json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);

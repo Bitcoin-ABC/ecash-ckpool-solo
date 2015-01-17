@@ -1401,6 +1401,26 @@ static void reconnect_clients(sdata_t *sdata, const char *cmd)
 	stratum_broadcast(sdata, json_msg);
 }
 
+static void reset_bestshares(sdata_t *sdata)
+{
+	user_instance_t *instance, *tmpuser;
+	stratum_instance_t *client, *tmp;
+
+	ck_rlock(&sdata->instance_lock);
+	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
+		client->best_diff = 0;
+	}
+	HASH_ITER(hh, sdata->user_instances, instance, tmpuser) {
+		worker_instance_t *worker;
+
+		instance->best_diff = 0;
+		DL_FOREACH(instance->worker_instances, worker) {
+			worker->best_diff = 0;
+		}
+	}
+	ck_runlock(&sdata->instance_lock);
+}
+
 static void block_solve(ckpool_t *ckp, const char *blockhash)
 {
 	ckmsg_t *block, *tmp, *found = NULL;
@@ -1454,6 +1474,7 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 	free(msg);
 
 	LOGWARNING("Solved and confirmed block %d", height);
+	reset_bestshares(sdata);
 }
 
 static void block_reject(sdata_t *sdata, const char *blockhash)
@@ -1881,9 +1902,10 @@ static void read_userstats(ckpool_t *ckp, user_instance_t *instance)
 	instance->dsps60 = dsps_from_key(val, "hashrate1hr");
 	instance->dsps1440 = dsps_from_key(val, "hashrate1d");
 	instance->dsps10080 = dsps_from_key(val, "hashrate7d");
-	LOGINFO("Successfully read user %s stats %f %f %f %f %f", instance->username,
+	json_get_double(&instance->best_diff, val, "bestshare");
+	LOGINFO("Successfully read user %s stats %f %f %f %f %f %f", instance->username,
 		instance->dsps1, instance->dsps5, instance->dsps60, instance->dsps1440,
-		instance->dsps10080);
+		instance->dsps10080, instance->best_diff);
 	json_decref(val);
 }
 
@@ -1918,8 +1940,9 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 	worker->dsps5 = dsps_from_key(val, "hashrate5m");
 	worker->dsps60 = dsps_from_key(val, "hashrate1d");
 	worker->dsps1440 = dsps_from_key(val, "hashrate1d");
-	LOGINFO("Successfully read worker %s stats %f %f %f %f", worker->workername,
-		worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440);
+	json_get_double(&worker->best_diff, val, "bestshare");
+	LOGINFO("Successfully read worker %s stats %f %f %f %f %f", worker->workername,
+		worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440, worker->best_diff);
 	json_decref(val);
 }
 
@@ -3099,7 +3122,7 @@ static void parse_method(sdata_t *sdata, const int64_t client_id, json_t *id_val
 		/* Shouldn't happen, sanity check */
 		if (unlikely(!result_val)) {
 			LOGWARNING("parse_subscribe returned NULL result_val");
-			return;
+			goto out;
 		}
 		val = json_object();
 		json_object_set_new_nocheck(val, "result", result_val);
@@ -3154,7 +3177,7 @@ static void parse_method(sdata_t *sdata, const int64_t client_id, json_t *id_val
 
 	if (cmdmatch(method, "mining.suggest")) {
 		suggest_diff(client, method, params_val);
-		return;
+		goto out;
 	}
 
 	/* Covers both get_transactions and get_txnhashes */
