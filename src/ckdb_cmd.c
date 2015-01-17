@@ -3502,6 +3502,8 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 			allow_aged = true;
 	}
 
+	LOGDEBUG("%s(): height %"PRId32, __func__, height);
+
 	block_tv.tv_sec = block_tv.tv_usec = 0L;
 	cd.tv_sec = cd.tv_usec = 0L;
 	lookblocks.height = height + 1;
@@ -3538,6 +3540,9 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 				     blocks_confirmed(BLOCKS_NEW_STR));
 		return strdup(reply);
 	}
+	LOGDEBUG("%s(): block %"PRId32"/%"PRId64"/%s/%s/%"PRId64,
+		 __func__, blocks->height, blocks->workinfoid,
+		 blocks->workername, blocks->confirmed, blocks->reward);
 	switch (blocks->confirmed[0]) {
 		case BLOCKS_NEW:
 			block_extra = "Can't be paid out yet";
@@ -3571,7 +3576,9 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		countbacklimit = true;
 	else
 		countbacklimit = false;
-
+	LOGDEBUG("%s(): ndiff %.0f limit=%s",
+		 __func__, ndiff,
+		 countbacklimit ? "true" : "false");
 	begin_workinfoid = end_workinfoid = 0;
 	total_share_count = acc_share_count = 0;
 	total_diff = 0;
@@ -3649,7 +3656,8 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		ss_item = prev_in_ktree(ctx);
 		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 	}
-
+	LOGDEBUG("%s(): ss %"PRId64" total %.0f want %.0f",
+		 __func__, ss_count, total_diff, diff_want);
 	/* If we haven't met or exceeded the required N,
 	 * move on to the markersummaries */
 	if (total_diff < diff_want) {
@@ -3664,6 +3672,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		wm_item = find_before_in_ktree(workmarkers_workinfoid_root, &wm_look,
 					       cmp_workmarkers_workinfoid, wm_ctx);
 		DATA_WORKMARKERS_NULL(workmarkers, wm_item);
+		LOGDEBUG("%s(): workmarkers < %"PRId64, __func__, lookworkmarkers.workinfoidend);
 		while (total_diff < diff_want && wm_item && CURRENT(&(workmarkers->expirydate))) {
 			if (WMPROCESSED(workmarkers->status)) {
 				// Stop before FIVExWID if necessary
@@ -3700,11 +3709,14 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 			wm_item = prev_in_ktree(wm_ctx);
 			DATA_WORKMARKERS_NULL(workmarkers, wm_item);
 		}
+		LOGDEBUG("%s(): wm %"PRId64" ms %"PRId64" total %.0f want %.0f",
+			 __func__, wm_count, ms_count, total_diff, diff_want);
 	}
 	K_RUNLOCK(markersummary_free);
 	K_RUNLOCK(workmarkers_free);
 	K_RUNLOCK(sharesummary_free);
 
+	LOGDEBUG("%s(): total %.0f want %.0f", __func__, total_diff, diff_want);
 	if (total_diff == 0.0) {
 		snprintf(reply, siz,
 			 "ERR.total share diff 0 before workinfo %"PRId64,

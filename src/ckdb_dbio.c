@@ -5978,15 +5978,24 @@ unparam:
 			workmarkers_root = remove_from_ktree(workmarkers_root,
 							     old_wm_item,
 							     cmp_workmarkers);
+			workmarkers_workinfoid_root = remove_from_ktree(workmarkers_workinfoid_root,
+									old_wm_item,
+									cmp_workmarkers_workinfoid);
 			copy_tv(&(oldworkmarkers->expirydate), cd);
 			workmarkers_root = add_to_ktree(workmarkers_root,
 							old_wm_item,
 							cmp_workmarkers);
+			workmarkers_workinfoid_root = add_to_ktree(workmarkers_workinfoid_root,
+								   old_wm_item,
+								   cmp_workmarkers_workinfoid);
 		}
 		if (wm_item) {
 			workmarkers_root = add_to_ktree(workmarkers_root,
 							wm_item,
 							cmp_workmarkers);
+			workmarkers_workinfoid_root = add_to_ktree(workmarkers_workinfoid_root,
+								   wm_item,
+								   cmp_workmarkers_workinfoid);
 			k_add_head(workmarkers_store, wm_item);
 		}
 	}

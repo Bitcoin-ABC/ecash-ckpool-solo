@@ -926,10 +926,27 @@ static void update_base(ckpool_t *ckp, int prio)
 	create_pthread(pth, do_update, ur);
 }
 
+/* Add a stratum instance to the dead instances list */
+static void __kill_instance(sdata_t *sdata, stratum_instance_t *client)
+{
+	user_instance_t *instance = client->user_instance;
+
+	if (instance) {
+		worker_instance_t *worker = client->worker_instance;
+
+		DL_DELETE(instance->instances, client);
+		if (worker)
+			DL_DELETE(instance->worker_instances, worker);
+	}
+	LL_PREPEND(sdata->dead_instances, client);
+	sdata->stats.dead++;
+}
+
 static void __del_disconnected(sdata_t *sdata, stratum_instance_t *client)
 {
 	HASH_DEL(sdata->disconnected_instances, client);
 	sdata->stats.disconnected--;
+	__kill_instance(sdata, client);
 }
 
 static void drop_allclients(ckpool_t *ckp)
@@ -1181,22 +1198,6 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, int
 	return instance;
 }
 
-/* Add a stratum instance to the dead instances list */
-static void __kill_instance(sdata_t *sdata, stratum_instance_t *client)
-{
-	user_instance_t *instance = client->user_instance;
-
-	if (instance) {
-		worker_instance_t *worker = client->worker_instance;
-
-		DL_DELETE(instance->instances, client);
-		if (worker)
-			DL_DELETE(instance->worker_instances, worker);
-	}
-	LL_PREPEND(sdata->dead_instances, client);
-	sdata->stats.dead++;
-}
-
 /* Only supports a full ckpool instance sessionid with an 8 byte sessionid */
 static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid, int64_t id)
 {
@@ -1226,7 +1227,6 @@ static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid,
 		/* If we've found a matching disconnected instance, use it only
 		 * once and discard it */
 		__del_disconnected(sdata, instance);
-		__kill_instance(sdata, instance);
 		ret = true;
 	}
 out_unlock:
@@ -1313,17 +1313,18 @@ static void dec_worker(ckpool_t *ckp, user_instance_t *instance)
 static void drop_client(sdata_t *sdata, int64_t id)
 {
 	stratum_instance_t *client, *tmp;
+	user_instance_t *instance = NULL;
 	time_t now_t = time(NULL);
+	ckpool_t *ckp = NULL;
 	bool dec = false;
 
-	LOGINFO("Stratifier dropping client %ld", id);
+	LOGINFO("Stratifier requested to drop client %ld", id);
 
 	ck_wlock(&sdata->instance_lock);
 	client = __instance_by_id(sdata, id);
 	if (client) {
 		stratum_instance_t *old_client = NULL;
 
-		__inc_instance_ref(client);
 		if (client->authorised) {
 			dec = true;
 			client->authorised = false;
@@ -1338,19 +1339,11 @@ static void drop_client(sdata_t *sdata, int64_t id)
 			client->disconnected_time = time(NULL);
 		} else
 			__kill_instance(sdata, client);
+		ckp = client->ckp;
+		instance = client->user_instance;
+		LOGINFO("Stratifer dropped %sauthorised client %ld", dec ? "" : "un", id);
 	}
-	ck_wunlock(&sdata->instance_lock);
 
-	/* Decrease worker count outside of instance_lock to avoid recursive
-	 * locking */
-	if (dec)
-		dec_worker(client->ckp, client->user_instance);
-
-	/* Cull old unused clients lazily when there are no more reference
-	 * counts for them. */
-	ck_wlock(&sdata->instance_lock);
-	if (client)
-		__dec_instance_ref(client);
 	/* Old disconnected instances will not have any valid shares so remove
 	 * them from the disconnected instances list if they've been dead for
 	 * more than 10 minutes */
@@ -1359,10 +1352,10 @@ static void drop_client(sdata_t *sdata, int64_t id)
 			continue;
 		LOGINFO("Discarding aged disconnected instance %ld", client->id);
 		__del_disconnected(sdata, client);
-		__kill_instance(sdata, client);
 	}
-	/* Discard any dead instances that no longer hold any reference counts,
-	 * freeing up their memory safely */
+
+	/* Cull old unused clients lazily when there are no more reference
+	 * counts for them. */
 	LL_FOREACH_SAFE(sdata->dead_instances, client, tmp) {
 		if (!client->ref) {
 			LOGINFO("Stratifier discarding instance %ld", client->id);
@@ -1374,6 +1367,11 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		}
 	}
 	ck_wunlock(&sdata->instance_lock);
+
+	/* Decrease worker count outside of instance_lock to avoid recursive
+	 * locking. ckp and instance are guaranteed to be set if dec is true */
+	if (dec)
+		dec_worker(ckp, instance);
 }
 
 static void stratum_broadcast_message(sdata_t *sdata, const char *msg)
@@ -3679,13 +3677,18 @@ static void *statsupdate(void *arg)
 
 		HASH_ITER(hh, sdata->user_instances, instance, tmpuser) {
 			worker_instance_t *worker;
+			int iterations = 0;
 			bool idle = false;
-
-			if (instance->workers < 1)
-				continue;
 
 			/* Decay times per worker */
 			DL_FOREACH(instance->worker_instances, worker) {
+				/* FIXME: This shouldn't happen and is purely a sanity
+				 * breakout till the real issue is found fixed. */
+				if (unlikely(iterations++ > instance->workers)) {
+					LOGWARNING("Statsupdate trying to iterate more than %d existing workers for worker %s",
+						   instance->workers, worker->workername);
+					break;
+				}
 				per_tdiff = tvdiff(&now, &worker->last_share);
 				if (per_tdiff > 60) {
 					decay_time(&worker->dsps1, 0, per_tdiff, 60);
