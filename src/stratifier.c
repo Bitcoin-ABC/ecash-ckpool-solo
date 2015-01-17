@@ -181,6 +181,7 @@ struct user_instance {
 
 	/* A linked list of all connected workers of this user */
 	worker_instance_t *worker_instances;
+	int workernames; /* How many different workernames exist */
 
 	int workers;
 	char txnbin[25];
@@ -1974,6 +1975,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 			read_workerstats(ckp, worker);
 		worker->start_time = time(NULL);
 		client->worker_instance = worker;
+		instance->workernames++;
 	}
 	DL_APPEND(instance->instances, client);
 	ck_wunlock(&sdata->instance_lock);
@@ -3677,11 +3679,10 @@ static void *statsupdate(void *arg)
 
 			/* Decay times per worker */
 			DL_FOREACH(instance->worker_instances, worker) {
-				/* FIXME: This shouldn't happen and is purely a sanity
-				 * breakout till the real issue is found and fixed. */
-				if (unlikely(iterations++ > instance->workers)) {
+				/* Sanity check, should never happen */
+				if (unlikely(iterations++ > instance->workernames)) {
 					LOGWARNING("Statsupdate trying to iterate more than %d existing workers for worker %s",
-						   instance->workers, worker->workername);
+						   instance->workernames, worker->workername);
 					break;
 				}
 				per_tdiff = tvdiff(&now, &worker->last_share);
