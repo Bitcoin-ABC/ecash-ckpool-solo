@@ -931,13 +931,8 @@ static void __kill_instance(sdata_t *sdata, stratum_instance_t *client)
 {
 	user_instance_t *instance = client->user_instance;
 
-	if (instance) {
-		worker_instance_t *worker = client->worker_instance;
-
+	if (likely(instance))
 		DL_DELETE(instance->instances, client);
-		if (worker)
-			DL_DELETE(instance->worker_instances, worker);
-	}
 	LL_PREPEND(sdata->dead_instances, client);
 	sdata->stats.dead++;
 }
@@ -3671,7 +3666,7 @@ static void *statsupdate(void *arg)
 				decay_time(&client->dsps10080, 0, per_tdiff, 604800);
 				if (per_tdiff > 600)
 					client->idle = true;
-				continue;
+				idle_workers++;
 			}
 		}
 
@@ -3683,7 +3678,7 @@ static void *statsupdate(void *arg)
 			/* Decay times per worker */
 			DL_FOREACH(instance->worker_instances, worker) {
 				/* FIXME: This shouldn't happen and is purely a sanity
-				 * breakout till the real issue is found fixed. */
+				 * breakout till the real issue is found and fixed. */
 				if (unlikely(iterations++ > instance->workers)) {
 					LOGWARNING("Statsupdate trying to iterate more than %d existing workers for worker %s",
 						   instance->workers, worker->workername);
@@ -3695,7 +3690,6 @@ static void *statsupdate(void *arg)
 					decay_time(&worker->dsps5, 0, per_tdiff, 300);
 					decay_time(&worker->dsps60, 0, per_tdiff, 3600);
 					decay_time(&worker->dsps1440, 0, per_tdiff, 86400);
-					idle_workers++;
 					worker->idle = true;
 				}
 				ghs = worker->dsps1 * nonces;

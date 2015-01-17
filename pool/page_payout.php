@@ -10,7 +10,7 @@ function dopayout($data, $user)
  $pg .= ' when a block is found,<br>';
  $pg .= 'but includes the full shift at the start and end of the range,<br>';
  $pg .= 'so it usually will be a bit more than 5N.<br><br>';
- $pg .= 'Shifts are ~30s long, however, when any network block is found<br>';
+ $pg .= 'Shifts are ~50min long, however, when we find any pool blocks<br>';
  $pg .= 'the current shift ends at the point the block was found.<br>';
  $pg .= 'A ckpool restart will also start a new shift.<br><br>';
  $pg .= 'Transaction fees are included in the miner payout.<br>';
