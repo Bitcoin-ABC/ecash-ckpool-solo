@@ -195,6 +195,8 @@ struct user_instance {
 	double dsps1440;
 	double dsps10080;
 	tv_t last_share;
+
+	bool authorised; /* Has this username ever been authorised? */
 	time_t auth_time;
 };
 
@@ -1310,7 +1312,6 @@ static void drop_client(sdata_t *sdata, int64_t id)
 {
 	stratum_instance_t *client, *tmp;
 	user_instance_t *instance = NULL;
-	time_t now_t = time(NULL);
 	ckpool_t *ckp = NULL;
 	bool dec = false;
 
@@ -1319,14 +1320,16 @@ static void drop_client(sdata_t *sdata, int64_t id)
 	ck_wlock(&sdata->instance_lock);
 	client = __instance_by_id(sdata, id);
 	if (client) {
-		stratum_instance_t *old_client = NULL;
-
 		if (client->authorised) {
 			dec = true;
 			client->authorised = false;
 		}
 
 		HASH_DEL(sdata->stratum_instances, client);
+#if 0
+		/* Disable resume support till debugged properly */
+		stratum_instance_t *old_client = NULL;
+
 		HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
 		/* Only keep around one copy of the old client in server mode */
 		if (!client->ckp->proxy && !old_client && client->enonce1_64 && dec) {
@@ -1334,11 +1337,15 @@ static void drop_client(sdata_t *sdata, int64_t id)
 			sdata->stats.disconnected++;
 			client->disconnected_time = time(NULL);
 		} else
+#endif
 			__kill_instance(sdata, client);
 		ckp = client->ckp;
 		instance = client->user_instance;
 		LOGINFO("Stratifer dropped %sauthorised client %ld", dec ? "" : "un", id);
 	}
+
+#if 0
+	time_t now_t = time(NULL);
 
 	/* Old disconnected instances will not have any valid shares so remove
 	 * them from the disconnected instances list if they've been dead for
@@ -1349,6 +1356,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		LOGINFO("Discarding aged disconnected instance %ld", client->id);
 		__del_disconnected(sdata, client);
 	}
+#endif
 
 	/* Cull old unused clients lazily when there are no more reference
 	 * counts for them. */
@@ -1688,6 +1696,16 @@ out:
 	return ret;
 }
 
+/* Enter holding workbase_lock */
+static void __fill_enonce1data(workbase_t *wb, stratum_instance_t *client)
+{
+	if (wb->enonce1constlen)
+		memcpy(client->enonce1bin, wb->enonce1constbin, wb->enonce1constlen);
+	memcpy(client->enonce1bin + wb->enonce1constlen, &client->enonce1_64, wb->enonce1varlen);
+	__bin2hex(client->enonce1var, &client->enonce1_64, wb->enonce1varlen);
+	__bin2hex(client->enonce1, client->enonce1bin, wb->enonce1constlen + wb->enonce1varlen);
+}
+
 /* Create a new enonce1 from the 64 bit enonce1_64 value, using only the number
  * of bytes we have to work with when we are proxying with a split nonce2.
  * When the proxy space is less than 32 bits to work with, we look for an
@@ -1736,11 +1754,7 @@ static bool new_enonce1(stratum_instance_t *client)
 	}
 	if (ret)
 		client->enonce1_64 = sdata->enonce1u.u64;
-	if (wb->enonce1constlen)
-		memcpy(client->enonce1bin, wb->enonce1constbin, wb->enonce1constlen);
-	memcpy(client->enonce1bin + wb->enonce1constlen, &client->enonce1_64, wb->enonce1varlen);
-	__bin2hex(client->enonce1var, &client->enonce1_64, wb->enonce1varlen);
-	__bin2hex(client->enonce1, client->enonce1bin, wb->enonce1constlen + wb->enonce1varlen);
+	__fill_enonce1data(wb, client);
 	ck_wunlock(&sdata->workbase_lock);
 
 	if (unlikely(!ret))
@@ -1789,6 +1803,10 @@ static json_t *parse_subscribe(stratum_instance_t *client, int64_t client_id, js
 			if (disconnected_sessionid_exists(sdata, buf, client_id)) {
 				sprintf(client->enonce1, "%016lx", client->enonce1_64);
 				old_match = true;
+
+				ck_rlock(&sdata->workbase_lock);
+				__fill_enonce1data(sdata->current_workbase, client);
+				ck_runlock(&sdata->workbase_lock);
 			}
 		}
 	} else
@@ -2054,7 +2072,7 @@ static int send_recv_auth(stratum_instance_t *client)
 		json_msg = ckdb_msg(ckp, val, ID_AUTH);
 	if (unlikely(!json_msg)) {
 		LOGWARNING("Failed to dump json in send_recv_auth");
-		return ret;
+		goto out;
 	}
 
 	/* We want responses from ckdb serialised and not interleaved with
@@ -2074,7 +2092,12 @@ static int send_recv_auth(stratum_instance_t *client)
 		json_t *val = NULL;
 
 		LOGINFO("Got ckdb response: %s", buf);
-		sscanf(buf, "id.%*d.%s", response);
+		if (unlikely(sscanf(buf, "id.%*d.%s", response) < 1 || strlen(response) < 1 || !strchr(response, '='))) {
+			if (cmdmatch(response, "failed"))
+				goto out;
+			LOGWARNING("Got unparseable ckdb auth response: %s", buf);
+			goto out_fail;
+		}
 		cmd = response;
 		strsep(&cmd, "=");
 		LOGINFO("User %s Worker %s got auth response: %s  cmd: %s",
@@ -2082,7 +2105,7 @@ static int send_recv_auth(stratum_instance_t *client)
 			response, cmd);
 		val = json_loads(cmd, 0, &err_val);
 		if (unlikely(!val))
-			LOGINFO("AUTH JSON decode failed(%d): %s", err_val.line, err_val.text);
+			LOGWARNING("AUTH JSON decode failed(%d): %s", err_val.line, err_val.text);
 		else {
 			json_get_string(&secondaryuserid, val, "secondaryuserid");
 			json_get_int(&worker->mindiff, val, "difficultydefault");
@@ -2100,11 +2123,12 @@ static int send_recv_auth(stratum_instance_t *client)
 		}
 		if (likely(val))
 			json_decref(val);
-	} else {
-		ret = -1;
-		LOGWARNING("Got no auth response from ckdb :(");
+		goto out;
 	}
-
+	LOGWARNING("Got no auth response from ckdb :(");
+out_fail:
+	ret = -1;
+out:
 	return ret;
 }
 
@@ -2223,9 +2247,16 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 			ret = true;
 		}
 	}
-	client->authorised = ret;
-	if (client->authorised)
+	if (ret) {
+		client->authorised = ret;
+		user_instance->authorised = ret;
 		inc_worker(ckp, user_instance);
+		LOGNOTICE("Authorised client %ld worker %s as user %s", client->id, buf,
+			  user_instance->username);
+	} else {
+		LOGNOTICE("Client %ld worker %s failed to authorise as user %s", client->id, buf,
+			  user_instance->username);
+	}
 out:
 	if (ckp->btcsolo && ret) {
 		sdata_t *sdata = ckp->data;
@@ -3599,6 +3630,9 @@ static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 		worker_instance_t *worker;
 		uint8_t cycle_mask;
 
+		if (!user->authorised)
+			continue;
+
 		/* Select users using a mask to return each user's stats once
 		 * every ~10 minutes */
 		cycle_mask = user->id & 0x1f;
@@ -3699,6 +3733,9 @@ static void *statsupdate(void *arg)
 			worker_instance_t *worker;
 			int iterations = 0;
 			bool idle = false;
+
+			if (!instance->authorised)
+				continue;
 
 			/* Decay times per worker */
 			DL_FOREACH(instance->worker_instances, worker) {
