@@ -181,7 +181,6 @@ struct user_instance {
 
 	/* A linked list of all connected workers of this user */
 	worker_instance_t *worker_instances;
-	int workernames; /* How many different workernames exist */
 
 	int workers;
 	char txnbin[25];
@@ -274,7 +273,6 @@ struct stratum_instance {
 	ckpool_t *ckp;
 
 	time_t last_txns; /* Last time this worker requested txn hashes */
-	time_t disconnected_time; /* Time this instance disconnected */
 
 	int64_t suggest_diff; /* Stratum client suggested diff */
 	double best_diff; /* Best share found by this instance */
@@ -929,22 +927,22 @@ static void update_base(ckpool_t *ckp, int prio)
 	create_pthread(pth, do_update, ur);
 }
 
-/* Add a stratum instance to the dead instances list */
-static void __kill_instance(sdata_t *sdata, stratum_instance_t *client)
-{
-	user_instance_t *instance = client->user_instance;
-
-	if (likely(instance))
-		DL_DELETE(instance->instances, client);
-	LL_PREPEND(sdata->dead_instances, client);
-	sdata->stats.dead++;
-}
-
 static void __del_disconnected(sdata_t *sdata, stratum_instance_t *client)
 {
 	HASH_DEL(sdata->disconnected_instances, client);
 	sdata->stats.disconnected--;
-	__kill_instance(sdata, client);
+}
+
+static void __add_dead(sdata_t *sdata, stratum_instance_t *client)
+{
+	LL_PREPEND(sdata->dead_instances, client);
+	sdata->stats.dead++;
+}
+
+static void __del_dead(sdata_t *sdata, stratum_instance_t *client)
+{
+	LL_DELETE(sdata->dead_instances, client);
+	sdata->stats.dead--;
 }
 
 static void drop_allclients(ckpool_t *ckp)
@@ -956,11 +954,14 @@ static void drop_allclients(ckpool_t *ckp)
 	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
 		HASH_DEL(sdata->stratum_instances, client);
+		__add_dead(sdata, client);
 		sprintf(buf, "dropclient=%ld", client->id);
 		send_proc(ckp->connector, buf);
 	}
-	HASH_ITER(hh, sdata->disconnected_instances, client, tmp)
+	HASH_ITER(hh, sdata->disconnected_instances, client, tmp) {
 		__del_disconnected(sdata, client);
+		__add_dead(sdata, client);
+	}
 	sdata->stats.users = sdata->stats.workers = 0;
 	ck_wunlock(&sdata->instance_lock);
 }
@@ -1210,7 +1211,7 @@ static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid,
 	/* Number is in BE but we don't swap either of them */
 	hex2bin(&session64, sessionid, 8);
 
-	ck_wlock(&sdata->instance_lock);
+	ck_rlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, instance, tmp) {
 		if (instance->id == id)
 			continue;
@@ -1221,14 +1222,10 @@ static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid,
 	}
 	instance = NULL;
 	HASH_FIND(hh, sdata->disconnected_instances, &session64, sizeof(uint64_t), instance);
-	if (instance) {
-		/* If we've found a matching disconnected instance, use it only
-		 * once and discard it */
-		__del_disconnected(sdata, instance);
+	if (instance)
 		ret = true;
-	}
 out_unlock:
-	ck_wunlock(&sdata->instance_lock);
+	ck_runlock(&sdata->instance_lock);
 out:
 	return ret;
 }
@@ -1315,56 +1312,38 @@ static void drop_client(sdata_t *sdata, int64_t id)
 	ckpool_t *ckp = NULL;
 	bool dec = false;
 
-	LOGINFO("Stratifier requested to drop client %ld", id);
+	LOGINFO("Stratifier dropping client %ld", id);
 
 	ck_wlock(&sdata->instance_lock);
 	client = __instance_by_id(sdata, id);
 	if (client) {
+		stratum_instance_t *old_client = NULL;
+
 		if (client->authorised) {
 			dec = true;
 			client->authorised = false;
+			ckp = client->ckp;
+			instance = client->user_instance;
 		}
 
 		HASH_DEL(sdata->stratum_instances, client);
-#if 0
-		/* Disable resume support till debugged properly */
-		stratum_instance_t *old_client = NULL;
-
 		HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
 		/* Only keep around one copy of the old client in server mode */
 		if (!client->ckp->proxy && !old_client && client->enonce1_64 && dec) {
 			HASH_ADD(hh, sdata->disconnected_instances, enonce1_64, sizeof(uint64_t), client);
 			sdata->stats.disconnected++;
-			client->disconnected_time = time(NULL);
-		} else
-#endif
-			__kill_instance(sdata, client);
-		ckp = client->ckp;
-		instance = client->user_instance;
-		LOGINFO("Stratifer dropped %sauthorised client %ld", dec ? "" : "un", id);
+		} else {
+			if (client->user_instance)
+				DL_DELETE(client->user_instance->instances, client);
+			__add_dead(sdata, client);
+		}
 	}
-
-#if 0
-	time_t now_t = time(NULL);
-
-	/* Old disconnected instances will not have any valid shares so remove
-	 * them from the disconnected instances list if they've been dead for
-	 * more than 10 minutes */
-	HASH_ITER(hh, sdata->disconnected_instances, client, tmp) {
-		if (now_t - client->disconnected_time < 600)
-			continue;
-		LOGINFO("Discarding aged disconnected instance %ld", client->id);
-		__del_disconnected(sdata, client);
-	}
-#endif
-
 	/* Cull old unused clients lazily when there are no more reference
 	 * counts for them. */
 	LL_FOREACH_SAFE(sdata->dead_instances, client, tmp) {
 		if (!client->ref) {
 			LOGINFO("Stratifier discarding instance %ld", client->id);
-			LL_DELETE(sdata->dead_instances, client);
-			sdata->stats.dead--;
+			__del_dead(sdata, client);
 			free(client->workername);
 			free(client->useragent);
 			free(client);
@@ -1373,7 +1352,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 	ck_wunlock(&sdata->instance_lock);
 
 	/* Decrease worker count outside of instance_lock to avoid recursive
-	 * locking. ckp and instance are guaranteed to be set if dec is true */
+	 * locking */
 	if (dec)
 		dec_worker(ckp, instance);
 }
@@ -2016,7 +1995,6 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 			read_workerstats(ckp, worker);
 		worker->start_time = time(NULL);
 		client->worker_instance = worker;
-		instance->workernames++;
 	}
 	DL_APPEND(instance->instances, client);
 	ck_wunlock(&sdata->instance_lock);
@@ -3723,15 +3701,15 @@ static void *statsupdate(void *arg)
 				decay_time(&client->dsps60, 0, per_tdiff, 3600);
 				decay_time(&client->dsps1440, 0, per_tdiff, 86400);
 				decay_time(&client->dsps10080, 0, per_tdiff, 604800);
+				idle_workers++;
 				if (per_tdiff > 600)
 					client->idle = true;
-				idle_workers++;
+				continue;
 			}
 		}
 
 		HASH_ITER(hh, sdata->user_instances, instance, tmpuser) {
 			worker_instance_t *worker;
-			int iterations = 0;
 			bool idle = false;
 
 			if (!instance->authorised)
@@ -3739,12 +3717,6 @@ static void *statsupdate(void *arg)
 
 			/* Decay times per worker */
 			DL_FOREACH(instance->worker_instances, worker) {
-				/* Sanity check, should never happen */
-				if (unlikely(iterations++ > instance->workernames)) {
-					LOGWARNING("Statsupdate trying to iterate more than %d existing workers for worker %s",
-						   instance->workernames, worker->workername);
-					break;
-				}
 				per_tdiff = tvdiff(&now, &worker->last_share);
 				if (per_tdiff > 60) {
 					decay_time(&worker->dsps1, 0, per_tdiff, 60);

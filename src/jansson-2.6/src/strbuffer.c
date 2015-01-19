@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2009-2013 Petri Lehtinen <petri@digip.org>
+ * Copyright (c) 2015 Con Kolivas <kernel@kolivas.org>
  *
  * Jansson is free software; you can redistribute it and/or modify
  * it under the terms of the MIT license. See LICENSE for details.
@@ -11,6 +12,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "jansson_private.h"
 #include "strbuffer.h"
 
@@ -74,6 +76,7 @@ int strbuffer_append_bytes(strbuffer_t *strbuff, const char *data, size_t size)
 {
     if(size >= strbuff->size - strbuff->length)
     {
+	int backoff = 1;
         size_t new_size;
         char *new_value;
 
@@ -86,9 +89,13 @@ int strbuffer_append_bytes(strbuffer_t *strbuff, const char *data, size_t size)
         new_size = max(strbuff->size * STRBUFFER_FACTOR,
                        strbuff->length + size + 1);
 
-        new_value = realloc(strbuff->value, new_size);
-        if(!new_value)
-            return -1;
+	while (42) {
+		new_value = realloc(strbuff->value, new_size);
+		if (new_value)
+			break;
+		usleep(backoff * 1000);
+		backoff <<= 1;
+	}
 
         strbuff->value = new_value;
         strbuff->size = new_size;

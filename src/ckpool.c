@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2015 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -404,6 +404,8 @@ int read_socket_line(connsock_t *cs, int timeout)
 
 	while (42) {
 		char readbuf[PAGESIZE] = {};
+		int backoff = 1;
+		char *newbuf;
 
 		ret = wait_read_select(fd, eom ? 0 : timeout);
 		if (eom && !ret)
@@ -422,7 +424,16 @@ int read_socket_line(connsock_t *cs, int timeout)
 			goto out;
 		}
 		buflen = cs->bufofs + ret + 1;
-		cs->buf = realloc(cs->buf, buflen);
+		while (42) {
+			newbuf = realloc(cs->buf, buflen);
+			if (likely(newbuf))
+				break;
+			if (backoff == 1)
+				fprintf(stderr, "Failed to realloc %d in read_socket_line, retrying\n", (int)buflen);
+			cksleep_ms(backoff);
+			backoff <<= 1;
+		}
+		cs->buf = newbuf;
 		if (unlikely(!cs->buf))
 			quit(1, "Failed to alloc buf of %d bytes in read_socket_line", (int)buflen);
 		memcpy(cs->buf + cs->bufofs, readbuf, ret);

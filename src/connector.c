@@ -236,14 +236,13 @@ static void stratifier_drop_client(ckpool_t *ckp, int64_t id)
  * regularly but keep the instances in a linked list until their ref count
  * drops to zero when we can remove them lazily. Client must hold a reference
  * count. */
-static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
+static void invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
 {
 	client_instance_t *tmp;
-	int ret;
 
-	ret = drop_client(cdata, client);
+	drop_client(cdata, client);
 	if (ckp->passthrough)
-		goto out;
+		return;
 	stratifier_drop_client(ckp, client->id);
 
 	/* Cull old unused clients lazily when there are no more reference
@@ -257,9 +256,6 @@ static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *c
 		}
 	}
 	ck_wunlock(&cdata->lock);
-
-out:
-	return ret;
 }
 
 static void send_client(cdata_t *cdata, int64_t id, char *buf);
@@ -678,25 +674,6 @@ retry:
 	 * so look for them first. */
 	if (likely(buf[0] == '{')) {
 		process_client_msg(cdata, buf);
-	} else if (cmdmatch(buf, "dropclient")) {
-		client_instance_t *client;
-
-		ret = sscanf(buf, "dropclient=%ld", &client_id64);
-		if (ret < 0) {
-			LOGDEBUG("Connector failed to parse dropclient command: %s", buf);
-			goto retry;
-		}
-		client_id = client_id64 & 0xffffffffll;
-		client = ref_client_by_id(cdata, client_id);
-		if (unlikely(!client)) {
-			LOGINFO("Connector failed to find client id %ld to drop", client_id);
-			stratifier_drop_client(ckp, client_id);
-			goto retry;
-		}
-		ret = invalidate_client(ckp, cdata, client);
-		dec_instance_ref(cdata, client);
-		if (ret >= 0)
-			LOGINFO("Connector dropped client id: %ld", client_id);
 	} else if (cmdmatch(buf, "ping")) {
 		LOGDEBUG("Connector received ping request");
 		send_unix_msg(sockd, "pong");
@@ -710,6 +687,24 @@ retry:
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else if (cmdmatch(buf, "shutdown")) {
 		goto out;
+	} else if (cmdmatch(buf, "dropclient")) {
+		client_instance_t *client;
+
+		ret = sscanf(buf, "dropclient=%ld", &client_id64);
+		if (ret < 0) {
+			LOGDEBUG("Connector failed to parse dropclient command: %s", buf);
+			goto retry;
+		}
+		client_id = client_id64 & 0xffffffffll;
+		client = ref_client_by_id(cdata, client_id);
+		if (unlikely(!client)) {
+			LOGINFO("Connector failed to find client id %ld to drop", client_id);
+			goto retry;
+		}
+		ret = drop_client(cdata, client);
+		dec_instance_ref(cdata, client);
+		if (ret >= 0)
+			LOGINFO("Connector dropped client id: %ld", client_id);
 	} else if (cmdmatch(buf, "passthrough")) {
 		client_instance_t *client;
 
