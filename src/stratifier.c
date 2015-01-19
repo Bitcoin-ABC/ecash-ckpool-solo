@@ -273,6 +273,7 @@ struct stratum_instance {
 	ckpool_t *ckp;
 
 	time_t last_txns; /* Last time this worker requested txn hashes */
+	time_t disconnected_time; /* Time this instance disconnected */
 
 	int64_t suggest_diff; /* Stratum client suggested diff */
 	double best_diff; /* Best share found by this instance */
@@ -927,22 +928,26 @@ static void update_base(ckpool_t *ckp, int prio)
 	create_pthread(pth, do_update, ur);
 }
 
-static void __del_disconnected(sdata_t *sdata, stratum_instance_t *client)
-{
-	HASH_DEL(sdata->disconnected_instances, client);
-	sdata->stats.disconnected--;
-}
-
 static void __add_dead(sdata_t *sdata, stratum_instance_t *client)
 {
+	LOGDEBUG("Adding dead instance %ld", client->id);
 	LL_PREPEND(sdata->dead_instances, client);
 	sdata->stats.dead++;
 }
 
 static void __del_dead(sdata_t *sdata, stratum_instance_t *client)
 {
+	LOGDEBUG("Deleting dead instance %ld", client->id);
 	LL_DELETE(sdata->dead_instances, client);
 	sdata->stats.dead--;
+}
+
+static void __del_disconnected(sdata_t *sdata, stratum_instance_t *client)
+{
+	LOGDEBUG("Deleting disconnected instance %ld", client->id);
+	HASH_DEL(sdata->disconnected_instances, client);
+	sdata->stats.disconnected--;
+	__add_dead(sdata, client);
 }
 
 static void drop_allclients(ckpool_t *ckp)
@@ -960,7 +965,6 @@ static void drop_allclients(ckpool_t *ckp)
 	}
 	HASH_ITER(hh, sdata->disconnected_instances, client, tmp) {
 		__del_disconnected(sdata, client);
-		__add_dead(sdata, client);
 	}
 	sdata->stats.users = sdata->stats.workers = 0;
 	ck_wunlock(&sdata->instance_lock);
@@ -1197,35 +1201,40 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, int
 	return instance;
 }
 
-/* Only supports a full ckpool instance sessionid with an 8 byte sessionid */
-static bool disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid, int64_t id)
+static uint64_t disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid, int64_t id)
 {
 	stratum_instance_t *instance, *tmp;
-	uint64_t session64;
-	bool ret = false;
+	uint64_t enonce1_64 = 0, ret = 0;
+	int slen;
 
 	if (!sessionid)
 		goto out;
-	if (strlen(sessionid) != 16)
+	slen = strlen(sessionid) / 2;
+	if (slen < 1 || slen > 8)
 		goto out;
-	/* Number is in BE but we don't swap either of them */
-	hex2bin(&session64, sessionid, 8);
 
-	ck_rlock(&sdata->instance_lock);
+	/* Number is in BE but we don't swap either of them */
+	hex2bin(&enonce1_64, sessionid, slen);
+
+	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, instance, tmp) {
 		if (instance->id == id)
 			continue;
-		if (instance->enonce1_64 == session64) {
+		if (instance->enonce1_64 == enonce1_64) {
 			/* Only allow one connected instance per enonce1 */
 			goto out_unlock;
 		}
 	}
 	instance = NULL;
-	HASH_FIND(hh, sdata->disconnected_instances, &session64, sizeof(uint64_t), instance);
-	if (instance)
-		ret = true;
+	HASH_FIND(hh, sdata->disconnected_instances, &enonce1_64, sizeof(uint64_t), instance);
+	if (instance) {
+		/* Delete the entry once we are going to use it since there
+		 * will be a new instance with the enonce1_64 */
+		__del_disconnected(sdata, instance);
+		ret = enonce1_64;
+	}
 out_unlock:
-	ck_runlock(&sdata->instance_lock);
+	ck_wunlock(&sdata->instance_lock);
 out:
 	return ret;
 }
@@ -1307,8 +1316,9 @@ static void dec_worker(ckpool_t *ckp, user_instance_t *instance)
 
 static void drop_client(sdata_t *sdata, int64_t id)
 {
-	stratum_instance_t *client, *tmp;
+	stratum_instance_t *client, *tmp, *client_delete = NULL;
 	user_instance_t *instance = NULL;
+	time_t now_t = time(NULL);
 	ckpool_t *ckp = NULL;
 	bool dec = false;
 
@@ -1327,28 +1337,46 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		}
 
 		HASH_DEL(sdata->stratum_instances, client);
+		if (client->user_instance)
+			DL_DELETE(client->user_instance->instances, client);
 		HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
 		/* Only keep around one copy of the old client in server mode */
 		if (!client->ckp->proxy && !old_client && client->enonce1_64 && dec) {
+			LOGDEBUG("Adding disconnected instance %ld", client->id);
 			HASH_ADD(hh, sdata->disconnected_instances, enonce1_64, sizeof(uint64_t), client);
 			sdata->stats.disconnected++;
+			client->disconnected_time = time(NULL);
 		} else {
-			if (client->user_instance)
-				DL_DELETE(client->user_instance->instances, client);
 			__add_dead(sdata, client);
 		}
 	}
+
+	/* Old disconnected instances will not have any valid shares so remove
+	 * them from the disconnected instances list if they've been dead for
+	 * more than 10 minutes */
+	HASH_ITER(hh, sdata->disconnected_instances, client, tmp) {
+		if (now_t - client->disconnected_time < 600)
+			continue;
+		LOGINFO("Ageing disconnected instance %ld to dead", client->id);
+		__del_disconnected(sdata, client);
+	}
+
 	/* Cull old unused clients lazily when there are no more reference
 	 * counts for them. */
 	LL_FOREACH_SAFE(sdata->dead_instances, client, tmp) {
+		/* We can't delete the ram safely in this loop, even if we can
+		 * safely remove the entry from the linked list so we do it on
+		 * the next pass through the loop. */
+		dealloc(client_delete);
 		if (!client->ref) {
-			LOGINFO("Stratifier discarding instance %ld", client->id);
+			LOGINFO("Stratifier discarding dead instance %ld", client->id);
 			__del_dead(sdata, client);
 			free(client->workername);
 			free(client->useragent);
-			free(client);
+			client_delete = client;
 		}
 	}
+	dealloc(client_delete);
 	ck_wunlock(&sdata->instance_lock);
 
 	/* Decrease worker count outside of instance_lock to avoid recursive
@@ -1408,6 +1436,8 @@ static void reset_bestshares(sdata_t *sdata)
 	ck_runlock(&sdata->instance_lock);
 }
 
+/* Ram from blocks is NOT freed at all for now, only their entry is removed
+ * from the linked list, leaving a very small leak here and reject. */
 static void block_solve(ckpool_t *ckp, const char *blockhash)
 {
 	ckmsg_t *block, *tmp, *found = NULL;
@@ -1779,7 +1809,7 @@ static json_t *parse_subscribe(stratum_instance_t *client, int64_t client_id, js
 			buf = json_string_value(json_array_get(params_val, 1));
 			LOGDEBUG("Found old session id %s", buf);
 			/* Add matching here */
-			if (disconnected_sessionid_exists(sdata, buf, client_id)) {
+			if ((client->enonce1_64 = disconnected_sessionid_exists(sdata, buf, client_id))) {
 				sprintf(client->enonce1, "%016lx", client->enonce1_64);
 				old_match = true;
 
@@ -1797,11 +1827,11 @@ static json_t *parse_subscribe(stratum_instance_t *client, int64_t client_id, js
 			client->reject = 2;
 			return json_string("proxy full");
 		}
-		LOGINFO("Set new subscription %ld to new enonce1 %s", client->id,
-			client->enonce1);
+		LOGINFO("Set new subscription %ld to new enonce1 %lx string %s", client->id,
+			client->enonce1_64, client->enonce1);
 	} else {
-		LOGINFO("Set new subscription %ld to old matched enonce1 %s", client->id,
-			 client->enonce1);
+		LOGINFO("Set new subscription %ld to old matched enonce1 %lx string %s",
+			client->id, client->enonce1_64, client->enonce1);
 	}
 
 	ck_rlock(&sdata->workbase_lock);
