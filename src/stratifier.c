@@ -1213,6 +1213,9 @@ static uint64_t disconnected_sessionid_exists(sdata_t *sdata, const char *sessio
 	if (slen < 1 || slen > 8)
 		goto out;
 
+	if (!validhex(sessionid))
+		goto out;
+
 	/* Number is in BE but we don't swap either of them */
 	hex2bin(&enonce1_64, sessionid, slen);
 
