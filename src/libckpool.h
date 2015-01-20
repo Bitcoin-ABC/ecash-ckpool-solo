@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2015 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -495,6 +495,8 @@ void _dealloc(void **ptr);
 extern const int hex2bin_tbl[];
 void __bin2hex(void *vs, const void *vp, size_t len);
 void *bin2hex(const void *vp, size_t len);
+bool _validhex(const char *buf, const char *file, const char *func, const int line);
+#define validhex(buf) _validhex(buf, __FILE__, __func__, __LINE__)
 bool _hex2bin(void *p, const void *vhexstr, size_t len, const char *file, const char *func, const int line);
 #define hex2bin(p, vhexstr, len) _hex2bin(p, vhexstr, len, __FILE__, __func__, __LINE__)
 char *http_base64(const char *src);

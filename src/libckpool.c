@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2015 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -1350,6 +1350,30 @@ const int hex2bin_tbl[256] = {
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
 };
+
+bool _validhex(const char *buf, const char *file, const char *func, const int line)
+{
+	unsigned int i, slen;
+	bool ret = false;
+
+	slen = strlen(buf);
+	if (!slen || slen % 2) {
+		LOGDEBUG("Invalid hex due to length %u from %s %s:%d", slen, file, func, line);
+		goto out;
+	}
+	for (i = 0; i < slen; i++) {
+		uchar idx = buf[i];
+
+		if (hex2bin_tbl[idx] == -1) {
+			LOGDEBUG("Invalid hex due to value %u at offset %d from %s %s:%d",
+				 idx, i, file, func, line);
+			goto out;
+		}
+	}
+	ret = true;
+out:
+	return ret;
+}
 
 /* Does the reverse of bin2hex but does not allocate any ram */
 bool _hex2bin(void *vp, const void *vhexstr, size_t len, const char *file, const char *func, const int line)
