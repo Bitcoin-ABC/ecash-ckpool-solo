@@ -589,7 +589,7 @@ int bind_socket(char *url, char *port)
 		if (sockd > 0)
 			break;
 	}
-	if (sockd < 0) {
+	if (sockd < 1 || p == NULL) {
 		LOGWARNING("Failed to open socket for %s:%s", url, port);
 		goto out;
 	}
@@ -726,7 +726,7 @@ int _open_unix_server(const char *server_path, const char *file, const char *fun
 
 	if (likely(server_path)) {
 		len = strlen(server_path);
-		if (unlikely(len < 1 || len > UNIX_PATH_MAX)) {
+		if (unlikely(len < 1 || len >= UNIX_PATH_MAX)) {
 			LOGERR("Invalid server path length %d in open_unix_server", len);
 			goto out;
 		}
@@ -793,7 +793,7 @@ int _open_unix_client(const char *server_path, const char *file, const char *fun
 
 	if (likely(server_path)) {
 		len = strlen(server_path);
-		if (unlikely(len < 1 || len > UNIX_PATH_MAX)) {
+		if (unlikely(len < 1 || len >= UNIX_PATH_MAX)) {
 			LOGERR("Invalid server path length %d in open_unix_client", len);
 			goto out;
 		}

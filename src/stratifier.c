@@ -710,7 +710,7 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 	wb->network_diff = diff_from_nbits(wb->headerbin + 72);
 
 	len = strlen(ckp->logdir) + 8 + 1 + 16 + 1;
-	wb->logdir = ckalloc(len);
+	wb->logdir = ckzalloc(len);
 
 	/* In proxy mode, the wb->id is received in the notify update and
 	 * we set workbase_id from it. In server mode the stratifier is
@@ -1370,12 +1370,13 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		/* We can't delete the ram safely in this loop, even if we can
 		 * safely remove the entry from the linked list so we do it on
 		 * the next pass through the loop. */
-		dealloc(client_delete);
+		if (client != client_delete)
+			dealloc(client_delete);
 		if (!client->ref) {
 			LOGINFO("Stratifier discarding dead instance %ld", client->id);
 			__del_dead(sdata, client);
-			free(client->workername);
-			free(client->useragent);
+			dealloc(client->workername);
+			dealloc(client->useragent);
 			client_delete = client;
 		}
 	}
@@ -3189,7 +3190,7 @@ static void parse_method(sdata_t *sdata, const int64_t client_id, json_t *id_val
 		snprintf(buf, 255, "passthrough=%ld", client->id);
 		send_proc(client->ckp->connector, buf);
 		free(client);
-		goto out;
+		return;
 	}
 
 	if (cmdmatch(method, "mining.auth") && client->subscribed) {
