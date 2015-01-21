@@ -266,7 +266,6 @@ struct stratum_instance {
 
 	char *useragent;
 	char *workername;
-	char *password;
 	int64_t user_id;
 	int server; /* Which server is this instance bound to */
 
@@ -2191,8 +2190,8 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 {
 	user_instance_t *user_instance;
 	ckpool_t *ckp = client->ckp;
-	const char *buf, *pw = NULL;
 	bool ret = false;
+	const char *buf;
 	int arr_size;
 	ts_t now;
 
@@ -2218,9 +2217,6 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 		*err_val = json_string("Empty workername parameter");
 		goto out;
 	}
-	if (arr_size >= 2) {
-		pw = json_string_value(json_array_get(params_val, 1));
-	}
 	if (!memcmp(buf, ".", 1) || !memcmp(buf, "_", 1)) {
 		*err_val = json_string("Empty username parameter");
 		goto out;
@@ -2236,10 +2232,6 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 	strcpy(client->address, address);
 
 	client->workername = strdup(buf);
-	if (pw && strlen(pw) > 0)
-		client->password = strdup(pw);
-	LOGNOTICE("Authorised client %ld worker %s as user %s %s", client->id, buf,
-		  user_instance->username, pw ? pw : "");
 	if (CKP_STANDALONE(ckp)) {
 		if (!ckp->btcsolo || client->user_instance->btcaddress)
 			ret = true;
