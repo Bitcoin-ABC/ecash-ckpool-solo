@@ -1329,19 +1329,19 @@ static void drop_client(sdata_t *sdata, int64_t id)
 
 	ck_wlock(&sdata->instance_lock);
 	client = __instance_by_id(sdata, id);
-	if (client) {
+	if (client && likely(!client->ref)) {
 		stratum_instance_t *old_client = NULL;
 
+		instance = client->user_instance;
 		if (client->authorised) {
 			dec = true;
 			client->authorised = false;
 			ckp = client->ckp;
-			instance = client->user_instance;
 		}
 
 		HASH_DEL(sdata->stratum_instances, client);
-		if (client->user_instance)
-			DL_DELETE(client->user_instance->instances, client);
+		if (instance)
+			DL_DELETE(instance->instances, client);
 		HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
 		/* Only keep around one copy of the old client in server mode */
 		if (!client->ckp->proxy && !old_client && client->enonce1_64 && dec) {
@@ -1359,6 +1359,8 @@ static void drop_client(sdata_t *sdata, int64_t id)
 	 * more than 10 minutes */
 	HASH_ITER(hh, sdata->disconnected_instances, client, tmp) {
 		if (now_t - client->disconnected_time < 600)
+			continue;
+		if (unlikely(client->ref))
 			continue;
 		LOGINFO("Ageing disconnected instance %ld to dead", client->id);
 		__del_disconnected(sdata, client);
@@ -3183,14 +3185,15 @@ static void parse_method(sdata_t *sdata, const int64_t client_id, json_t *id_val
 		 * Remove this instance since the client id may well be
 		 * reused */
 		ck_wlock(&sdata->instance_lock);
-		HASH_DEL(sdata->stratum_instances, client);
+		if (likely(__instance_by_id(sdata, client_id)))
+			HASH_DEL(sdata->stratum_instances, client);
+		__add_dead(sdata, client);
 		ck_wunlock(&sdata->instance_lock);
 
-		LOGINFO("Adding passthrough client %ld", client->id);
+		LOGNOTICE("Adding passthrough client %ld", client->id);
 		snprintf(buf, 255, "passthrough=%ld", client->id);
 		send_proc(client->ckp->connector, buf);
-		free(client);
-		return;
+		goto out;
 	}
 
 	if (cmdmatch(method, "mining.auth") && client->subscribed) {
