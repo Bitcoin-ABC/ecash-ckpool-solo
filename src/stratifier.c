@@ -3412,6 +3412,7 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 		ASPRINTF(&buf, "Authorised, welcome to %s %s!", ckp->name,
 			 client->user_instance->username);
 		stratum_send_message(sdata, client, buf);
+		free(buf);
 	} else {
 		if (errnum < 0)
 			stratum_send_message(sdata, client, "Authorisations temporarily offline :(");
