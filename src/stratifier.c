@@ -558,7 +558,7 @@ static void purge_share_hashtable(sdata_t *sdata, int64_t wb_id)
 	HASH_ITER(hh, sdata->shares, share, tmp) {
 		if (share->workbase_id < wb_id) {
 			HASH_DEL(sdata->shares, share);
-			free(share);
+			dealloc(share);
 			purged++;
 		}
 	}
