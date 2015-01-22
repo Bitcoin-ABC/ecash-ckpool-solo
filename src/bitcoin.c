@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2015 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -46,7 +46,7 @@ bool validate_address(connsock_t *cs, const char *address)
 			}
 		}
 		if (!found) {
-			LOGWARNING("Invalid char %.1s passed to validate_address", &c);
+			LOGNOTICE("Invalid char %.1s passed to validate_address", &c);
 			return ret;
 		}
 	}

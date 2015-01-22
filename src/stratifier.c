@@ -1318,13 +1318,13 @@ static void dec_worker(ckpool_t *ckp, user_instance_t *instance)
 
 static void drop_client(sdata_t *sdata, int64_t id)
 {
-	stratum_instance_t *client, *tmp, *client_delete = NULL;
+	stratum_instance_t *client, *tmp;
 	user_instance_t *instance = NULL;
 	time_t now_t = time(NULL);
 	ckpool_t *ckp = NULL;
 	bool dec = false;
 
-	LOGINFO("Stratifier dropping client %ld", id);
+	LOGINFO("Stratifier asked to drop client %ld", id);
 
 	ck_wlock(&sdata->instance_lock);
 	client = __instance_by_id(sdata, id);
@@ -1344,11 +1344,15 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
 		/* Only keep around one copy of the old client in server mode */
 		if (!client->ckp->proxy && !old_client && client->enonce1_64 && dec) {
-			LOGDEBUG("Adding disconnected instance %ld", client->id);
+			LOGNOTICE("Disconnecting client %ld %s", client->id, client->workername);
 			HASH_ADD(hh, sdata->disconnected_instances, enonce1_64, sizeof(uint64_t), client);
 			sdata->stats.disconnected++;
 			client->disconnected_time = time(NULL);
 		} else {
+			if (client->workername)
+				LOGNOTICE("Dropping client %ld %s", client->id, client->workername);
+			else
+				LOGINFO("Dropping workerless client %ld", client->id);
 			__add_dead(sdata, client);
 		}
 	}
@@ -1368,20 +1372,14 @@ static void drop_client(sdata_t *sdata, int64_t id)
 	/* Cull old unused clients lazily when there are no more reference
 	 * counts for them. */
 	LL_FOREACH_SAFE(sdata->dead_instances, client, tmp) {
-		/* We can't delete the ram safely in this loop, even if we can
-		 * safely remove the entry from the linked list so we do it on
-		 * the next pass through the loop. */
-		if (client != client_delete)
-			dealloc(client_delete);
 		if (!client->ref) {
 			LOGINFO("Stratifier discarding dead instance %ld", client->id);
 			__del_dead(sdata, client);
 			dealloc(client->workername);
 			dealloc(client->useragent);
-			client_delete = client;
+			dealloc(client);
 		}
 	}
-	dealloc(client_delete);
 	ck_wunlock(&sdata->instance_lock);
 
 	/* Decrease worker count outside of instance_lock to avoid recursive
