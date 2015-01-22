@@ -256,6 +256,7 @@ struct stratum_instance {
 	char address[INET6_ADDRSTRLEN];
 	bool subscribed;
 	bool authorised;
+	bool dropped;
 	bool idle;
 	int reject;	/* Indicator that this client is having a run of rejects
 			 * or other problem and should be dropped lazily if
@@ -1171,18 +1172,49 @@ static stratum_instance_t *ref_instance_by_id(sdata_t *sdata, int64_t id)
 	return instance;
 }
 
-/* Decrease the reference count of instance. */
-static void __dec_instance_ref(stratum_instance_t *instance)
+static void __drop_client(sdata_t *sdata, stratum_instance_t *client, user_instance_t *instance,
+			  int64_t id)
 {
-	instance->ref--;
+	stratum_instance_t *old_client = NULL;
+
+	HASH_DEL(sdata->stratum_instances, client);
+	if (instance)
+		DL_DELETE(instance->instances, client);
+	HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
+	/* Only keep around one copy of the old client in server mode */
+	if (!client->ckp->proxy && !old_client && client->enonce1_64 && client->authorised) {
+		LOGNOTICE("Disconnecting client %ld %s %s", id, client->workername,
+			  client->dropped ? "lazily" : "");
+		HASH_ADD(hh, sdata->disconnected_instances, enonce1_64, sizeof(uint64_t), client);
+		sdata->stats.disconnected++;
+		client->disconnected_time = time(NULL);
+	} else {
+		if (client->workername)
+			LOGNOTICE("Dropping client %ld %s %s", id, client->workername,
+				  client->dropped ? "lazily" : "");
+		else
+			LOGINFO("Dropping workerless client %ld %s", id, client->dropped ? "lazily" : "");
+		__add_dead(sdata, client);
+	}
 }
 
-static void dec_instance_ref(sdata_t *sdata, stratum_instance_t *instance)
+/* Decrease the reference count of instance. */
+static void _dec_instance_ref(sdata_t *sdata, stratum_instance_t *instance, const char *file,
+			      const char *func, const int line)
 {
 	ck_wlock(&sdata->instance_lock);
-	__dec_instance_ref(instance);
+	if (unlikely(--instance->ref < 0)) {
+		LOGERR("Instance ref count dropped below zero from %s %s:%d", file, func, line);
+		instance->ref = 0;
+	}
+	/* See if there are any instances that were dropped that could not be
+	 * moved due to holding a reference and drop them now. */
+	if (unlikely(instance->dropped && !instance->ref))
+		__drop_client(sdata, instance, instance->user_instance, instance->id);
 	ck_wunlock(&sdata->instance_lock);
 }
+
+#define dec_instance_ref(sdata, instance) _dec_instance_ref(sdata, instance, __FILE__, __func__, __LINE__)
 
 /* Enter with write instance_lock held */
 static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, int server)
@@ -1328,33 +1360,18 @@ static void drop_client(sdata_t *sdata, int64_t id)
 
 	ck_wlock(&sdata->instance_lock);
 	client = __instance_by_id(sdata, id);
-	if (client && likely(!client->ref)) {
-		stratum_instance_t *old_client = NULL;
-
+	if (client) {
 		instance = client->user_instance;
 		if (client->authorised) {
 			dec = true;
-			client->authorised = false;
 			ckp = client->ckp;
 		}
-
-		HASH_DEL(sdata->stratum_instances, client);
-		if (instance)
-			DL_DELETE(instance->instances, client);
-		HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
-		/* Only keep around one copy of the old client in server mode */
-		if (!client->ckp->proxy && !old_client && client->enonce1_64 && dec) {
-			LOGNOTICE("Disconnecting client %ld %s", client->id, client->workername);
-			HASH_ADD(hh, sdata->disconnected_instances, enonce1_64, sizeof(uint64_t), client);
-			sdata->stats.disconnected++;
-			client->disconnected_time = time(NULL);
-		} else {
-			if (client->workername)
-				LOGNOTICE("Dropping client %ld %s", client->id, client->workername);
-			else
-				LOGINFO("Dropping workerless client %ld", client->id);
-			__add_dead(sdata, client);
-		}
+		/* If the client is still holding a reference, don't drop them
+		 * now but wait till the reference is dropped */
+		if (likely(!client->ref))
+			__drop_client(sdata, client, instance, id);
+		else
+			client->dropped = true;
 	}
 
 	/* Old disconnected instances will not have any valid shares so remove
@@ -2140,6 +2157,7 @@ static int send_recv_auth(stratum_instance_t *client)
 out_fail:
 	ret = -1;
 out:
+	free(buf);
 	return ret;
 }
 
