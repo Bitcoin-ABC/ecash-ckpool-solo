@@ -722,10 +722,10 @@ K_ITEM *_find_create_workerstatus(int64_t userid, char *workername,
    TODO: combine set_block_share_counters() with this? */
 void workerstatus_ready()
 {
-	K_TREE_CTX ws_ctx[1], us_ctx[1], ss_ctx[1], ms_ctx[1];
+	K_TREE_CTX ws_ctx[1], ss_ctx[1], ms_ctx[1];
 	K_ITEM *ws_item, us_look, ss_look, *us_item, *ss_item;
 	K_ITEM *ms_item, ms_look, *wm_item;
-	USERSTATS lookuserstats, *userstats;
+	USERSTATS *userstats;
 	SHARESUMMARY looksharesummary, *sharesummary;
 	MARKERSUMMARY *markersummary;
 	WORKERSTATUS *workerstatus;
@@ -739,15 +739,10 @@ void workerstatus_ready()
 	while (ws_item) {
 		DATA_WORKERSTATUS(workerstatus, ws_item);
 
-		// The last one
-		lookuserstats.userid = workerstatus->userid;
-		STRNCPY(lookuserstats.workername, workerstatus->workername);
-		lookuserstats.statsdate.tv_sec = date_eot.tv_sec;
-		lookuserstats.statsdate.tv_usec = date_eot.tv_usec;
-		us_look.data = (void *)(&lookuserstats);
+		// Zero or one
 		K_RLOCK(userstats_free);
-		us_item = find_before_in_ktree(userstats_workerstatus_root, &us_look,
-						cmp_userstats_workerstatus, us_ctx);
+		us_item = find_userstats(workerstatus->userid,
+					 workerstatus->workername);
 		K_RUNLOCK(userstats_free);
 		if (us_item) {
 			DATA_USERSTATS(userstats, us_item);
@@ -2279,28 +2274,8 @@ void dsp_userstats(K_ITEM *item, FILE *stream)
 	}
 }
 
-/* order by userid asc,statsdate asc,poolinstance asc,workername asc
-   as per required for userstats homepage summarisation */
+/* order by userid asc,workername asc */
 cmp_t cmp_userstats(K_ITEM *a, K_ITEM *b)
-{
-	USERSTATS *ua, *ub;
-	DATA_USERSTATS(ua, a);
-	DATA_USERSTATS(ub, b);
-	cmp_t c = CMP_BIGINT(ua->userid, ub->userid);
-	if (c == 0) {
-		c = CMP_TV(ua->statsdate, ub->statsdate);
-		if (c == 0) {
-			c = CMP_STR(ua->poolinstance, ub->poolinstance);
-			if (c == 0)
-				c = CMP_STR(ua->workername, ub->workername);
-		}
-	}
-	return c;
-}
-
-/* order by userid asc,workername asc
-   temporary tree for summing userstats when sending user homepage info */
-cmp_t cmp_userstats_workername(K_ITEM *a, K_ITEM *b)
 {
 	USERSTATS *ua, *ub;
 	DATA_USERSTATS(ua, a);
@@ -2311,70 +2286,18 @@ cmp_t cmp_userstats_workername(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
-/* order by statsdate,userid asc,statsdate asc,workername asc,poolinstance asc
-   as per required for DB summarisation */
-cmp_t cmp_userstats_statsdate(K_ITEM *a, K_ITEM *b)
+K_ITEM *find_userstats(int64_t userid, char *workername)
 {
-	USERSTATS *ua, *ub;
-	DATA_USERSTATS(ua, a);
-	DATA_USERSTATS(ub, b);
-	cmp_t c = CMP_TV(ua->statsdate, ub->statsdate);
-	if (c == 0) {
-		c = CMP_BIGINT(ua->userid, ub->userid);
-		if (c == 0) {
-			c = CMP_STR(ua->workername, ub->workername);
-			if (c == 0)
-				c = CMP_STR(ua->poolinstance, ub->poolinstance);
-		}
-	}
-	return c;
-}
+	USERSTATS userstats;
+	K_TREE_CTX ctx[1];
+	K_ITEM look;
 
-/* order by userid asc,workername asc,statsdate asc,poolinstance asc
-   built during data load to update workerstatus at the end of the load
-   and used during reload to discard stats already in the DB */
-cmp_t cmp_userstats_workerstatus(K_ITEM *a, K_ITEM *b)
-{
-	USERSTATS *ua, *ub;
-	DATA_USERSTATS(ua, a);
-	DATA_USERSTATS(ub, b);
-	cmp_t c = CMP_BIGINT(ua->userid, ub->userid);
-	if (c == 0) {
-		c = CMP_STR(ua->workername, ub->workername);
-		if (c == 0) {
-			c = CMP_TV(ua->statsdate, ub->statsdate);
-			if (c == 0)
-				c = CMP_STR(ua->poolinstance, ub->poolinstance);
-		}
-	}
-	return c;
-}
+	userstats.userid = userid;
+	STRNCPY(userstats.workername, workername);
 
-bool userstats_starttimeband(USERSTATS *row, tv_t *statsdate)
-{
-	char buf[DATE_BUFSIZ+1];
-
-	copy_tv(statsdate, &(row->statsdate));
-	// Start of this timeband
-	switch (row->summarylevel[0]) {
-		case SUMMARY_DB:
-			statsdate->tv_sec -= statsdate->tv_sec % USERSTATS_DB_S;
-			statsdate->tv_usec = 0;
-			break;
-		case SUMMARY_FULL:
-			statsdate->tv_sec -= statsdate->tv_sec % USERSTATS_DB_DS;
-			statsdate->tv_usec = 0;
-			break;
-		default:
-			tv_to_buf(statsdate, buf, sizeof(buf));
-			// Bad userstats are not fatal
-			LOGERR("Unknown userstats summarylevel 0x%02x '%c' "
-				"userid %"PRId64" workername %s statsdate %s",
-				row->summarylevel[0], row->summarylevel[0],
-				row->userid, row->workername, buf);
-			return false;
-	}
-	return true;
+	INIT_USERSTATS(&look);
+	look.data = (void *)(&userstats);
+	return find_in_ktree(userstats_root, &look, cmp_userstats, ctx);
 }
 
 void dsp_markersummary(K_ITEM *item, FILE *stream)

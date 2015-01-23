@@ -69,9 +69,6 @@
  *  ckdb aborting and needing a complete restart resolves it
  * The users table, required for the authorise messages, is always updated
  *  immediately and is not affected by ckpool messages until we
- * During the reload, when checking the timeframe for summarisation, we
- *  use the current last userstats createdate as 'now' to avoid touching a
- *  timeframe where data could still be waiting to be loaded
  */
 
 /* Reload data needed
@@ -97,16 +94,7 @@
  *	TODO: subtract how much we need in RAM of the 'between'
  *	non db records - will depend on TODO: pool stats reporting
  *	requirements
- *  DB+RAM userstats: start of the time band of the latest DB record,
- *	since all data before this has been summarised to the DB
- *	The userstats summarisation always processes the oldest
- *	RAM data to the DB
- *	TODO: multiple pools is not yet handled by ckdb
- *	TODO: handle a pool restart with a different instance name
- *		since this would always make the userstats reload point
- *		just after the instance name was changed - however
- *		this can be handled for now by simply ignoring the
- *		poolinstance
+ *  RAM userstats: none (we simply store the last one found)
  *  DB+RAM workers: created by auths so auths will resolve it
  *  DB+RAM blocks: resolved by workinfo - any unsaved blocks (if any)
  *	will be after the last DB workinfo
@@ -137,15 +125,12 @@
  * Any data that matches the reload stamp is processed with an
  *  ignore duplicates flag for all except as below.
  * Any data after the stamp, is processed normally for all except:
- *  1) userstats: any record that falls in a DB userstats that would
- *	summarise that record is discarded,
- *	otherwise the userstats is processed normally
- *  2) shares/shareerrors: any record that matches an incomplete DB
+ *  1) shares/shareerrors: any record that matches an incomplete DB
  *	sharesummary that hasn't been reset, will reset the sharesummary
  *	so that the sharesummary will be recalculated
  *	The record is processed normally with or without the reset
  *	If the sharesummary is complete, the record is discarded
- *  3) ageworkinfo records are also handled by the shares date
+ *  2) ageworkinfo records are also handled by the shares date
  *	while processing, any records already aged are not updated
  *	and a warning is displayed if there were any matching shares
  *	Any ageworkinfos that match a workmarker are ignored with an error
@@ -431,21 +416,16 @@ K_LIST *auths_free;
 K_STORE *auths_store;
 
 // POOLSTATS poolstats.id.json={...}
-// TODO: redo like userstats, but every 10min
 K_TREE *poolstats_root;
 K_LIST *poolstats_free;
 K_STORE *poolstats_store;
 
 // USERSTATS userstats.id.json={...}
 K_TREE *userstats_root;
-K_TREE *userstats_statsdate_root; // ordered by statsdate first
-K_TREE *userstats_workerstatus_root; // during data load
 K_LIST *userstats_free;
 K_STORE *userstats_store;
 // Awaiting EOS
 K_STORE *userstats_eos_store;
-// Temporary while summarising
-K_STORE *userstats_summ;
 
 // WORKERSTATUS from various incoming data
 K_TREE *workerstatus_root;
@@ -779,9 +759,7 @@ static bool getdata3()
 	if (!confirm_sharesummary) {
 		if (!(ok = useratts_fill(conn)) || everyone_die)
 			goto sukamudai;
-		if (!(ok = poolstats_fill(conn)) || everyone_die)
-			goto sukamudai;
-		ok = userstats_fill(conn);
+		ok = poolstats_fill(conn);
 	}
 
 sukamudai:
@@ -810,8 +788,6 @@ static bool reload()
 	LOGWARNING("%s(): %s newest DB auths", __func__, buf);
 	tv_to_buf(&(dbstatus.newest_createdate_poolstats), buf, sizeof(buf));
 	LOGWARNING("%s(): %s newest DB poolstats", __func__, buf);
-	tv_to_buf(&(dbstatus.newest_starttimeband_userstats), buf, sizeof(buf));
-	LOGWARNING("%s(): %s newest DB userstats start timeband", __func__, buf);
 	tv_to_buf(&(dbstatus.newest_createdate_blocks), buf, sizeof(buf));
 	LOGWARNING("%s(): %s newest DB blocks (ignored)", __func__, buf);
 
@@ -833,10 +809,6 @@ static bool reload()
 	if (!tv_newer(&start, &(dbstatus.newest_createdate_poolstats))) {
 		copy_tv(&start, &(dbstatus.newest_createdate_poolstats));
 		reason = "poolstats";
-	}
-	if (!tv_newer(&start, &(dbstatus.newest_starttimeband_userstats))) {
-		copy_tv(&start, &(dbstatus.newest_starttimeband_userstats));
-		reason = "userstats";
 	}
 
 	tv_to_buf(&start, buf, sizeof(buf));
@@ -1048,10 +1020,7 @@ static void alloc_storage()
 					ALLOC_USERSTATS, LIMIT_USERSTATS, true);
 	userstats_store = k_new_store(userstats_free);
 	userstats_eos_store = k_new_store(userstats_free);
-	userstats_summ = k_new_store(userstats_free);
 	userstats_root = new_ktree();
-	userstats_statsdate_root = new_ktree();
-	userstats_workerstatus_root = new_ktree();
 	userstats_free->dsp_func = dsp_userstats;
 
 	workerstatus_free = k_new_list("WorkerStatus", sizeof(WORKERSTATUS),
@@ -1141,10 +1110,6 @@ static void dealloc_storage()
 
 	LOGWARNING("%s() userstats ...", __func__);
 
-	FREE_TREE(userstats_workerstatus);
-	FREE_TREE(userstats_statsdate);
-	if (userstats_summ)
-		 userstats_summ = k_free_store(userstats_summ);
 	FREE_STORE(userstats_eos);
 	FREE_ALL(userstats);
 
@@ -1238,8 +1203,6 @@ static bool setup_data()
 		return false;
 
 	workerstatus_ready();
-
-	userstats_workerstatus_root = free_ktree(userstats_workerstatus_root, NULL);
 
 	workinfo_current = last_in_ktree(workinfo_height_root, ctx);
 	if (workinfo_current) {
@@ -1725,209 +1688,6 @@ static void summarise_poolstats()
 // TODO
 }
 
-// TODO: daily
-// TODO: consider limiting how much/how long this processes each time
-static void summarise_userstats()
-{
-	K_TREE_CTX ctx[1];
-	K_ITEM *first, *last, *new, *next, *tmp;
-	USERSTATS *userstats, *us_first, *us_last, *us_next;
-	double statrange, factor;
-	bool locked, upgrade, issix, sixdiff;
-	tv_t now, process, when;
-	PGconn *conn = NULL;
-	int count, sixcount;
-	char error[1024];
-	char tvbuf1[DATE_BUFSIZ], tvbuf2[DATE_BUFSIZ];
-
-	upgrade = false;
-	locked = false;
-	while (1764) {
-		error[0] = '\0';
-		setnow(&now);
-		upgrade = false;
-		locked = true;
-		K_ILOCK(userstats_free);
-
-		// confirm_summaries() doesn't call this
-		if (!reloading)
-			copy_tv(&process, &now);
-		else {
-			// During reload, base the check date on the newest statsdate
-			last = last_in_ktree(userstats_statsdate_root, ctx);
-			if (!last)
-				break;
-
-			DATA_USERSTATS(us_last, last);
-			copy_tv(&process, &us_last->statsdate);
-		}
-
-		first = first_in_ktree(userstats_statsdate_root, ctx);
-		DATA_USERSTATS_NULL(us_first, first);
-		// Oldest non DB stat
-		// TODO: make the index start with summarylevel? so can find faster
-		while (first && us_first->summarylevel[0] != SUMMARY_NONE) {
-			first = next_in_ktree(ctx);
-			DATA_USERSTATS_NULL(us_first, first);
-		}
-
-		if (!first)
-			break;
-
-		statrange = tvdiff(&process, &(us_first->statsdate));
-		// Is there data ready for summarising?
-		if (statrange <= USERSTATS_AGE)
-			break;
-
-		copy_tv(&when,  &(us_first->statsdate));
-		/* Convert when to the start of the timeframe after the one it is in
-		 * assume timeval ignores leapseconds ... */
-		when.tv_sec = when.tv_sec - (when.tv_sec % USERSTATS_DB_S) + USERSTATS_DB_S;
-		when.tv_usec = 0;
-
-		// Is the whole timerange up to before 'when' ready for summarising?
-		statrange = tvdiff(&process, &when);
-		if (statrange < USERSTATS_AGE)
-			break;
-
-		next = next_in_ktree(ctx);
-
-		upgrade = true;
-		issix = us_first->six;
-		sixdiff = false;
-		K_ULOCK(userstats_free);
-		new = k_unlink_head(userstats_free);
-		DATA_USERSTATS(userstats, new);
-		memcpy(userstats, us_first, sizeof(USERSTATS));
-
-		userstats_root = remove_from_ktree(userstats_root, first, cmp_userstats);
-		userstats_statsdate_root = remove_from_ktree(userstats_statsdate_root, first,
-							     cmp_userstats_statsdate);
-		k_unlink_item(userstats_store, first);
-		k_add_head(userstats_summ, first);
-
-		count = 1;
-		sixcount = issix ? 1 : 0;
-		while (next) {
-			DATA_USERSTATS(us_next, next);
-			statrange = tvdiff(&when, &(us_next->statsdate));
-			if (statrange <= 0)
-				break;
-
-			tmp = next_in_ktree(ctx);
-
-			if (us_next->summarylevel[0] == SUMMARY_NONE &&
-			    us_next->userid == userstats->userid &&
-			    strcmp(us_next->workername, userstats->workername) == 0) {
-				if (us_next->six != issix)
-					sixdiff = true;
-				count++;
-				sixcount += us_next->six ? 1 : 0;
-				userstats->hashrate += us_next->hashrate;
-				userstats->hashrate5m += us_next->hashrate5m;
-				userstats->hashrate1hr += us_next->hashrate1hr;
-				userstats->hashrate24hr += us_next->hashrate24hr;
-				if (userstats->elapsed > us_next->elapsed)
-					userstats->elapsed = us_next->elapsed;
-				userstats->summarycount += us_next->summarycount;
-
-				userstats_root = remove_from_ktree(userstats_root,
-								   next, cmp_userstats);
-				userstats_statsdate_root = remove_from_ktree(userstats_statsdate_root,
-									     next,
-									     cmp_userstats_statsdate);
-				k_unlink_item(userstats_store, next);
-				k_add_head(userstats_summ, next);
-			}
-			next = tmp;
-		}
-
-		// Can temporarily release the lock since all our data is now not part of the lock
-		if (upgrade)
-			K_WUNLOCK(userstats_free);
-		else
-			K_IUNLOCK(userstats_free);
-		upgrade = false;
-		locked = false;
-
-		if (userstats->hashrate5m > 0.0 || userstats->hashrate1hr > 0.0)
-			userstats->idle = false;
-		else
-			userstats->idle = true;
-
-		userstats->summarylevel[0] = SUMMARY_DB;
-		userstats->summarylevel[1] = '\0';
-
-		if (issix && !sixdiff) {
-			// Expect 6 per poolinstance
-			factor = (double)count / 6.0;
-		} else {
-			// For now ... new format is still 6 per hour
-			factor = (double)count / 6.0;
-		}
-
-		userstats->hashrate *= factor;
-		userstats->hashrate5m *= factor;
-		userstats->hashrate1hr *= factor;
-		userstats->hashrate24hr *= factor;
-
-		copy_tv(&(userstats->statsdate), &when);
-		// Stats to the end of this timeframe
-		userstats->statsdate.tv_sec -= 1;
-		userstats->statsdate.tv_usec = 999999;
-
-		// This is simply when it was written, so 'now' is fine
-		SIMPLEDATEDEFAULT(userstats, &now);
-
-		if (!conn)
-			conn = dbconnect();
-
-		if (!userstats_add_db(conn, userstats)) {
-			/* This should only happen if a restart finds data
-			   that wasn't found during the reload but is in
-			   the same timeframe as DB data
-			   i.e. it shouldn't happen, but keep the summary anyway */
-			when.tv_sec -= USERSTATS_DB_S;
-			tv_to_buf(&when, tvbuf1, sizeof(tvbuf1));
-			tv_to_buf(&(userstats->statsdate), tvbuf2, sizeof(tvbuf2));
-			snprintf(error, sizeof(error),
-				 "Userid %"PRId64" Worker %s, %d userstats record%s "
-				 "discarded from %s to %s",
-				 userstats->userid,
-				 userstats->workername,
-				 count, (count == 1 ? "" : "s"),
-				 tvbuf1, tvbuf2);
-		}
-
-		// The flags are not needed
-		//upgrade = true;
-		//locked = true;
-		K_WLOCK(userstats_free);
-		k_list_transfer_to_tail(userstats_summ, userstats_free);
-		k_add_head(userstats_store, new);
-		userstats_root = add_to_ktree(userstats_root, new, cmp_userstats);
-		userstats_statsdate_root = add_to_ktree(userstats_statsdate_root, new,
-							cmp_userstats_statsdate);
-
-		K_WUNLOCK(userstats_free);
-		//locked = false;
-		//upgrade = false;
-
-		if (error[0])
-			LOGERR("%s", error);
-	}
-
-	if (locked) {
-		if (upgrade)
-			K_WUNLOCK(userstats_free);
-		else
-			K_IUNLOCK(userstats_free);
-	}
-
-	if (conn)
-		PQfinish(conn);
-}
-
 static void *summariser(__maybe_unused void *arg)
 {
 	int i;
@@ -1968,10 +1728,6 @@ static void *summariser(__maybe_unused void *arg)
 			if (!everyone_die)
 				sleep(1);
 		}
-		if (everyone_die)
-			break;
-		else
-			summarise_userstats();
 	}
 
 	summariser_using_data = false;

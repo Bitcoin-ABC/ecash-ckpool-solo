@@ -25,12 +25,13 @@ void *jsonp_malloc(size_t size)
     return (*do_malloc)(size);
 }
 
-void jsonp_free(void *ptr)
+void _jsonp_free(void **ptr)
 {
-    if(!ptr)
+    if(!*ptr)
         return;
 
-    (*do_free)(ptr);
+    (*do_free)(*ptr);
+    *ptr = NULL;
 }
 
 char *jsonp_strdup(const char *str)

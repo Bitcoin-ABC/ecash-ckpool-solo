@@ -52,7 +52,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.6"
-#define CKDB_VERSION DB_VERSION"-0.837"
+#define CKDB_VERSION DB_VERSION"-0.841"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -1196,8 +1196,14 @@ extern K_TREE *poolstats_root;
 extern K_LIST *poolstats_free;
 extern K_STORE *poolstats_store;
 
-// USERSTATS userstats.id.json={...}
-// Pool sends each user (staggered) once per 10m
+/* USERSTATS userstats.id.json={...}
+ * Pool sends each user (staggered) once per 10m
+ * As from CKDB V0.840 we don't store any userstats
+ *  other than the last one we received,
+ *  and we don't store them in the DB at all.
+ * Historical stats will come from markersummary
+ * Most of the #defines for USERSTATS are no longer needed
+ *  but are left here for now for historical reference */
 typedef struct userstats {
 	char poolinstance[TXT_BIG+1];
 	int64_t userid;
@@ -1208,16 +1214,15 @@ typedef struct userstats {
 	double hashrate1hr;
 	double hashrate24hr;
 	bool idle; // Non-db field
-	bool six; // Non-db field
-	char summarylevel[TXT_FLAG+1]; // Initially SUMMARY_NONE in RAM
+	char summarylevel[TXT_FLAG+1]; // SUMMARY_NONE in RAM
 	int32_t summarycount;
 	tv_t statsdate;
 	SIMPLEDATECONTROLFIELDS;
 } USERSTATS;
 
-/* USERSTATS protocol includes a boolean 'eos' that when true,
- * we have received the full set of data for the given
- * createdate batch, and thus can move all (complete) records
+/* The old USERSTATS protocol included a boolean 'eos' that when true,
+ * we had received the full set of data for the given
+ * createdate batch, and thus could move all (complete) records
  * matching the createdate from userstats_eos_store into the tree */
 
 #define ALLOC_USERSTATS 10000
@@ -1227,14 +1232,10 @@ typedef struct userstats {
 #define DATA_USERSTATS_NULL(_var, _item) DATA_GENERIC(_var, _item, userstats, false)
 
 extern K_TREE *userstats_root;
-extern K_TREE *userstats_statsdate_root; // ordered by statsdate first
-extern K_TREE *userstats_workerstatus_root; // during data load
 extern K_LIST *userstats_free;
 extern K_STORE *userstats_store;
 // Awaiting EOS
 extern K_STORE *userstats_eos_store;
-// Temporary while summarising
-extern K_STORE *userstats_summ;
 
 /* 1.5 x how often we expect to get user's stats from ckpool
  * This is used when grouping the sub-worker stats into a single user
@@ -1659,10 +1660,7 @@ extern cmp_t cmp_auths(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_poolstats(K_ITEM *a, K_ITEM *b);
 extern void dsp_userstats(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_userstats(K_ITEM *a, K_ITEM *b);
-extern cmp_t cmp_userstats_workername(K_ITEM *a, K_ITEM *b);
-extern cmp_t cmp_userstats_statsdate(K_ITEM *a, K_ITEM *b);
-extern cmp_t cmp_userstats_workerstatus(K_ITEM *a, K_ITEM *b);
-extern bool userstats_starttimeband(USERSTATS *row, tv_t *statsdate);
+extern K_ITEM *find_userstats(int64_t userid, char *workername);
 extern void dsp_markersummary(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_markersummary(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_markersummary_userid(K_ITEM *a, K_ITEM *b);

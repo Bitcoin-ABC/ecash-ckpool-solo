@@ -5047,70 +5047,15 @@ clean:
 	return ok;
 }
 
-bool userstats_add_db(PGconn *conn, USERSTATS *row)
-{
-	ExecStatusType rescode;
-	bool conned = false;
-	PGresult *res;
-	char *ins;
-	bool ok = false;
-	char *params[10 + SIMPLEDATECOUNT];
-	int n, par = 0;
-
-	LOGDEBUG("%s(): store", __func__);
-
-	par = 0;
-	params[par++] = bigint_to_buf(row->userid, NULL, 0);
-	params[par++] = str_to_buf(row->workername, NULL, 0);
-	params[par++] = bigint_to_buf(row->elapsed, NULL, 0);
-	params[par++] = double_to_buf(row->hashrate, NULL, 0);
-	params[par++] = double_to_buf(row->hashrate5m, NULL, 0);
-	params[par++] = double_to_buf(row->hashrate1hr, NULL, 0);
-	params[par++] = double_to_buf(row->hashrate24hr, NULL, 0);
-	params[par++] = str_to_buf(row->summarylevel, NULL, 0);
-	params[par++] = int_to_buf(row->summarycount, NULL, 0);
-	params[par++] = tv_to_buf(&(row->statsdate), NULL, 0);
-	SIMPLEDATEPARAMS(params, par, row);
-	PARCHK(par, params);
-
-	ins = "insert into userstats "
-		"(userid,workername,elapsed,hashrate,hashrate5m,hashrate1hr,"
-		"hashrate24hr,summarylevel,summarycount,statsdate"
-		SIMPLEDATECONTROL ") values (" PQPARAM14 ")";
-
-	if (conn == NULL) {
-		conn = dbconnect();
-		conned = true;
-	}
-
-	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-	rescode = PQresultStatus(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Insert", rescode, conn);
-		goto unparam;
-	}
-
-	ok = true;
-unparam:
-	PQclear(res);
-	if (conned)
-		PQfinish(conn);
-	for (n = 0; n < par; n++)
-		free(params[n]);
-
-	return ok;
-}
-
-// This is to RAM. The summariser calls the DB I/O functions for userstats
+// To RAM
 bool userstats_add(char *poolinstance, char *elapsed, char *username,
 			char *workername, char *hashrate, char *hashrate5m,
 			char *hashrate1hr, char *hashrate24hr, bool idle,
 			bool eos, char *by, char *code, char *inet, tv_t *cd,
 			K_TREE *trf_root)
 {
-	K_ITEM *us_item, *u_item, *us_match, *us_next, look;
-	tv_t eosdate;
-	USERSTATS *row, cmp, *match, *next;
+	K_ITEM *us_item, *u_item, *us_match, *us_next;
+	USERSTATS *row, *match, *next;
 	USERS *users;
 	K_TREE_CTX ctx[1];
 
@@ -5149,47 +5094,10 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 	SIMPLEDATEINIT(row, cd, by, code, inet);
 	SIMPLEDATETRANSFER(trf_root, row);
 	copy_tv(&(row->statsdate), &(row->createdate));
-	row->six = true;
-
-	if (eos) {
-		// Save it for end processing
-		eosdate.tv_sec = row->createdate.tv_sec;
-		eosdate.tv_usec = row->createdate.tv_usec;
-	}
-
-	// confirm_summaries() doesn't call this
-	if (reloading) {
-		memcpy(&cmp, row, sizeof(cmp));
-		INIT_USERSTATS(&look);
-		look.data = (void *)(&cmp);
-		// Just zero it to ensure the DB record is after it, not equal to it
-		cmp.statsdate.tv_usec = 0;
-		/* If there is a matching user+worker DB record summarising this row,
-		 * or a matching user+worker DB record next after this row, discard it */
-		us_match = find_after_in_ktree(userstats_workerstatus_root, &look,
-						cmp_userstats_workerstatus, ctx);
-		DATA_USERSTATS_NULL(match, us_match);
-		if (us_match &&
-		    match->userid == row->userid &&
-		    strcmp(match->workername, row->workername) == 0 &&
-		    match->summarylevel[0] != SUMMARY_NONE) {
-			K_WLOCK(userstats_free);
-			k_add_head(userstats_free, us_item);
-			K_WUNLOCK(userstats_free);
-
-			/* If this was an eos record and eos_store has data,
-			 * it means we need to process the eos_store */
-			if (eos && userstats_eos_store->count > 0)
-				goto advancetogo;
-
-			return true;
-		}
-	}
 
 	workerstatus_update(NULL, NULL, row);
 
-	/* group at full key: userid,createdate,poolinstance,workername
-	   i.e. ignore instance and group together down at workername */
+	/* group at: userid,workername */
 	us_match = userstats_eos_store->head;
 	while (us_match && cmp_userstats(us_item, us_match) != 0.0)
 		us_match = us_match->next;
@@ -5208,39 +5116,35 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 		k_add_head(userstats_free, us_item);
 		K_WUNLOCK(userstats_free);
 	} else {
-		// New worker
+		// New user+worker
 		K_WLOCK(userstats_free);
 		k_add_head(userstats_eos_store, us_item);
 		K_WUNLOCK(userstats_free);
 	}
 
 	if (eos) {
-advancetogo:
 		K_WLOCK(userstats_free);
 		us_next = userstats_eos_store->head;
 		while (us_next) {
-			DATA_USERSTATS(next, us_next);
-			if (tvdiff(&(next->createdate), &eosdate) != 0.0) {
-				char date_buf[DATE_BUFSIZ];
-				LOGERR("userstats != eos '%s' discarded: %s/%"PRId64"/%s",
-				       tv_to_buf(&eosdate, date_buf, DATE_BUFSIZ),
-				       next->poolinstance,
-				       next->userid,
-				       next->workername);
-				us_next = us_next->next;
-			} else {
+			us_item = find_in_ktree(userstats_root, us_next,
+						cmp_userstats, ctx);
+			if (!us_item) {
+				// New user+worker - store it in RAM
 				us_match = us_next;
 				us_next = us_match->next;
 				k_unlink_item(userstats_eos_store, us_match);
 				userstats_root = add_to_ktree(userstats_root, us_match,
 								cmp_userstats);
-				userstats_statsdate_root = add_to_ktree(userstats_statsdate_root, us_match,
-									cmp_userstats_statsdate);
-				if (!startup_complete) {
-					userstats_workerstatus_root = add_to_ktree(userstats_workerstatus_root, us_match,
-										   cmp_userstats_workerstatus);
-				}
 				k_add_head(userstats_store, us_match);
+			} else {
+				DATA_USERSTATS(next, us_next);
+				// Old user+worker - update RAM if us_item is newer
+				DATA_USERSTATS(row, us_item);
+				if (tv_newer(&(next->createdate), &(row->createdate))) {
+					// the tree index data is the same
+					memcpy(next, row, sizeof(*row));
+				}
+				us_next = us_next->next;
 			}
 		}
 		// Discard them
@@ -5252,15 +5156,15 @@ advancetogo:
 	return true;
 }
 
-// This is to RAM. The summariser calls the DB I/O functions for userstats
+// To RAM
 bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 			char *workername, char *hashrate, char *hashrate5m,
 			char *hashrate1hr, char *hashrate24hr, bool idle,
 			char *by, char *code, char *inet, tv_t *cd,
 			K_TREE *trf_root)
 {
-	K_ITEM *us_item, *u_item, *us_match, look;
-	USERSTATS *row, cmp, *match;
+	K_ITEM *us_item, *u_item, *us_match;
+	USERSTATS *row, *match;
 	USERS *users;
 	K_TREE_CTX ctx[1];
 
@@ -5278,11 +5182,13 @@ bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
 	if (!u_item) {
-		char *txt;
-		LOGERR("%s(): unknown user '%s'",
+		char *usr, *wrk;
+		LOGERR("%s(): unknown user '%s' (worker=%s)",
 			__func__,
-			txt = safe_text(username));
-		free(txt);
+			usr = safe_text(username),
+			wrk = safe_text(workername));
+		free(usr);
+		free(wrk);
 		return false;
 	}
 	DATA_USERS(users, u_item);
@@ -5299,232 +5205,29 @@ bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 	SIMPLEDATEINIT(row, cd, by, code, inet);
 	SIMPLEDATETRANSFER(trf_root, row);
 	copy_tv(&(row->statsdate), &(row->createdate));
-	row->six = false;
-
-	// confirm_summaries() doesn't call this
-	if (reloading) {
-		memcpy(&cmp, row, sizeof(cmp));
-		INIT_USERSTATS(&look);
-		look.data = (void *)(&cmp);
-		// Just zero it to ensure the DB record is after it, not equal to it
-		cmp.statsdate.tv_usec = 0;
-		/* If there is a matching user+worker DB record summarising this row,
-		 * or a matching user+worker DB record next after this row, discard it */
-		us_match = find_after_in_ktree(userstats_workerstatus_root, &look,
-						cmp_userstats_workerstatus, ctx);
-		DATA_USERSTATS_NULL(match, us_match);
-		if (us_match &&
-		    match->userid == row->userid &&
-		    strcmp(match->workername, row->workername) == 0 &&
-		    match->summarylevel[0] != SUMMARY_NONE) {
-			K_WLOCK(userstats_free);
-			k_add_head(userstats_free, us_item);
-			K_WUNLOCK(userstats_free);
-			return true;
-		}
-	}
 
 	workerstatus_update(NULL, NULL, row);
 
 	K_WLOCK(userstats_free);
-	userstats_root = add_to_ktree(userstats_root, us_item, cmp_userstats);
-	userstats_statsdate_root = add_to_ktree(userstats_statsdate_root, us_item,
-						cmp_userstats_statsdate);
-	if (!startup_complete) {
-		userstats_workerstatus_root = add_to_ktree(userstats_workerstatus_root,
-							   us_item,
-							   cmp_userstats_workerstatus);
+	us_match = find_in_ktree(userstats_root, us_item,
+				 cmp_userstats, ctx);
+	if (!us_match) {
+		// New user+worker - store it in RAM
+		userstats_root = add_to_ktree(userstats_root, us_item,
+						cmp_userstats);
+		k_add_head(userstats_store, us_item);
+	} else {
+		DATA_USERSTATS(match, us_match);
+		// Old user+worker - update RAM if us_item is newer
+		if (tv_newer(&(match->createdate), &(row->createdate))) {
+			// the tree index data is the same
+			memcpy(match, row, sizeof(*row));
+		}
+		k_add_head(userstats_free, us_item);
 	}
-	k_add_head(userstats_store, us_item);
 	K_WUNLOCK(userstats_free);
 
 	return true;
-}
-
-// TODO: data selection - only require ?
-bool userstats_fill(PGconn *conn)
-{
-	ExecStatusType rescode;
-	PGresult *res;
-	K_ITEM *item;
-	int n, i;
-	struct tm tm;
-	time_t now_t;
-	char tzinfo[16], stamp[128];
-	USERSTATS *row;
-	tv_t statsdate;
-	char *field;
-	char *sel = NULL;
-	size_t len, off;
-	int fields = 10;
-	long minoff, hroff;
-	char tzch;
-	bool ok;
-
-	LOGDEBUG("%s(): select", __func__);
-
-	// Temoprarily ... load last 24hrs worth
-	now_t = time(NULL);
-	now_t -= 24 * 60 * 60;
-	localtime_r(&now_t, &tm);
-	minoff = tm.tm_gmtoff / 60;
-	if (minoff < 0) {
-		tzch = '-';
-		minoff *= -1;
-	} else
-		tzch = '+';
-	hroff = minoff / 60;
-	if (minoff % 60) {
-		snprintf(tzinfo, sizeof(tzinfo),
-			 "%c%02ld:%02ld",
-			 tzch, hroff, minoff % 60);
-	} else {
-		snprintf(tzinfo, sizeof(tzinfo),
-			 "%c%02ld",
-			 tzch, hroff);
-	}
-	snprintf(stamp, sizeof(stamp),
-			"'%d-%02d-%02d %02d:%02d:%02d%s'",
-			tm.tm_year + 1900,
-			tm.tm_mon + 1,
-			tm.tm_mday,
-			tm.tm_hour,
-			tm.tm_min,
-			tm.tm_sec,
-			tzinfo);
-
-	APPEND_REALLOC_INIT(sel, off, len);
-	APPEND_REALLOC(sel, off, len,
-			"select "
-			"userid,workername,elapsed,hashrate,hashrate5m,"
-			"hashrate1hr,hashrate24hr,summarylevel,summarycount,"
-			"statsdate"
-			SIMPLEDATECONTROL
-			" from userstats where statsdate>");
-	APPEND_REALLOC(sel, off, len, stamp);
-
-	res = PQexec(conn, sel, CKPQ_READ);
-	rescode = PQresultStatus(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Select", rescode, conn);
-		PQclear(res);
-		ok = false;
-		goto clean;
-	}
-
-	n = PQnfields(res);
-	if (n != (fields + SIMPLEDATECOUNT)) {
-		LOGERR("%s(): Invalid field count - should be %d, but is %d",
-			__func__, fields + SIMPLEDATECOUNT, n);
-		PQclear(res);
-		ok = false;
-		goto clean;
-	}
-
-	n = PQntuples(res);
-	LOGDEBUG("%s(): tree build count %d", __func__, n);
-	ok = true;
-	K_WLOCK(userstats_free);
-	for (i = 0; i < n; i++) {
-		item = k_unlink_head(userstats_free);
-		DATA_USERSTATS(row, item);
-
-		if (everyone_die) {
-			ok = false;
-			break;
-		}
-
-		// Not a DB field
-		row->poolinstance[0] = '\0';
-
-		PQ_GET_FLD(res, i, "userid", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("userid", field, row->userid);
-
-		PQ_GET_FLD(res, i, "workername", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_STR("workername", field, row->workername);
-
-		PQ_GET_FLD(res, i, "elapsed", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("elapsed", field, row->elapsed);
-
-		PQ_GET_FLD(res, i, "hashrate", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("hashrate", field, row->hashrate);
-
-		PQ_GET_FLD(res, i, "hashrate5m", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("hashrate5m", field, row->hashrate5m);
-
-		PQ_GET_FLD(res, i, "hashrate1hr", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("hashrate1hr", field, row->hashrate1hr);
-
-		PQ_GET_FLD(res, i, "hashrate24hr", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("hashrate24hr", field, row->hashrate24hr);
-
-		PQ_GET_FLD(res, i, "summarylevel", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_STR("summarylevel", field, row->summarylevel);
-
-		PQ_GET_FLD(res, i, "summarycount", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_INT("summarycount", field, row->summarycount);
-
-		PQ_GET_FLD(res, i, "statsdate", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_TV("statsdate", field, row->statsdate);
-
-		// From DB - 1hr means it must have been idle > 10m
-		if (row->hashrate5m == 0.0 && row->hashrate1hr == 0.0)
-			row->idle = true;
-		else
-			row->idle = false;
-
-		SIMPLEDATEFLDS(res, i, row, ok);
-		if (!ok)
-			break;
-
-		userstats_root = add_to_ktree(userstats_root, item, cmp_userstats);
-		userstats_statsdate_root = add_to_ktree(userstats_statsdate_root, item,
-							cmp_userstats_statsdate);
-		userstats_workerstatus_root = add_to_ktree(userstats_workerstatus_root, item,
-							   cmp_userstats_workerstatus);
-		k_add_head(userstats_store, item);
-
-		workerstatus_update(NULL, NULL, row);
-		if (userstats_starttimeband(row, &statsdate)) {
-			if (tv_newer(&(dbstatus.newest_starttimeband_userstats), &statsdate))
-				copy_tv(&(dbstatus.newest_starttimeband_userstats), &statsdate);
-		}
-
-		tick();
-	}
-	if (!ok)
-		k_add_head(userstats_free, item);
-
-	K_WUNLOCK(userstats_free);
-	PQclear(res);
-
-	if (ok) {
-		LOGDEBUG("%s(): built", __func__);
-		LOGWARNING("%s(): loaded %d userstats records", __func__, n);
-	}
-clean:
-	free(sel);
-	return ok;
 }
 
 bool markersummary_add(PGconn *conn, K_ITEM *ms_item, char *by, char *code,

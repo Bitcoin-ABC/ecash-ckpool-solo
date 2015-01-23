@@ -298,6 +298,8 @@ struct stratifier_data {
 	/* Serialises sends/receives to ckdb if possible */
 	pthread_mutex_t ckdb_lock;
 
+	bool ckdb_offline;
+
 	/* Variable length enonce1 always refers back to a u64 */
 	union {
 		uint64_t u64;
@@ -3484,9 +3486,33 @@ static void parse_ckdb_cmd(ckpool_t __maybe_unused *ckp, const char *cmd)
 	json_decref(val);
 }
 
+/* Test a value under lock and set it, returning the original value */
+static bool test_and_set(bool *val, pthread_mutex_t *lock)
+{
+	bool ret;
+
+	mutex_lock(lock);
+	ret = *val;
+	*val = true;
+	mutex_unlock(lock);
+
+	return ret;
+}
+
+static bool test_and_clear(bool *val, pthread_mutex_t *lock)
+{
+	bool ret;
+
+	mutex_lock(lock);
+	ret = *val;
+	*val = false;
+	mutex_unlock(lock);
+
+	return ret;
+}
+
 static void ckdbq_process(ckpool_t *ckp, char *msg)
 {
-	static bool failed = false;
 	sdata_t *sdata = ckp->data;
 	char *buf = NULL;
 
@@ -3496,18 +3522,15 @@ static void ckdbq_process(ckpool_t *ckp, char *msg)
 		mutex_unlock(&sdata->ckdb_lock);
 
 		if (unlikely(!buf)) {
-			if (!failed) {
-				failed = true;
+			if (!test_and_set(&sdata->ckdb_offline, &sdata->ckdb_lock))
 				LOGWARNING("Failed to talk to ckdb, queueing messages");
-			}
 			sleep(5);
 		}
 	}
 	free(msg);
-	if (failed) {
-		failed = false;
+	if (test_and_clear(&sdata->ckdb_offline, &sdata->ckdb_lock))
 		LOGWARNING("Successfully resumed talking to ckdb");
-	}
+
 	/* TODO: Process any requests from ckdb that are heartbeat responses
 	 * with specific requests. */
 	if (likely(buf)) {
@@ -3632,8 +3655,8 @@ out:
 		dec_instance_ref(sdata, client);
 }
 
-/* Called every 20 seconds, we send the updated stats to ckdb of those users
- * who have gone 10 minutes between updates. This ends up staggering stats to
+/* Called 32 times per min, we send the updated stats to ckdb of those users
+ * who have gone 1 minute between updates. This ends up staggering stats to
  * avoid floods of stat data coming at once. */
 static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 {
@@ -3641,6 +3664,11 @@ static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 	char cdfield[64];
 	time_t now_t;
 	ts_t ts_now;
+
+	if (sdata->ckdb_offline) {
+		LOGDEBUG("Not queueing workerstats due to ckdb offline");
+		return;
+	}
 
 	if (++sdata->stats.userstats_cycle > 0x1f)
 		sdata->stats.userstats_cycle = 0;
@@ -3945,10 +3973,10 @@ static void *statsupdate(void *arg)
 				"createinet", ckp->serverurl[0]);
 		ckdbq_add(ckp, ID_POOLSTATS, val);
 
-		/* Update stats 3 times per minute for smooth values, displaying
-		 * status every minute. */
-		for (i = 0; i < 3; i++) {
-			cksleep_ms_r(&stats->last_update, 20000);
+		/* Update stats 32 times per minute to divide up userstats for
+		 * ckdb, displaying status every minute. */
+		for (i = 0; i < 32; i++) {
+			cksleep_ms_r(&stats->last_update, 1875);
 			cksleep_prepare_r(&stats->last_update);
 			update_workerstats(ckp, sdata);
 
@@ -3957,18 +3985,18 @@ static void *statsupdate(void *arg)
 			stats->accounted_diff_shares += stats->unaccounted_diff_shares;
 			stats->accounted_rejects += stats->unaccounted_rejects;
 
-			decay_time(&stats->sps1, stats->unaccounted_shares, 20, 60);
-			decay_time(&stats->sps5, stats->unaccounted_shares, 20, 300);
-			decay_time(&stats->sps15, stats->unaccounted_shares, 20, 900);
-			decay_time(&stats->sps60, stats->unaccounted_shares, 20, 3600);
+			decay_time(&stats->sps1, stats->unaccounted_shares, 1.875, 60);
+			decay_time(&stats->sps5, stats->unaccounted_shares, 1.875, 300);
+			decay_time(&stats->sps15, stats->unaccounted_shares, 1.875, 900);
+			decay_time(&stats->sps60, stats->unaccounted_shares, 1.875, 3600);
 
-			decay_time(&stats->dsps1, stats->unaccounted_diff_shares, 20, 60);
-			decay_time(&stats->dsps5, stats->unaccounted_diff_shares, 20, 300);
-			decay_time(&stats->dsps15, stats->unaccounted_diff_shares, 20, 900);
-			decay_time(&stats->dsps60, stats->unaccounted_diff_shares, 20, 3600);
-			decay_time(&stats->dsps360, stats->unaccounted_diff_shares, 20, 21600);
-			decay_time(&stats->dsps1440, stats->unaccounted_diff_shares, 20, 86400);
-			decay_time(&stats->dsps10080, stats->unaccounted_diff_shares, 20, 604800);
+			decay_time(&stats->dsps1, stats->unaccounted_diff_shares, 1.875, 60);
+			decay_time(&stats->dsps5, stats->unaccounted_diff_shares, 1.875, 300);
+			decay_time(&stats->dsps15, stats->unaccounted_diff_shares, 1.875, 900);
+			decay_time(&stats->dsps60, stats->unaccounted_diff_shares, 1.875, 3600);
+			decay_time(&stats->dsps360, stats->unaccounted_diff_shares, 1.875, 21600);
+			decay_time(&stats->dsps1440, stats->unaccounted_diff_shares, 1.875, 86400);
+			decay_time(&stats->dsps10080, stats->unaccounted_diff_shares, 1.875, 604800);
 
 			stats->unaccounted_shares =
 			stats->unaccounted_diff_shares =

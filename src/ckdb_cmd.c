@@ -1147,17 +1147,15 @@ static char *cmd_payments(__maybe_unused PGconn *conn, char *cmd, char *id,
 static char *cmd_percent(char *cmd, char *id, tv_t *now, USERS *users)
 {
 	K_ITEM w_look, *w_item, us_look, *us_item, *ws_item;
-	K_TREE_CTX w_ctx[1], us_ctx[1], pay_ctx[1];
+	K_TREE_CTX w_ctx[1], pay_ctx[1];
 	WORKERS lookworkers, *workers;
 	WORKERSTATUS *workerstatus;
-	USERSTATS lookuserstats, *userstats;
+	USERSTATS *userstats;
 	char tmp[1024];
 	char *buf;
 	size_t len, off;
 	int rows;
 
-	K_TREE *userstats_workername_root = new_ktree();
-	K_TREE_CTX usw_ctx[1];
 	double t_hashrate5m = 0, t_hashrate1hr = 0;
 	double t_hashrate24hr = 0;
 	double t_diffacc = 0, t_diffinv = 0;
@@ -1214,44 +1212,25 @@ static char *cmd_percent(char *cmd, char *id, tv_t *now, USERS *users)
 				t_sharerej += workerstatus->sharerej;
 			}
 
-			// find last stored userstats record
-			lookuserstats.userid = users->userid;
-			lookuserstats.statsdate.tv_sec = date_eot.tv_sec;
-			lookuserstats.statsdate.tv_usec = date_eot.tv_usec;
-			// find/cmp doesn't get to here
-			lookuserstats.poolinstance[0] = '\0';
-			lookuserstats.workername[0] = '\0';
-			us_look.data = (void *)(&lookuserstats);
+			/* TODO: workers_root userid+worker is ordered
+			 *  so no 'find' should be needed -
+			 *  just cmp to last 'unused us_item' userid+worker
+			 *  then step it forward to be the next ready 'unused' */
 			K_RLOCK(userstats_free);
-			us_item = find_before_in_ktree(userstats_root, &us_look, cmp_userstats, us_ctx);
-			DATA_USERSTATS_NULL(userstats, us_item);
-			while (us_item && userstats->userid == lookuserstats.userid) {
-				if (strcmp(userstats->workername, workers->workername) == 0) {
-					if (tvdiff(now, &(userstats->statsdate)) < USERSTATS_PER_S) {
-						if (!find_in_ktree(userstats_workername_root, us_item,
-						    cmp_userstats_workername, usw_ctx)) {
-							t_hashrate5m += userstats->hashrate5m;
-							t_hashrate1hr += userstats->hashrate1hr;
-							t_hashrate24hr += userstats->hashrate24hr;
-							userstats_workername_root =
-									add_to_ktree(userstats_workername_root,
-										     us_item,
-										     cmp_userstats_workername);
-						}
-					} else
-						break;
-
+			us_item = find_userstats(users->userid, workers->workername);
+			if (us_item) {
+				DATA_USERSTATS(userstats, us_item);
+				if (tvdiff(now, &(userstats->statsdate)) < USERSTATS_PER_S) {
+					t_hashrate5m += userstats->hashrate5m;
+					t_hashrate1hr += userstats->hashrate1hr;
+					t_hashrate24hr += userstats->hashrate24hr;
 				}
-				us_item = prev_in_ktree(us_ctx);
-				DATA_USERSTATS_NULL(userstats, us_item);
 			}
 			K_RUNLOCK(userstats_free);
 		}
 		w_item = next_in_ktree(w_ctx);
 		DATA_WORKERS_NULL(workers, w_item);
 	}
-
-	userstats_workername_root = free_ktree(userstats_workername_root, NULL);
 
 	// Calculate total payratio
 	paytotal = 0;
@@ -1394,11 +1373,11 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
 {
 	K_ITEM *i_username, *i_stats, *i_percent, w_look, *u_item, *w_item;
-	K_ITEM *ua_item, us_look, *us_item, *ws_item;
-	K_TREE_CTX w_ctx[1], us_ctx[1];
+	K_ITEM *ua_item, *us_item, *ws_item;
+	K_TREE_CTX w_ctx[1];
 	WORKERS lookworkers, *workers;
 	WORKERSTATUS *workerstatus;
-	USERSTATS lookuserstats, *userstats;
+	USERSTATS *userstats;
 	USERS *users;
 	char reply[1024] = "";
 	char tmp[1024];
@@ -1450,7 +1429,6 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, tmp);
 
 	INIT_WORKERS(&w_look);
-	INIT_USERSTATS(&us_look);
 
 	lookworkers.userid = users->userid;
 	lookworkers.workername[0] = '\0';
@@ -1479,8 +1457,6 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 			APPEND_REALLOC(buf, off, len, tmp);
 
 			if (stats) {
-				K_TREE *userstats_workername_root = new_ktree();
-				K_TREE_CTX usw_ctx[1];
 				double w_hashrate5m, w_hashrate1hr;
 				double w_hashrate24hr;
 				int64_t w_elapsed;
@@ -1523,39 +1499,23 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 					w_sharerej = workerstatus->sharerej;
 				}
 
-				// find last stored userid record
-				lookuserstats.userid = users->userid;
-				lookuserstats.statsdate.tv_sec = date_eot.tv_sec;
-				lookuserstats.statsdate.tv_usec = date_eot.tv_usec;
-				// find/cmp doesn't get to here
-				lookuserstats.poolinstance[0] = '\0';
-				lookuserstats.workername[0] = '\0';
-				us_look.data = (void *)(&lookuserstats);
+				/* TODO: workers_root userid+worker is ordered
+				 *  so no 'find' should be needed -
+				 *  just cmp to last 'unused us_item' userid+worker
+				 *  then step it forward to be the next ready 'unused' */
 				K_RLOCK(userstats_free);
-				us_item = find_before_in_ktree(userstats_root, &us_look, cmp_userstats, us_ctx);
-				DATA_USERSTATS_NULL(userstats, us_item);
-				while (us_item && userstats->userid == lookuserstats.userid) {
-					if (strcmp(userstats->workername, workers->workername) == 0) {
-						if (tvdiff(now, &(userstats->statsdate)) < USERSTATS_PER_S) {
-							// TODO: add together the latest per pool instance (this is the latest per worker)
-							if (!find_in_ktree(userstats_workername_root, us_item, cmp_userstats_workername, usw_ctx)) {
-								w_hashrate5m += userstats->hashrate5m;
-								w_hashrate1hr += userstats->hashrate1hr;
-								w_hashrate24hr += userstats->hashrate24hr;
-								if (w_elapsed == -1 || w_elapsed > userstats->elapsed)
-									w_elapsed = userstats->elapsed;
-
-								userstats_workername_root = add_to_ktree(userstats_workername_root,
-													 us_item,
-													 cmp_userstats_workername);
-							}
-						} else
-							break;
-
+				us_item = find_userstats(users->userid, workers->workername);
+				if (us_item) {
+					DATA_USERSTATS(userstats, us_item);
+					if (tvdiff(now, &(userstats->statsdate)) < USERSTATS_PER_S) {
+						w_hashrate5m += userstats->hashrate5m;
+						w_hashrate1hr += userstats->hashrate1hr;
+						w_hashrate24hr += userstats->hashrate24hr;
+						if (w_elapsed == -1 || w_elapsed > userstats->elapsed)
+							w_elapsed = userstats->elapsed;
 					}
-					us_item = prev_in_ktree(us_ctx);
-					DATA_USERSTATS_NULL(userstats, us_item);
 				}
+				K_RUNLOCK(userstats_free);
 
 				double_to_buf(w_hashrate5m, reply, sizeof(reply));
 				snprintf(tmp, sizeof(tmp), "w_hashrate5m:%d=%s%c", rows, reply, FLDSEP);
@@ -1628,9 +1588,6 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 				double_to_buf(w_sharerej, reply, sizeof(reply));
 				snprintf(tmp, sizeof(tmp), "w_sharerej:%d=%s%c", rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
-
-				userstats_workername_root = free_ktree(userstats_workername_root, NULL);
-				K_RUNLOCK(userstats_free);
 			}
 
 			rows++;
@@ -1665,125 +1622,88 @@ static char *cmd_allusers(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  __maybe_unused tv_t *notcd,
 			  __maybe_unused K_TREE *trf_root)
 {
-	K_TREE *userstats_workername_root = new_ktree();
-	K_ITEM *us_item, *usw_item, *tmp_item, *u_item;
-	K_TREE_CTX us_ctx[1], usw_ctx[1];
-	USERSTATS *userstats, *userstats_w;
+	K_STORE *usu_store = k_new_store(userstats_free);
+	K_ITEM *us_item, *usu_item, *u_item;
+	K_TREE_CTX us_ctx[1];
+	USERSTATS *userstats, *userstats_u = NULL;
 	USERS *users;
 	char reply[1024] = "";
 	char tmp[1024];
 	char *buf;
 	size_t len, off;
 	int rows;
-	int64_t userid = -1;
-	double u_hashrate5m = 0.0;
-	double u_hashrate1hr = 0.0;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
-	// TODO: this really should just get the last value of each client_id (within the time limit)
-
-	// Find last records for each user/worker in ALLUSERS_LIMIT_S
-	// TODO: include pool_instance
+	/* Sum up all recent userstats without workername
+	 * i.e. userstasts per username */
 	K_WLOCK(userstats_free);
-	us_item = last_in_ktree(userstats_statsdate_root, us_ctx);
-	DATA_USERSTATS_NULL(userstats, us_item);
-	while (us_item && tvdiff(now, &(userstats->statsdate)) < ALLUSERS_LIMIT_S) {
-		usw_item = find_in_ktree(userstats_workername_root, us_item, cmp_userstats_workername, usw_ctx);
-		if (!usw_item) {
-			usw_item = k_unlink_head(userstats_free);
-			DATA_USERSTATS(userstats_w, usw_item);
+	us_item = first_in_ktree(userstats_root, us_ctx);
+	while (us_item) {
+		DATA_USERSTATS(userstats, us_item);
+		if (tvdiff(now, &(userstats->statsdate)) < ALLUSERS_LIMIT_S) {
+			if (!userstats_u || userstats->userid != userstats_u->userid) {
+				usu_item = k_unlink_head(userstats_free);
+				DATA_USERSTATS(userstats_u, usu_item);
 
-			userstats_w->userid = userstats->userid;
-			strcpy(userstats_w->workername, userstats->workername);
-			userstats_w->hashrate5m = userstats->hashrate5m;
-			userstats_w->hashrate1hr = userstats->hashrate1hr;
+				userstats_u->userid = userstats->userid;
+				/* Remember the first workername for if we ever
+				 *  get the missing user LOGERR message below */
+				STRNCPY(userstats_u->workername, userstats->workername);
+				userstats_u->hashrate5m = userstats->hashrate5m;
+				userstats_u->hashrate1hr = userstats->hashrate1hr;
 
-			userstats_workername_root = add_to_ktree(userstats_workername_root, usw_item, cmp_userstats_workername);
+				k_add_head(usu_store, usu_item);
+			} else {
+				userstats_u->hashrate5m += userstats->hashrate5m;
+				userstats_u->hashrate1hr += userstats->hashrate1hr;
+			}
 		}
-		us_item = prev_in_ktree(us_ctx);
-		DATA_USERSTATS_NULL(userstats, us_item);
+		us_item = next_in_ktree(us_ctx);
 	}
+	K_WUNLOCK(userstats_free);
 
 	APPEND_REALLOC_INIT(buf, off, len);
 	APPEND_REALLOC(buf, off, len, "ok.");
 	rows = 0;
-	// Add up per user
-	usw_item = first_in_ktree(userstats_workername_root, usw_ctx);
-	while (usw_item) {
-		DATA_USERSTATS(userstats_w, usw_item);
-		if (userstats_w->userid != userid) {
-			if (userid != -1) {
-				K_RLOCK(users_free);
-				u_item = find_userid(userid);
-				K_RUNLOCK(users_free);
-				if (!u_item) {
-					LOGERR("%s() userid %"PRId64" ignored - userstats but not users",
-					       __func__, userid);
-				} else {
-					DATA_USERS(users, u_item);
-					str_to_buf(users->username, reply, sizeof(reply));
-					snprintf(tmp, sizeof(tmp), "username:%d=%s%c", rows, reply, FLDSEP);
-					APPEND_REALLOC(buf, off, len, tmp);
-
-					bigint_to_buf(userid, reply, sizeof(reply));
-					snprintf(tmp, sizeof(tmp), "userid:%d=%s%c", rows, reply, FLDSEP);
-					APPEND_REALLOC(buf, off, len, tmp);
-
-					double_to_buf(u_hashrate5m, reply, sizeof(reply));
-					snprintf(tmp, sizeof(tmp), "u_hashrate5m:%d=%s%c", rows, reply, FLDSEP);
-					APPEND_REALLOC(buf, off, len, tmp);
-
-					double_to_buf(u_hashrate1hr, reply, sizeof(reply));
-					snprintf(tmp, sizeof(tmp), "u_hashrate1hr:%d=%s%c", rows, reply, FLDSEP);
-					APPEND_REALLOC(buf, off, len, tmp);
-
-					rows++;
-				}
-			}
-			userid = userstats_w->userid;
-			u_hashrate5m = 0;
-			u_hashrate1hr = 0;
-		}
-		u_hashrate5m += userstats_w->hashrate5m;
-		u_hashrate1hr += userstats_w->hashrate1hr;
-
-		tmp_item = usw_item;
-		usw_item = next_in_ktree(usw_ctx);
-
-		k_add_head(userstats_free, tmp_item);
-	}
-	if (userid != -1) {
+	usu_item = usu_store->head;
+	while (usu_item) {
+		DATA_USERSTATS(userstats_u, usu_item);
 		K_RLOCK(users_free);
-		u_item = find_userid(userid);
+		u_item = find_userid(userstats_u->userid);
 		K_RUNLOCK(users_free);
 		if (!u_item) {
-			LOGERR("%s() userid %"PRId64" ignored - userstats but not users",
-			       __func__, userid);
+			LOGERR("%s() userstats, but not users, "
+			       "ignored %"PRId64"/%s",
+			       __func__, userstats_u->userid,
+			       userstats_u->workername);
 		} else {
 			DATA_USERS(users, u_item);
 			str_to_buf(users->username, reply, sizeof(reply));
 			snprintf(tmp, sizeof(tmp), "username:%d=%s%c", rows, reply, FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 
-			bigint_to_buf(userid, reply, sizeof(reply));
+			bigint_to_buf(users->userid, reply, sizeof(reply));
 			snprintf(tmp, sizeof(tmp), "userid:%d=%s%c", rows, reply, FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 
-			double_to_buf(u_hashrate5m, reply, sizeof(reply));
+			double_to_buf(userstats_u->hashrate5m, reply, sizeof(reply));
 			snprintf(tmp, sizeof(tmp), "u_hashrate5m:%d=%s%c", rows, reply, FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 
-			double_to_buf(u_hashrate1hr, reply, sizeof(reply));
+			double_to_buf(userstats_u->hashrate1hr, reply, sizeof(reply));
 			snprintf(tmp, sizeof(tmp), "u_hashrate1hr:%d=%s%c", rows, reply, FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 
 			rows++;
 		}
+		usu_item = usu_item->next;
 	}
 
-	userstats_workername_root = free_ktree(userstats_workername_root, NULL);
+	K_WLOCK(userstats_free);
+	k_list_transfer_to_head(usu_store, userstats_free);
 	K_WUNLOCK(userstats_free);
+	k_free_store(usu_store);
 
 	snprintf(tmp, sizeof(tmp),
 		 "rows=%d%cflds=%s%c",
@@ -2496,7 +2416,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	BLOCKS *blocks;
 	USERS *users;
 	int64_t u_elapsed;
-	K_TREE_CTX ctx[1], w_ctx[1];
+	K_TREE_CTX ctx[1];
 	size_t len, off;
 	bool has_uhr;
 
@@ -2660,40 +2580,29 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	has_uhr = false;
 	if (p_item && u_item) {
-		K_TREE *userstats_workername_root = new_ktree();
 		u_hashrate5m = u_hashrate1hr = 0.0;
 		u_elapsed = -1;
-		// find last stored userid record
-		lookuserstats.userid = users->userid;
-		lookuserstats.statsdate.tv_sec = date_eot.tv_sec;
-		lookuserstats.statsdate.tv_usec = date_eot.tv_usec;
-		// find/cmp doesn't get to here
-		STRNCPY(lookuserstats.poolinstance, EMPTY);
+		/* find last matching userid record - before userid+1
+		 * Use 'before' in case there is (unexpectedly) a userstats
+		 *  with an empty workername */
+		lookuserstats.userid = users->userid+1;
 		STRNCPY(lookuserstats.workername, EMPTY);
 		INIT_USERSTATS(&look);
 		look.data = (void *)(&lookuserstats);
 		K_RLOCK(userstats_free);
 		us_item = find_before_in_ktree(userstats_root, &look, cmp_userstats, ctx);
 		DATA_USERSTATS_NULL(userstats, us_item);
-		while (us_item && userstats->userid == lookuserstats.userid &&
-		       tvdiff(now, &(userstats->statsdate)) < USERSTATS_PER_S) {
-			// TODO: add the latest per pool instance (this is the latest per worker)
-			// Ignore summarised data from the DB, it should be old so irrelevant
-			if (userstats->poolinstance[0] &&
-			    !find_in_ktree(userstats_workername_root, us_item, cmp_userstats_workername, w_ctx)) {
+		while (us_item && userstats->userid == users->userid) {
+			if (tvdiff(now, &(userstats->statsdate)) < USERSTATS_PER_S) {
 				u_hashrate5m += userstats->hashrate5m;
 				u_hashrate1hr += userstats->hashrate1hr;
 				if (u_elapsed == -1 || u_elapsed > userstats->elapsed)
 					u_elapsed = userstats->elapsed;
 				has_uhr = true;
-				userstats_workername_root = add_to_ktree(userstats_workername_root,
-									 us_item,
-									 cmp_userstats_workername);
 			}
 			us_item = prev_in_ktree(ctx);
 			DATA_USERSTATS_NULL(userstats, us_item);
 		}
-		userstats_workername_root = free_ktree(userstats_workername_root, NULL);
 		K_RUNLOCK(userstats_free);
 	}
 
@@ -4017,7 +3926,7 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USEINFO(miningpayouts, 1, 1);
 	USEINFO(auths, 1, 1);
 	USEINFO(poolstats, 1, 1);
-	USEINFO(userstats, 4, 2);
+	USEINFO(userstats, 2, 1);
 	USEINFO(workerstatus, 1, 1);
 	USEINFO(workqueue, 1, 0);
 	USEINFO(transfer, 0, 0);
