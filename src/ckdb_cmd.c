@@ -819,7 +819,7 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 	size_t len, off;
 	int32_t height = -1;
 	tv_t first_cd = {0,0};
-	int rows;
+	int rows, tot;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -827,6 +827,16 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, "ok.");
 	rows = 0;
 	K_RLOCK(blocks_free);
+	b_item = last_in_ktree(blocks_root, ctx);
+	tot = 0;
+	while (b_item) {
+		DATA_BLOCKS(blocks, b_item);
+		if (CURRENT(&(blocks->expirydate))) {
+			if (blocks->confirmed[0] != BLOCKS_ORPHAN)
+				tot++;
+		}
+		b_item = prev_in_ktree(ctx);
+	}
 	b_item = last_in_ktree(blocks_root, ctx);
 	while (b_item && rows < 42) {
 		DATA_BLOCKS(blocks, b_item);
@@ -914,7 +924,8 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 	}
 	K_RUNLOCK(blocks_free);
 	snprintf(tmp, sizeof(tmp),
-		 "rows=%d%cflds=%s%c",
+		 "tot=%d%crows=%d%cflds=%s%c",
+		 tot, FLDSEP,
 		 rows, FLDSEP,
 		 "height,blockhash,nonce,reward,workername,firstcreatedate,"
 		 "createdate,status,diffacc,diffinv,shareacc,shareinv,elapsed,"

@@ -36,6 +36,7 @@ struct client_instance {
 
 	/* For dead_clients list */
 	struct client_instance *next;
+	struct client_instance *prev;
 
 	struct sockaddr address;
 	char address_name[INET6_ADDRSTRLEN];
@@ -211,7 +212,7 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 	if (fd != -1) {
 		Close(client->fd);
 		HASH_DEL(cdata->clients, client);
-		LL_PREPEND(cdata->dead_clients, client);
+		DL_APPEND(cdata->dead_clients, client);
 		/* This is the reference to this client's presence in the
 		 * epoll list. */
 		__dec_instance_ref(client);
@@ -249,9 +250,9 @@ static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *c
 	/* Cull old unused clients lazily when there are no more reference
 	 * counts for them. */
 	ck_wlock(&cdata->lock);
-	LL_FOREACH_SAFE(cdata->dead_clients, client, tmp) {
+	DL_FOREACH_SAFE(cdata->dead_clients, client, tmp) {
 		if (!client->ref) {
-			LL_DELETE(cdata->dead_clients, client);
+			DL_DELETE(cdata->dead_clients, client);
 			LOGINFO("Connector discarding client %ld", client->id);
 			dealloc(client);
 		}

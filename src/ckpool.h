@@ -38,6 +38,7 @@ struct ckmsgq {
 	pthread_cond_t *cond;
 	ckmsg_t *msgs;
 	void (*func)(ckpool_t *, void *);
+	int64_t messages;
 };
 
 typedef struct ckmsgq ckmsgq_t;

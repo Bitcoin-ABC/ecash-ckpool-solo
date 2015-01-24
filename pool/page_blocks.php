@@ -96,10 +96,10 @@ function doblocks($data, $user)
  $csv = "Sequence,Height,Status,Timestamp,DiffAcc,NetDiff,Hash\n";
  if ($ans['STATUS'] == 'ok')
  {
+	$tot = $ans['tot'];
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
 	{
-		$seq = $i + 1;
 		if (($i % 2) == 0)
 			$row = 'even';
 		else
@@ -114,7 +114,10 @@ function doblocks($data, $user)
 		{
 			$ex = 's';
 			$orph = true;
+			$seq = '';
 		}
+		else
+			$seq = $tot--;
 		if ($stat == '1-Confirm')
 		{
 			if (isset($data['info']['lastheight']))

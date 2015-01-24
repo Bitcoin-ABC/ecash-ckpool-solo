@@ -52,7 +52,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.6"
-#define CKDB_VERSION DB_VERSION"-0.841"
+#define CKDB_VERSION DB_VERSION"-0.903"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -268,6 +268,15 @@ extern bool everyone_die;
 
 #define JSON_TRANSFER "json="
 #define JSON_TRANSFER_LEN (sizeof(JSON_TRANSFER)-1)
+#define JSON_BEGIN '{'
+// Arrays have limited support in breakdown()
+#define JSON_ARRAY '['
+#define JSON_ARRAY_END ']'
+#define JSON_STR '"'
+#define JSON_VALUE ':'
+#define JSON_SEP ','
+#define JSON_END '}'
+#define JSON_ESC '\\'
 
 // Methods for sharelog (common function for all)
 #define STR_WORKINFO "workinfo"

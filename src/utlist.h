@@ -572,6 +572,28 @@ do {                                                                            
   }                                                                                            \
 } while (0) 
 
+#define DL_DELETE_INIT(head,del)                                                                    \
+    DL_DELETE3(head,del,prev,next)
+
+#define DL_DELETE3(head,del,prev,next)                                                         \
+do {                                                                                           \
+  assert((del)->prev != NULL);                                                                 \
+  if ((del)->prev == (del)) {                                                                  \
+      (head)=NULL;                                                                             \
+  } else if ((del)==(head)) {                                                                  \
+      (del)->next->prev = (del)->prev;                                                         \
+      (head) = (del)->next;                                                                    \
+  } else {                                                                                     \
+      (del)->prev->next = (del)->next;                                                         \
+      if ((del)->next) {                                                                       \
+          (del)->next->prev = (del)->prev;                                                     \
+      } else {                                                                                 \
+          (head)->prev = (del)->prev;                                                          \
+      }                                                                                        \
+  }                                                                                            \
+  (del)->prev = (del)->next = NULL;                                                            \
+} while (0)
+
 #define DL_COUNT(head,el,counter)                                                              \
     DL_COUNT2(head,el,counter,next)                                                            \
 

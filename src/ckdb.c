@@ -1233,9 +1233,10 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 	TRANSFER *transfer;
 	K_TREE_CTX ctx[1];
 	K_ITEM *item;
-	char *cmdptr, *idptr, *next, *eq;
-	char *data = NULL;
+	char *cmdptr, *idptr, *next, *eq, *end, *was;
+	char *data = NULL, *tmp;
 	bool noid = false;
+	size_t siz;
 
 	*trf_root = NULL;
 	*trf_store = NULL;
@@ -1284,122 +1285,180 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 	*trf_store = k_new_store(transfer_free);
 	next = data;
 	if (next && strncmp(next, JSON_TRANSFER, JSON_TRANSFER_LEN) == 0) {
-		json_t *json_data;
-		json_error_t err_val;
-		void *json_iter;
-		const char *json_key, *json_str;
-		json_t *json_value;
-		int json_typ;
-		size_t siz;
-		bool ok;
-
+		// It's json
 		next += JSON_TRANSFER_LEN;
-		json_data = json_loads(next, JSON_DISABLE_EOF_CHECK, &err_val);
-		if (!json_data) {
-			/* This REALLY shouldn't ever get an error since the input
-			 * is a json generated string
-			 * If that happens then dump lots of information */
-			char *text = safe_text(next);
-			LOGERR("Json decode error from command: '%s' "
-				"json_err=(%d:%d:%d)%s:%s input='%s'",
-				cmd, err_val.line, err_val.column,
-				err_val.position, err_val.source,
-				err_val.text, text);
-			free(text);
+		was = next;
+		while (*next == ' ')
+			next++;
+		if (*next != JSON_BEGIN) {
+			LOGERR("JSON_BEGIN '%c' was: %.32s...",
+				JSON_BEGIN, tmp = safe_text(was));
+			free(tmp);
 			free(cmdptr);
 			return CMD_REPLY;
 		}
-		json_iter = json_object_iter(json_data);
-		K_WLOCK(transfer_free);
-		while (json_iter) {
-			json_key = json_object_iter_key(json_iter);
-			json_value = json_object_iter_value(json_iter);
+		next++;
+		// while we have a new quoted name
+		while (*next == JSON_STR) {
+			was = next;
+			end = ++next;
+			// look for the end quote
+			while (*end && *end != JSON_STR) {
+				if (*(end++) == JSON_ESC)
+					end++;
+			}
+			if (!*end) {
+				LOGERR("JSON name no trailing '%c' was: %.32s...",
+					JSON_STR, tmp = safe_text(was));
+				free(tmp);
+				free(cmdptr);
+				return CMD_REPLY;
+			}
+			if (next == end) {
+				LOGERR("JSON zero length name was: %.32s...",
+					tmp = safe_text(was));
+				free(tmp);
+				free(cmdptr);
+				return CMD_REPLY;
+			}
+			*(end++) = '\0';
+			K_WLOCK(transfer_free);
 			item = k_unlink_head(transfer_free);
+			K_WUNLOCK(transfer_free);
 			DATA_TRANSFER(transfer, item);
-			ok = true;
-			json_typ = json_typeof(json_value);
-			switch (json_typ) {
-			 case JSON_STRING:
-				json_str = json_string_value(json_value);
-				siz = strlen(json_str);
-				if (siz >= sizeof(transfer->svalue))
-					transfer->mvalue = strdup(json_str);
-				else {
-					STRNCPY(transfer->svalue, json_str);
-					transfer->mvalue = transfer->svalue;
-				}
-				break;
-			 case JSON_REAL:
-				snprintf(transfer->svalue,
-					 sizeof(transfer->svalue),
-					 "%f", json_real_value(json_value));
-				transfer->mvalue = transfer->svalue;
-				break;
-			 case JSON_INTEGER:
-				snprintf(transfer->svalue,
-					 sizeof(transfer->svalue),
-					 "%"PRId64,
-					 (int64_t)json_integer_value(json_value));
-				transfer->mvalue = transfer->svalue;
-				break;
-			 case JSON_TRUE:
-			 case JSON_FALSE:
-				snprintf(transfer->svalue,
-					 sizeof(transfer->svalue),
-					 "%s", (json_typ == JSON_TRUE) ?
-							TRUE_STR : FALSE_STR);
-				transfer->mvalue = transfer->svalue;
-				break;
-			 case JSON_ARRAY:
-				{
-					/* only one level array of strings for now (merkletree)
-					 * ignore other data */
-					size_t i, len, off, count = json_array_size(json_value);
-					json_t *json_element;
-					bool first = true;
-
-					APPEND_REALLOC_INIT(transfer->mvalue, off, len);
-					for (i = 0; i < count; i++) {
-						json_element = json_array_get(json_value, i);
-						if (json_is_string(json_element)) {
-							json_str = json_string_value(json_element);
-							siz = strlen(json_str);
-							if (first)
-								first = false;
-							else {
-								APPEND_REALLOC(transfer->mvalue,
-										off, len, " ");
-							}
-							APPEND_REALLOC(transfer->mvalue,
-									off, len, json_str);
-						} else
-							LOGERR("%s() unhandled json type %d in array %s"
-							       " in cmd %s", __func__,
-							       json_typ, json_key, cmd);
-					}
-				}
-				break;
-			 default:
-				LOGERR("%s() unhandled json type %d in cmd %s",
-				       __func__, json_typ, cmd);
-				ok = false;
-				break;
-			}
-
-			if (ok)
-				STRNCPY(transfer->name, json_key);
-			if (!ok || find_in_ktree(*trf_root, item, cmp_transfer, ctx)) {
-				if (transfer->mvalue != transfer->svalue)
-					FREENULL(transfer->mvalue);
+			STRNCPY(transfer->name, next);
+			was = next = end;
+			while (*next == ' ')
+				next++;
+			// we have a name, now expect a value after it
+			if (*next != JSON_VALUE) {
+				LOGERR("JSON_VALUE '%c' '%s' was: %.32s...",
+					JSON_VALUE, transfer->name,
+					tmp = safe_text(was));
+				free(tmp);
+				free(cmdptr);
+				K_WLOCK(transfer_free);
 				k_add_head(transfer_free, item);
-			} else {
-				*trf_root = add_to_ktree(*trf_root, item, cmp_transfer);
-				k_add_head(*trf_store, item);
+				K_WUNLOCK(transfer_free);
+				return CMD_REPLY;
 			}
-			json_iter = json_object_iter_next(json_data, json_iter);
+			was = ++next;
+			while (*next == ' ')
+				next++;
+			if (*next == JSON_STR) {
+				end = ++next;
+				// A quoted value must have a terminating quote
+				while (*end && *end != JSON_STR) {
+					if (*(end++) == JSON_ESC)
+						end++;
+				}
+				if (!*end) {
+					LOGERR("JSON '%s' value was: %.32s...",
+						transfer->name,
+						tmp = safe_text(was));
+					free(tmp);
+					free(cmdptr);
+					K_WLOCK(transfer_free);
+					k_add_head(transfer_free, item);
+					K_WUNLOCK(transfer_free);
+					return CMD_REPLY;
+				}
+				siz = end - next;
+				end++;
+			} else if (*next == JSON_ARRAY) {
+				// Only merklehash for now
+				if (strcmp(transfer->name, "merklehash")) {
+					LOGERR("JSON '%s' can't be an array",
+						transfer->name);
+					free(cmdptr);
+					K_WLOCK(transfer_free);
+					k_add_head(transfer_free, item);
+					K_WUNLOCK(transfer_free);
+					return CMD_REPLY;
+				}
+				end = ++next;
+				/* No structure testing for now since we
+				 *  don't expect merklehash to get it wrong,
+				 *  and if it does, it will show up as some
+				 *  other error anyway */
+				while (*end && *end != JSON_ARRAY_END)
+					end++;
+				if (end < next+1) {
+					LOGERR("JSON '%s' zero length value "
+						"was: %.32s...",
+						transfer->name,
+						tmp = safe_text(was));
+					free(tmp);
+					free(cmdptr);
+					K_WLOCK(transfer_free);
+					k_add_head(transfer_free, item);
+					K_WUNLOCK(transfer_free);
+					return CMD_REPLY;
+				}
+				siz = end - next;
+				end++;
+			} else {
+				end = next;
+				// A non quoted value ends on SEP, END or space
+				while (*end && *end != JSON_SEP &&
+				       *end != JSON_END && *end != ' ') {
+						end++;
+				}
+				if (!*end) {
+					LOGERR("JSON '%s' value was: %.32s...",
+						transfer->name,
+						tmp = safe_text(was));
+					free(tmp);
+					free(cmdptr);
+					K_WLOCK(transfer_free);
+					k_add_head(transfer_free, item);
+					K_WUNLOCK(transfer_free);
+					return CMD_REPLY;
+				}
+				if (next == end) {
+					LOGERR("JSON '%s' zero length value "
+						"was: %.32s...",
+						transfer->name,
+						tmp = safe_text(was));
+					free(tmp);
+					free(cmdptr);
+					K_WLOCK(transfer_free);
+					k_add_head(transfer_free, item);
+					K_WUNLOCK(transfer_free);
+					return CMD_REPLY;
+				}
+				siz = end - next;
+			}
+			if (siz >= sizeof(transfer->svalue)) {
+				transfer->mvalue = malloc(siz+1);
+				STRNCPYSIZ(transfer->mvalue, next, siz+1);
+			} else {
+				STRNCPYSIZ(transfer->svalue, next, siz+1);
+				transfer->mvalue = transfer->svalue;
+			}
+			*trf_root = add_to_ktree(*trf_root, item, cmp_transfer);
+			k_add_head(*trf_store, item);
+
+			// find the separator then move to the next name
+			next = end;
+			while (*next == ' ')
+				next++;
+			if (*next == JSON_SEP) {
+				next++;
+				while (*next == ' ')
+					next++;
+			}
 		}
-		K_WUNLOCK(transfer_free);
-		json_decref(json_data);
+		if (*next != JSON_END) {
+			LOGERR("JSON_END '%c' was: %.32s...",
+				JSON_END, tmp = safe_text(next));
+			free(tmp);
+			free(cmdptr);
+			K_WLOCK(transfer_free);
+			k_add_head(transfer_free, item);
+			K_WUNLOCK(transfer_free);
+			return CMD_REPLY;
+		}
 	} else {
 		K_WLOCK(transfer_free);
 		while (next && *next) {
@@ -1433,8 +1492,10 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 	}
 	if (ckdb_cmds[*which_cmds].createdate) {
 		item = require_name(*trf_root, "createdate", 10, NULL, reply, sizeof(reply));
-		if (!item)
+		if (!item) {
+			free(cmdptr);
 			return CMD_REPLY;
+		}
 
 		DATA_TRANSFER(transfer, item);
 		txt_to_ctv("createdate", transfer->mvalue, cd, sizeof(*cd));
@@ -2922,7 +2983,8 @@ static bool reload_from(tv_t *start)
 	bool finished = false, matched = false, ret = true, ok, apipe = false;
 	char *filename = NULL;
 	uint64_t count, total;
-	tv_t now;
+	tv_t now, begin;
+	double diff;
 	FILE *fp = NULL;
 
 	reload_buf = malloc(MAX_READ);
@@ -2943,6 +3005,7 @@ static bool reload_from(tv_t *start)
 		quithere(1, "Failed to open '%s'", filename);
 
 	setnow(&now);
+	copy_tv(&begin, &now);
 	tvs_to_buf(&now, run, sizeof(run));
 	snprintf(reload_buf, MAX_READ, "reload.%s.s0", run);
 	LOGQUE(reload_buf);
@@ -3026,12 +3089,17 @@ static bool reload_from(tv_t *start)
 
 	PQfinish(conn);
 
+	setnow(&now);
+	diff = tvdiff(&now, &begin);
+	if (diff == 0)
+		diff = 1;
+
 	snprintf(reload_buf, MAX_READ, "reload.%s.%"PRIu64, run, total);
 	LOGQUE(reload_buf);
-	LOGWARNING("%s(): read %d file%s, total %"PRIu64" line%s",
+	LOGWARNING("%s(): read %d file%s, total %"PRIu64" line%s %.2f/s",
 		   __func__,
 		   processing, processing == 1 ? "" : "s",
-		   total, total == 1 ? "" : "s");
+		   total, total == 1 ? "" : "s", (total / diff));
 
 	if (everyone_die)
 		return true;
