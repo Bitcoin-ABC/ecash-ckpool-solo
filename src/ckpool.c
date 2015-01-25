@@ -276,7 +276,7 @@ static void *listener(void *arg)
 	proc_instance_t *pi = (proc_instance_t *)arg;
 	unixsock_t *us = &pi->us;
 	ckpool_t *ckp = pi->ckp;
-	char *buf = NULL;
+	char *buf = NULL, *msg;
 	int sockd;
 
 	rename_proc(pi->sockname);
@@ -351,10 +351,12 @@ retry:
 			execv(ckp->initial_args[0], (char *const *)ckp->initial_args);
 		}
 	} else if (cmdmatch(buf, "stratifierstats")) {
-		char *msg;
-
 		LOGDEBUG("Listener received stratifierstats request");
 		msg = send_recv_proc(ckp->stratifier, "stats");
+		send_unix_msg(sockd, msg);
+	} else if (cmdmatch(buf, "connectorstats")) {
+		LOGDEBUG("Listener received connectorstats request");
+		msg = send_recv_proc(ckp->connector, "stats");
 		send_unix_msg(sockd, msg);
 	} else {
 		LOGINFO("Listener received unhandled message: %s", buf);

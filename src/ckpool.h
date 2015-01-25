@@ -193,6 +193,8 @@ struct ckpool_instance {
 #define CKP_STANDALONE(CKP) (true)
 #endif
 
+#define SAFE_HASH_OVERHEAD(HASHLIST) (HASHLIST ? HASH_OVERHEAD(hh, HASHLIST) : 0)
+
 ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func);
 ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, int count);
 void ckmsgq_add(ckmsgq_t *ckmsgq, void *data);
