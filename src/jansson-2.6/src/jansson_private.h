@@ -86,7 +86,8 @@ void _jsonp_free(void **ptr);
 
 char *jsonp_strndup(const char *str, size_t length);
 char *jsonp_strdup(const char *str);
-char *jsonp_eolstrdup(const char *str);
+char *jsonp_strsteal(strbuffer_t *strbuff);
+char *jsonp_eolstrsteal(strbuffer_t *strbuff);
 
 /* Windows compatibility */
 #ifdef _WIN32

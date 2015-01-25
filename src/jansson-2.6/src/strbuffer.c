@@ -16,7 +16,7 @@
 #include "jansson_private.h"
 #include "strbuffer.h"
 
-#define STRBUFFER_MIN_SIZE  16
+#define STRBUFFER_MIN_SIZE  4096
 #define STRBUFFER_FACTOR    2
 #define STRBUFFER_SIZE_MAX  ((size_t)-1)
 
@@ -74,7 +74,8 @@ int strbuffer_append_byte(strbuffer_t *strbuff, char byte)
 
 int strbuffer_append_bytes(strbuffer_t *strbuff, const char *data, size_t size)
 {
-    if(size >= strbuff->size - strbuff->length)
+    /* Leave room for EOL and NULL bytes */
+    if(size + 2 > strbuff->size - strbuff->length)
     {
 	int backoff = 1;
         size_t new_size;

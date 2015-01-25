@@ -51,23 +51,22 @@ char *jsonp_strdup(const char *str)
     return new_str;
 }
 
-char *jsonp_eolstrdup(const char *str)
+char *jsonp_strsteal(strbuffer_t *strbuff)
 {
-    char *new_str;
-    size_t len;
+	size_t len = strbuff->length + 1;
+	char *ret = realloc(strbuff->value, len);
 
-    len = strlen(str);
-    if(len == (size_t)-1)
-        return NULL;
+	return ret;
+}
 
-    new_str = jsonp_malloc(len + 2);
-    if(!new_str)
-        return NULL;
+char *jsonp_eolstrsteal(strbuffer_t *strbuff)
+{
+	size_t len = strbuff->length + 2;
+	char *ret = realloc(strbuff->value, len);
 
-    memcpy(new_str, str, len);
-    new_str[len] = '\n';
-    new_str[len + 1] = '\0';
-    return new_str;
+	ret[strbuff->length] = '\n';
+	ret[strbuff->length + 1] = '\0';
+	return ret;
 }
 
 void json_set_alloc_funcs(json_malloc_t malloc_fn, json_free_t free_fn)
