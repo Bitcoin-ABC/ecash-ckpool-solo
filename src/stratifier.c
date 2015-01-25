@@ -2967,7 +2967,7 @@ out_unlock:
 	json_set_double(val, "sdiff", sdiff);
 	json_set_string(val, "hash", hexhash);
 	json_set_bool(val, "result", result);
-	json_object_set(val, "reject-reason", json_object_dup(json_msg, "reject-reason"));
+	json_object_set(val, "reject-reason", json_object_get(json_msg, "reject-reason"));
 	json_object_set(val, "error", *err_val);
 	json_set_int(val, "errn", err);
 	json_set_string(val, "createdate", cdfield);
