@@ -721,13 +721,13 @@ static void generate_userwbs(sdata_t *sdata, workbase_t *wb)
 {
 	user_instance_t *instance, *tmp;
 
-	ck_rlock(&sdata->instance_lock);
+	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->user_instances, instance, tmp) {
 		if (!instance->btcaddress)
 			continue;
 		__generate_userwb(wb, instance);
 	}
-	ck_runlock(&sdata->instance_lock);
+	ck_wunlock(&sdata->instance_lock);
 }
 
 static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
@@ -786,6 +786,8 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 	sdata->current_workbase = wb;
 	ck_wunlock(&sdata->workbase_lock);
 
+	/* This wb can't be pulled out from under us so no workbase lock is
+	 * required to generate_userwbs */
 	if (ckp->btcsolo)
 		generate_userwbs(sdata, wb);
 
@@ -2409,9 +2411,14 @@ out:
 	if (ckp->btcsolo && ret) {
 		sdata_t *sdata = ckp->data;
 
+		/* recursive lock, grab workbase first then instance */
 		ck_rlock(&sdata->workbase_lock);
+		ck_wlock(&sdata->instance_lock);
 		__generate_userwb(sdata->current_workbase, user_instance);
+		/* Downgrade instance lock to read lock */
+		ck_dwlock(&sdata->instance_lock);
 		__update_solo_client(sdata, client, user_instance);
+		ck_runlock(&sdata->instance_lock);
 		ck_runlock(&sdata->workbase_lock);
 
 		stratum_send_diff(sdata, client);
@@ -3098,6 +3105,7 @@ static void stratum_send_update(sdata_t *sdata, int64_t client_id, bool clean)
 	stratum_add_send(sdata, json_msg, client_id);
 }
 
+/* Hold instance lock */
 static json_t *__user_notify(sdata_t *sdata, user_instance_t *user_instance, bool clean)
 {
 	int64_t id = sdata->current_workbase->id;
