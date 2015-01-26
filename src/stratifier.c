@@ -376,6 +376,22 @@ struct stratifier_data {
 
 typedef struct stratifier_data sdata_t;
 
+typedef struct json_entry json_entry_t;
+
+struct json_entry {
+	json_entry_t *next;
+	json_entry_t *prev;
+	json_t *val;
+};
+
+typedef struct char_entry char_entry_t;
+
+struct char_entry {
+	char_entry_t *next;
+	char_entry_t *prev;
+	char *buf;
+};
+
 /* Priority levels for generator messages */
 #define GEN_LAX 0
 #define GEN_NORMAL 1
@@ -1351,6 +1367,7 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val)
 {
 	stratum_instance_t *instance, *tmp;
 	ckmsg_t *bulk_send = NULL;
+	ckmsgq_t *ssends;
 
 	if (unlikely(!val)) {
 		LOGERR("Sent null json to stratum_broadcast");
@@ -1378,13 +1395,15 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val)
 	if (!bulk_send)
 		return;
 
+	ssends = sdata->ssends;
+
 	mutex_lock(sdata->ssends->lock);
-	if (sdata->ssends->msgs)
-		DL_CONCAT(sdata->ssends->msgs, bulk_send);
+	if (ssends->msgs)
+		DL_CONCAT(ssends->msgs, bulk_send);
 	else
-		sdata->ssends->msgs = bulk_send;
-	pthread_cond_signal(sdata->ssends->cond);
-	mutex_unlock(sdata->ssends->lock);
+		ssends->msgs = bulk_send;
+	pthread_cond_signal(ssends->cond);
+	mutex_unlock(ssends->lock);
 }
 
 static void stratum_add_send(sdata_t *sdata, json_t *val, int64_t client_id)
@@ -2095,6 +2114,7 @@ static double dsps_from_key(json_t *val, const char *key)
 	return ret;
 }
 
+/* Enter holding a reference count */
 static void read_userstats(ckpool_t *ckp, user_instance_t *instance)
 {
 	char s[512];
@@ -2134,6 +2154,7 @@ static void read_userstats(ckpool_t *ckp, user_instance_t *instance)
 	json_decref(val);
 }
 
+/* Enter holding a reference count */
 static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 {
 	char s[512];
@@ -2179,10 +2200,10 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 				      const char *workername)
 {
 	char *base_username = strdupa(workername), *username;
+	bool new_instance = false, new_worker = false;
 	sdata_t *sdata = ckp->data;
 	user_instance_t *instance;
 	stratum_instance_t *tmp;
-	bool new = false;
 	int len;
 
 	username = strsep(&base_username, "._");
@@ -2198,12 +2219,9 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 		/* New user instance. Secondary user id will be NULL */
 		instance = ckzalloc(sizeof(user_instance_t));
 		strcpy(instance->username, username);
-		new = true;
-
+		new_instance = true;
 		instance->id = sdata->user_instance_id++;
 		HASH_ADD_STR(sdata->user_instances, username, instance);
-		if (CKP_STANDALONE(ckp))
-			read_userstats(ckp, instance);
 	}
 	DL_FOREACH(instance->instances, tmp) {
 		if (!safecmp(workername, tmp->workername)) {
@@ -2219,15 +2237,19 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 		worker->workername = strdup(workername);
 		worker->instance = instance;
 		DL_APPEND(instance->worker_instances, worker);
-		if (CKP_STANDALONE(ckp))
-			read_workerstats(ckp, worker);
+		new_worker = true;
 		worker->start_time = time(NULL);
 		client->worker_instance = worker;
 	}
 	DL_APPEND(instance->instances, client);
 	ck_wunlock(&sdata->instance_lock);
 
-	if (new && !ckp->proxy) {
+	if (CKP_STANDALONE(ckp) && new_instance)
+		read_userstats(ckp, instance);
+	if (CKP_STANDALONE(ckp) && new_worker)
+		read_workerstats(ckp, client->worker_instance);
+
+	if (new_instance && !ckp->proxy) {
 		/* Is this a btc address based username? */
 		if (len > 26 && len < 35) {
 			instance->btcaddress = test_address(ckp, username);
@@ -2252,6 +2274,7 @@ static int send_recv_auth(stratum_instance_t *client)
 	ckpool_t *ckp = client->ckp;
 	sdata_t *sdata = ckp->data;
 	char *buf = NULL, *json_msg;
+	bool contended = false;
 	char cdfield[64];
 	int ret = 1;
 	json_t *val;
@@ -2287,7 +2310,8 @@ static int send_recv_auth(stratum_instance_t *client)
 	if (likely(!mutex_timedlock(&sdata->ckdb_lock, 3))) {
 		buf = ckdb_msg_call(ckp, json_msg);
 		mutex_unlock(&sdata->ckdb_lock);
-	}
+	} else
+		contended = true;
 
 	free(json_msg);
 	if (likely(buf)) {
@@ -2331,7 +2355,10 @@ static int send_recv_auth(stratum_instance_t *client)
 			json_decref(val);
 		goto out;
 	}
-	LOGWARNING("Got no auth response from ckdb :(");
+	if (contended)
+		LOGWARNING("Prolonged lock contention for ckdb while trying to authorise");
+	else
+		LOGWARNING("Got no auth response from ckdb :(");
 out_fail:
 	ret = -1;
 out:
@@ -3114,20 +3141,20 @@ out:
 }
 
 /* Must enter with workbase_lock held */
-static json_t *__stratum_notify(sdata_t *sdata, bool clean)
+static json_t *__stratum_notify(const workbase_t *wb, const bool clean)
 {
 	json_t *val;
 
 	JSON_CPACK(val, "{s:[ssssosssb],s:o,s:s}",
 			"params",
-			sdata->current_workbase->idstring,
-			sdata->current_workbase->prevhash,
-			sdata->current_workbase->coinb1,
-			sdata->current_workbase->coinb2,
-			json_deep_copy(sdata->current_workbase->merkle_array),
-			sdata->current_workbase->bbversion,
-			sdata->current_workbase->nbit,
-			sdata->current_workbase->ntime,
+			wb->idstring,
+			wb->prevhash,
+			wb->coinb1,
+			wb->coinb2,
+			json_deep_copy(wb->merkle_array),
+			wb->bbversion,
+			wb->nbit,
+			wb->ntime,
 			clean,
 			"id", json_null(),
 			"method", "mining.notify");
@@ -3139,7 +3166,7 @@ static void stratum_broadcast_update(sdata_t *sdata, bool clean)
 	json_t *json_msg;
 
 	ck_rlock(&sdata->workbase_lock);
-	json_msg = __stratum_notify(sdata, clean);
+	json_msg = __stratum_notify(sdata->current_workbase, clean);
 	ck_runlock(&sdata->workbase_lock);
 
 	stratum_broadcast(sdata, json_msg);
@@ -3151,7 +3178,7 @@ static void stratum_send_update(sdata_t *sdata, int64_t client_id, bool clean)
 	json_t *json_msg;
 
 	ck_rlock(&sdata->workbase_lock);
-	json_msg = __stratum_notify(sdata, clean);
+	json_msg = __stratum_notify(sdata->current_workbase, clean);
 	ck_runlock(&sdata->workbase_lock);
 
 	stratum_add_send(sdata, json_msg, client_id);
@@ -3850,6 +3877,7 @@ out:
  * avoid floods of stat data coming at once. */
 static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 {
+	json_entry_t *json_list = NULL, *entry, *tmpentry;
 	user_instance_t *user, *tmp;
 	char cdfield[64];
 	time_t now_t;
@@ -3882,8 +3910,8 @@ static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 			continue;
 		DL_FOREACH(user->worker_instances, worker) {
 			double ghs1, ghs5, ghs60, ghs1440;
-			int elapsed;
 			json_t *val;
+			int elapsed;
 
 			/* Send one lot of stats once the worker is idle if
 			 * they have submitted no shares in the last 10 minutes
@@ -3910,10 +3938,19 @@ static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 					"createcode", __func__,
 					"createinet", ckp->serverurl[0]);
 			worker->notified_idle = worker->idle;
-			ckdbq_add(ckp, ID_WORKERSTATS, val);
+			entry = ckalloc(sizeof(json_entry_t));
+			entry->val = val;
+			DL_APPEND(json_list, entry);
 		}
 	}
 	ck_runlock(&sdata->instance_lock);
+
+	/* Add all entries outside of the instance lock */
+	DL_FOREACH_SAFE(json_list, entry, tmpentry) {
+		ckdbq_add(ckp, ID_WORKERSTATS, entry->val);
+		DL_DELETE(json_list, entry);
+		free(entry);
+	}
 }
 
 static void *statsupdate(void *arg)
@@ -3935,6 +3972,7 @@ static void *statsupdate(void *arg)
 		double tdiff, per_tdiff;
 		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
 		char suffix360[16], suffix1440[16], suffix10080[16];
+		char_entry_t *char_list = NULL, *char_t, *chartmp_t;
 		user_instance_t *instance, *tmpuser;
 		stratum_instance_t *client, *tmp;
 		double sps1, sps5, sps15, sps60;
@@ -4063,13 +4101,23 @@ static void *statsupdate(void *arg)
 			}
 			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 			fprintf(fp, "%s\n", s);
-			if (!idle)
-				LOGNOTICE("User %s:%s", instance->username, s);
+			if (!idle) {
+				char_t = ckalloc(sizeof(char_entry_t));
+				ASPRINTF(&char_t->buf, "User %s:%s", instance->username, s);
+				DL_APPEND(char_list, char_t);
+			}
 			dealloc(s);
 			json_decref(val);
 			fclose(fp);
 		}
 		ck_runlock(&sdata->instance_lock);
+
+		DL_FOREACH_SAFE(char_list, char_t, chartmp_t) {
+			LOGNOTICE("%s", char_t->buf);
+			DL_DELETE(char_list, char_t);
+			free(char_t->buf);
+			dealloc(char_t);
+		}
 
 		ghs1 = stats->dsps1 * nonces;
 		suffix_string(ghs1, suffix1, 16, 0);
