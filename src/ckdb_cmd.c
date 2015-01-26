@@ -1823,6 +1823,11 @@ static char *cmd_sharelog(PGconn *conn, char *cmd, char *id,
 		if (workinfoid == -1) {
 			LOGERR("%s(%s) %s.failed.DBE", __func__, cmd, id);
 			return strdup("failed.DBE");
+		} else {
+			// Only flag a successful workinfo
+			ck_wlock(&last_lock);
+			setnow(&last_workinfo);
+			ck_wunlock(&last_lock);
 		}
 		LOGDEBUG("%s.ok.added %"PRId64, id, workinfoid);
 wiconf:
@@ -1909,6 +1914,11 @@ wiconf:
 		if (!ok) {
 			LOGERR("%s(%s) %s.failed.DATA", __func__, cmd, id);
 			return strdup("failed.DATA");
+		} else {
+			// Only flag a successful share
+			ck_wlock(&last_lock);
+			setnow(&last_share);
+			ck_wunlock(&last_lock);
 		}
 		LOGDEBUG("%s.ok.added %s", id, transfer_data(i_nonce));
 sconf:
@@ -2237,8 +2247,12 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	if (!ok) {
 		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
 		return strdup("failed.DBE");
+	} else {
+		// Only flag a successful auth
+		ck_wlock(&last_lock);
+		setnow(&last_auth);
+		ck_wunlock(&last_lock);
 	}
-
 	snprintf(reply, siz,
 		 "ok.authorise={\"secondaryuserid\":\"%s\","
 		 "\"difficultydefault\":%d}",
@@ -2321,8 +2335,12 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 	if (!ok) {
 		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
 		return strdup("failed.DBE");
+	} else {
+		// Only flag a successful auth
+		ck_wlock(&last_lock);
+		setnow(&last_auth);
+		ck_wunlock(&last_lock);
 	}
-
 	snprintf(reply, siz,
 		 "ok.addrauth={\"secondaryuserid\":\"%s\","
 		 "\"difficultydefault\":%d}",
@@ -2366,6 +2384,10 @@ static char *cmd_heartbeat(__maybe_unused PGconn *conn, char *cmd, char *id,
 	// Wait until startup is complete, we get a heartbeat every second
 	if (!startup_complete)
 		goto pulse;
+
+	ck_wlock(&last_lock);
+	setnow(&last_heartbeat);
+	ck_wunlock(&last_lock);
 
 	K_WLOCK(heartbeatqueue_free);
 	if (heartbeatqueue_store->count == 0) {
@@ -2413,7 +2435,7 @@ pulse:
 }
 
 static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
-			  __maybe_unused tv_t *now, __maybe_unused char *by,
+			  tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
 			  __maybe_unused tv_t *notcd, K_TREE *trf_root)
 {
@@ -2437,6 +2459,26 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	APPEND_REALLOC_INIT(buf, off, len);
 	APPEND_REALLOC(buf, off, len, "ok.");
+
+	// N.B. cmd_homepage isn't called until startup_complete
+	ftv_to_buf(now, reply, siz);
+	snprintf(tmp, sizeof(tmp), "now=%s%c", reply, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	ck_wlock(&last_lock);
+	ftv_to_buf(&last_heartbeat, reply, siz);
+	snprintf(tmp, sizeof(tmp), "lasthb=%s%c", reply, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	ftv_to_buf(&last_workinfo, reply, siz);
+	snprintf(tmp, sizeof(tmp), "lastwi=%s%c", reply, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	ftv_to_buf(&last_share, reply, siz);
+	snprintf(tmp, sizeof(tmp), "lastsh=%s%c", reply, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	ftv_to_buf(&last_auth, reply, siz);
+	ck_wunlock(&last_lock);
+	snprintf(tmp, sizeof(tmp), "lastau=%s%c", reply, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+
 	if (last_bc.tv_sec) {
 		tvs_to_buf(&last_bc, reply, siz);
 		snprintf(tmp, sizeof(tmp), "lastbc=%s%c", reply, FLDSEP);

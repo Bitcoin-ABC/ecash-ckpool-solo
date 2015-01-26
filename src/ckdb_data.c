@@ -358,6 +358,7 @@ void _txt_to_double(char *nam, char *fld, double *data, size_t siz, WHERE_FFL_AR
 char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz, WHERE_FFL_ARGS)
 {
 	struct tm tm;
+	double d;
 
 	if (!buf) {
 		switch (typ) {
@@ -376,6 +377,7 @@ char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz, WHERE_
 				siz = DATE_BUFSIZ;
 				break;
 			case TYPE_CTV:
+			case TYPE_FTV:
 				siz = CDATE_BUFSIZ;
 				break;
 			case TYPE_DOUBLE:
@@ -419,6 +421,11 @@ char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz, WHERE_
 					   (((tv_t *)data)->tv_sec),
 					   (((tv_t *)data)->tv_usec));
 			break;
+		case TYPE_FTV:
+			d = (double)(((tv_t *)data)->tv_sec) +
+			    (double)(((tv_t *)data)->tv_usec) / 1000000.0;
+			snprintf(buf, siz, "%.6f", d);
+			break;
 		case TYPE_TVS:
 			snprintf(buf, siz, "%ld", (((tv_t *)data)->tv_sec));
 			break;
@@ -454,6 +461,12 @@ char *_tv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
 char *_ctv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
 {
 	return _data_to_buf(TYPE_CTV, (void *)data, buf, siz, WHERE_FFL_PASS);
+}
+
+// Convert tv to S.uS
+char *_ftv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
+{
+	return _data_to_buf(TYPE_FTV, (void *)data, buf, siz, WHERE_FFL_PASS);
 }
 
 // Convert tv to seconds (ignore uS)

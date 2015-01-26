@@ -170,6 +170,14 @@ const char *hashpatt = "^[A-Fa-f0-9]*$";
  * bitcoind is used to fully validate them when required */
 const char *addrpatt = "^[13][A-HJ-NP-Za-km-z1-9]*$";
 
+/* These are included in cmd_homepage
+ *  to help identify when ckpool locks up (or dies) */
+tv_t last_heartbeat;
+tv_t last_workinfo;
+tv_t last_share;
+tv_t last_auth;
+cklock_t last_lock;
+
 // So the records below have the same 'name' as the klist
 const char Transfer[] = "Transfer";
 
@@ -279,6 +287,13 @@ bool reloading = false;
 bool startup_complete = false;
 // Tell everyone to die
 bool everyone_die = false;
+
+/* These are included in cmd_homepage
+ *  to help identify when ckpool locks up (or dies) */
+tv_t last_heartbeat;
+tv_t last_workinfo;
+tv_t last_share;
+tv_t last_auth;
 
 static cklock_t fpm_lock;
 static char *first_pool_message;
@@ -3207,6 +3222,16 @@ static void *listener(void *arg)
 
 		LOGWARNING("%s(): ckdb ready, queue %d", __func__, wqcount);
 
+		/* Until startup_complete, the values should be ignored
+		 * Setting them to 'now' means that they won't time out
+		 *  until after startup_complete */
+		ck_wlock(&last_lock);
+		setnow(&last_heartbeat);
+		copy_tv(&last_workinfo, &last_heartbeat);
+		copy_tv(&last_share, &last_heartbeat);
+		copy_tv(&last_auth, &last_heartbeat);
+		ck_wunlock(&last_lock);
+
 		startup_complete = true;
 	}
 
@@ -3219,9 +3244,9 @@ static void *listener(void *arg)
 		wq_item = k_unlink_head(workqueue_store);
 		K_WUNLOCK(workqueue_store);
 
-		/* Don't keep a connection for more than ~10s or ~1000 items
+		/* Don't keep a connection for more than ~10s or ~10000 items
 		 *  but always have a connection open */
-		if ((time(NULL) - now) > 10 || wqgot > 1000) {
+		if ((time(NULL) - now) > 10 || wqgot > 10000) {
 			PQfinish(conn);
 			conn = dbconnect();
 			now = time(NULL);
@@ -4055,6 +4080,8 @@ int main(int argc, char **argv)
 
 	ckp.main.ckp = &ckp;
 	ckp.main.processname = strdup("main");
+
+	cklock_init(&last_lock);
 
 	if (confirm_sharesummary) {
 		// TODO: add a system lock to stop running 2 at once?

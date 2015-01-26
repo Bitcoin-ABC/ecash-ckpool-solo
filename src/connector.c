@@ -351,10 +351,17 @@ reparse:
 		json_object_set_new_nocheck(val, "address", json_string(client->address_name));
 		json_object_set_new_nocheck(val, "server", json_integer(client->server));
 		s = json_dumps(val, 0);
-		if (ckp->passthrough)
-			send_proc(ckp->generator, s);
-		else
-			send_proc(ckp->stratifier, s);
+
+		ck_rlock(&cdata->lock);
+		/* Do not send messages of clients we've already dropped */
+		if (likely(client->fd != -1)) {
+			if (ckp->passthrough)
+				send_proc(ckp->generator, s);
+			else
+				send_proc(ckp->stratifier, s);
+		}
+		ck_runlock(&cdata->lock);
+
 		free(s);
 		json_decref(val);
 	}

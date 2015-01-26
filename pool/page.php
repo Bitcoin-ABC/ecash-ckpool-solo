@@ -287,7 +287,55 @@ function pgtop($info, $dotop, $user, $douser)
  $top .= '<div class=topd>';
  if ($dotop === true)
  {
+	$lh = ''; $ls = ''; $lw = '';
+	if (isset($info['now']) && isset($info['lastsh'])
+	&&  isset($info['lasthb']) && isset($info['lastwi']))
+	{
+		$lsn = $info['now'] - $info['lastsh'];
+		$lhn = $info['now'] - $info['lasthb'];
+		$lwn = $info['now'] - $info['lastwi'];
+		if ($lsn < 2)
+			$lsc = 'green';
+		else
+		{
+			if ($lsn < 4)
+				$lsc = 'orange';
+			else
+				$lsc = 'red';
+		}
+		if ($lhn < 3)
+			$lhc = 'green';
+		else
+		{
+			if ($lhn < 6)
+				$lhc = 'orange';
+			else
+				$lhc = 'red';
+		}
+		if ($lwn < 36)
+			$lwc = 'green';
+		else
+		{
+			if ($lwn < 46)
+				$lwc = 'orange';
+			else
+				$lwc = 'red';
+		}
+$lsc = 'green';
+$lhc = 'orange';
+$lwc = 'red';
+		$img1 = '<img border=0 src=/';
+		$img2 = '.png>';
+		$ls = $img1.$lsc.$img2;
+		$lh = $img1.$lhc.$img2;
+		$lw = $img1.$lwc.$img2;
+	}
 	$top .= '<table cellpadding=0 cellspacing=0 border=0 width=100%><tr><td>';
+	$top .= '<table cellpadding=1 cellspacing=0 border=0>';
+	$top .= "<tr><td class=topdes>$lh</td></tr>";
+	$top .= "<tr><td class=topdes>$ls</td></tr>";
+	$top .= "<tr><td class=topdes>$lw</td></tr></table>";
+	$top .= '</td><td>';
 	$top .= '<table cellpadding=1 cellspacing=0 border=0 width=100%>';
 	$top .= '<tr><td class=topdes>CKPool:&nbsp;</td>';
 	$top .= "<td class=topdat>&nbsp;$phr</td></tr>";

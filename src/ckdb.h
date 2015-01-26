@@ -52,7 +52,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "0.9.6"
-#define CKDB_VERSION DB_VERSION"-0.903"
+#define CKDB_VERSION DB_VERSION"-0.910"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -197,6 +197,7 @@ enum data_type {
 	TYPE_TV,
 	TYPE_TVS,
 	TYPE_CTV,
+	TYPE_FTV,
 	TYPE_BLOB,
 	TYPE_DOUBLE
 };
@@ -265,6 +266,14 @@ extern bool reloading;
 extern bool startup_complete;
 // Tell everyone to die
 extern bool everyone_die;
+
+/* These are included in cmd_homepage
+ *  to help identify when ckpool locks up (or dies) */
+extern tv_t last_heartbeat;
+extern tv_t last_workinfo;
+extern tv_t last_share;
+extern tv_t last_auth;
+extern cklock_t last_lock;
 
 #define JSON_TRANSFER "json="
 #define JSON_TRANSFER_LEN (sizeof(JSON_TRANSFER)-1)
@@ -1558,6 +1567,7 @@ extern char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz,
 #define int_to_buf(_data, _buf, _siz) _int_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 #define tv_to_buf(_data, _buf, _siz) _tv_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 #define ctv_to_buf(_data, _buf, _siz) _ctv_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
+#define ftv_to_buf(_data, _buf, _siz) _ftv_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 #define tvs_to_buf(_data, _buf, _siz) _tvs_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 //#define blob_to_buf(_data, _buf, _siz) _blob_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 #define double_to_buf(_data, _buf, _siz) _double_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
@@ -1568,6 +1578,8 @@ extern char *_int_to_buf(int32_t data, char *buf, size_t siz, WHERE_FFL_ARGS);
 extern char *_tv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 // Convert tv to S,uS
 extern char *_ctv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
+// Convert tv to S.uS
+extern char *_ftv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 // Convert tv to seconds (ignore uS)
 extern char *_tvs_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 /* unused yet
