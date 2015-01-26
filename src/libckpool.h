@@ -177,7 +177,10 @@ static inline void flip_80(void *dest_p, const void *src_p)
 #define ckalloc(len) _ckalloc(len, __FILE__, __func__, __LINE__)
 #define ckzalloc(len) _ckzalloc(len, __FILE__, __func__, __LINE__)
 
-#define dealloc(ptr) _dealloc((void *)&(ptr))
+#define dealloc(ptr) do { \
+	free(ptr); \
+	ptr = NULL; \
+} while (0)
 
 #define VASPRINTF(strp, fmt, ...) do { \
 	if (unlikely(vasprintf(strp, fmt, ##__VA_ARGS__) < 0)) \
@@ -499,7 +502,6 @@ void trail_slash(char **buf);
 void *_ckalloc(size_t len, const char *file, const char *func, const int line);
 void *json_ckalloc(size_t size);
 void *_ckzalloc(size_t len, const char *file, const char *func, const int line);
-void _dealloc(void **ptr);
 extern const int hex2bin_tbl[];
 void __bin2hex(void *vs, const void *vp, size_t len);
 void *bin2hex(const void *vp, size_t len);

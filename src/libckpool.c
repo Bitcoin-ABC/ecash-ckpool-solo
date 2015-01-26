@@ -1295,12 +1295,6 @@ void *_ckzalloc(size_t len, const char *file, const char *func, const int line)
 	return ptr;
 }
 
-void _dealloc(void **ptr)
-{
-	free(*ptr);
-	*ptr = NULL;
-}
-
 /* Adequate size s==len*2 + 1 must be alloced to use this variant */
 void __bin2hex(void *vs, const void *vp, size_t len)
 {
