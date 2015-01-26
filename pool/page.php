@@ -321,9 +321,6 @@ function pgtop($info, $dotop, $user, $douser)
 			else
 				$lwc = 'red';
 		}
-$lsc = 'green';
-$lhc = 'orange';
-$lwc = 'red';
 		$img1 = '<img border=0 src=/';
 		$img2 = '.png>';
 		$ls = $img1.$lsc.$img2;

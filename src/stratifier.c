@@ -759,7 +759,6 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 		hex2bin(bin, sdata->lasthash, 32);
 		swap_256(swap, bin);
 		__bin2hex(sdata->lastswaphash, swap, 32);
-		LOGNOTICE("Block hash changed to %s", sdata->lastswaphash);
 		sdata->blockchange_id = wb->id;
 	}
 	if (*new_block && ckp->logshares) {
@@ -793,8 +792,10 @@ static void add_base(ckpool_t *ckp, workbase_t *wb, bool *new_block)
 	if (ckp->btcsolo)
 		generate_userwbs(sdata, wb);
 
-	if (*new_block)
+	if (*new_block) {
+		LOGNOTICE("Block hash changed to %s", sdata->lastswaphash);
 		purge_share_hashtable(sdata, wb->id);
+	}
 
 	send_workinfo(ckp, wb);
 
@@ -966,7 +967,6 @@ static void update_base(ckpool_t *ckp, int prio)
 
 static void __add_dead(sdata_t *sdata, stratum_instance_t *client)
 {
-	LOGDEBUG("Adding dead instance %ld", client->id);
 	DL_APPEND(sdata->dead_instances, client);
 	sdata->stats.dead++;
 	sdata->dead_generated++;
@@ -974,14 +974,12 @@ static void __add_dead(sdata_t *sdata, stratum_instance_t *client)
 
 static void __del_dead(sdata_t *sdata, stratum_instance_t *client)
 {
-	LOGDEBUG("Deleting dead instance %ld", client->id);
 	DL_DELETE_INIT(sdata->dead_instances, client);
 	sdata->stats.dead--;
 }
 
 static void __del_disconnected(sdata_t *sdata, stratum_instance_t *client)
 {
-	LOGDEBUG("Deleting disconnected instance %ld", client->id);
 	HASH_DEL(sdata->disconnected_instances, client);
 	sdata->stats.disconnected--;
 	__add_dead(sdata, client);
@@ -990,21 +988,29 @@ static void __del_disconnected(sdata_t *sdata, stratum_instance_t *client)
 static void drop_allclients(ckpool_t *ckp)
 {
 	stratum_instance_t *client, *tmp;
+	int disconnects = 0, kills = 0;
 	sdata_t *sdata = ckp->data;
 	char buf[128];
 
 	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
 		HASH_DEL(sdata->stratum_instances, client);
+		kills++;
 		__add_dead(sdata, client);
 		sprintf(buf, "dropclient=%ld", client->id);
 		send_proc(ckp->connector, buf);
 	}
 	HASH_ITER(hh, sdata->disconnected_instances, client, tmp) {
+		disconnects++;
 		__del_disconnected(sdata, client);
 	}
 	sdata->stats.users = sdata->stats.workers = 0;
 	ck_wunlock(&sdata->instance_lock);
+
+	if (disconnects)
+		LOGNOTICE("Disconnected %d instances", disconnects);
+	if (kills)
+		LOGNOTICE("Dropped %d instances", kills);
 }
 
 static void update_subscribe(ckpool_t *ckp)
@@ -1209,10 +1215,11 @@ static stratum_instance_t *ref_instance_by_id(sdata_t *sdata, int64_t id)
 	return instance;
 }
 
-static void __drop_client(sdata_t *sdata, stratum_instance_t *client, user_instance_t *instance,
-			  int64_t id)
+/* Ret = 1 is disconnected, 2 is killed, 3 is workerless killed */
+static int __drop_client(sdata_t *sdata, stratum_instance_t *client, user_instance_t *instance)
 {
 	stratum_instance_t *old_client = NULL;
+	int ret;
 
 	HASH_DEL(sdata->stratum_instances, client);
 	if (instance)
@@ -1220,19 +1227,35 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, user_insta
 	HASH_FIND(hh, sdata->disconnected_instances, &client->enonce1_64, sizeof(uint64_t), old_client);
 	/* Only keep around one copy of the old client in server mode */
 	if (!client->ckp->proxy && !old_client && client->enonce1_64 && client->authorised) {
-		LOGNOTICE("Client %ld %s disconnected %s", id, client->workername,
-			  client->dropped ? "lazily" : "");
+		ret = 1;
 		HASH_ADD(hh, sdata->disconnected_instances, enonce1_64, sizeof(uint64_t), client);
 		sdata->stats.disconnected++;
 		sdata->disconnected_generated++;
 		client->disconnected_time = time(NULL);
 	} else {
-		if (client->workername) {
-			LOGNOTICE("Client %ld %s dropped %s", id, client->workername,
-				  client->dropped ? "lazily" : "");
-		} else
-			LOGINFO("Workerless client %ld dropped %s", id, client->dropped ? "lazily" : "");
+		if (client->workername)
+			ret = 2;
+		else
+			ret = 3;
 		__add_dead(sdata, client);
+	}
+	return ret;
+}
+
+static void client_drop_message(int64_t client_id, int dropped, bool lazily)
+{
+	switch(dropped) {
+		case 0:
+			break;
+		case 1:
+			LOGNOTICE("Client %ld disconnected %s", client_id, lazily ? "lazily" : "");
+			break;
+		case 2:
+			LOGNOTICE("Client %ld dropped %s", client_id, lazily ? "lazily" : "");
+			break;
+		case 3:
+			LOGNOTICE("Workerless client %ld dropped %s", client_id, lazily ? "lazily" : "");
+			break;
 	}
 }
 
@@ -1240,16 +1263,22 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, user_insta
 static void _dec_instance_ref(sdata_t *sdata, stratum_instance_t *instance, const char *file,
 			      const char *func, const int line)
 {
+	int64_t client_id = instance->id;
+	int dropped = 0, ref;
+
 	ck_wlock(&sdata->instance_lock);
-	if (unlikely(--instance->ref < 0)) {
-		LOGERR("Instance ref count dropped below zero from %s %s:%d", file, func, line);
-		instance->ref = 0;
-	}
+	ref = --instance->ref;
 	/* See if there are any instances that were dropped that could not be
 	 * moved due to holding a reference and drop them now. */
-	if (unlikely(instance->dropped && !instance->ref))
-		__drop_client(sdata, instance, instance->user_instance, instance->id);
+	if (unlikely(instance->dropped && !ref))
+		dropped = __drop_client(sdata, instance, instance->user_instance);
 	ck_wunlock(&sdata->instance_lock);
+
+	client_drop_message(client_id, dropped, true);
+
+	/* This should never happen */
+	if (unlikely(ref < 0))
+		LOGERR("Instance ref count dropped below zero from %s %s:%d", file, func, line);
 }
 
 #define dec_instance_ref(sdata, instance) _dec_instance_ref(sdata, instance, __FILE__, __func__, __LINE__)
@@ -1266,7 +1295,6 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, int
 	instance->diff = instance->old_diff = ckp->startdiff;
 	instance->ckp = ckp;
 	tv_time(&instance->ldc);
-	LOGINFO("Stratifier added instance %ld server %d", id, server);
 	HASH_ADD_I64(sdata->stratum_instances, id, instance);
 	return instance;
 }
@@ -1275,6 +1303,7 @@ static uint64_t disconnected_sessionid_exists(sdata_t *sdata, const char *sessio
 {
 	stratum_instance_t *instance, *tmp;
 	uint64_t enonce1_64 = 0, ret = 0;
+	int64_t old_id = 0;
 	int slen;
 
 	if (!sessionid)
@@ -1303,12 +1332,15 @@ static uint64_t disconnected_sessionid_exists(sdata_t *sdata, const char *sessio
 	if (instance) {
 		/* Delete the entry once we are going to use it since there
 		 * will be a new instance with the enonce1_64 */
+		old_id = instance->id;
 		__del_disconnected(sdata, instance);
 		ret = enonce1_64;
 	}
 out_unlock:
 	ck_wunlock(&sdata->instance_lock);
 out:
+	if (ret)
+		LOGNOTICE("Reconnecting old instance %ld to instance %ld", old_id, id);
 	return ret;
 }
 
@@ -1389,6 +1421,7 @@ static void dec_worker(ckpool_t *ckp, user_instance_t *instance)
 
 static void drop_client(sdata_t *sdata, int64_t id)
 {
+	int dropped = 0, aged = 0, killed = 0;
 	stratum_instance_t *client, *tmp;
 	user_instance_t *instance = NULL;
 	time_t now_t = time(NULL);
@@ -1402,16 +1435,16 @@ static void drop_client(sdata_t *sdata, int64_t id)
 	if (client) {
 		instance = client->user_instance;
 		if (client->authorised) {
-			client->authorised = false;
 			dec = true;
 			ckp = client->ckp;
 		}
 		/* If the client is still holding a reference, don't drop them
 		 * now but wait till the reference is dropped */
 		if (likely(!client->ref))
-			__drop_client(sdata, client, instance, id);
+			dropped = __drop_client(sdata, client, instance);
 		else
 			client->dropped = true;
+		client->authorised = false;
 	}
 
 	/* Old disconnected instances will not have any valid shares so remove
@@ -1422,7 +1455,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 			continue;
 		if (unlikely(client->ref))
 			continue;
-		LOGINFO("Ageing disconnected instance %ld to dead", client->id);
+		aged++;
 		__del_disconnected(sdata, client);
 	}
 
@@ -1430,7 +1463,7 @@ static void drop_client(sdata_t *sdata, int64_t id)
 	 * counts for them. */
 	DL_FOREACH_SAFE(sdata->dead_instances, client, tmp) {
 		if (!client->ref) {
-			LOGINFO("Stratifier discarding dead instance %ld", client->id);
+			killed++;
 			__del_dead(sdata, client);
 			dealloc(client->workername);
 			dealloc(client->useragent);
@@ -1438,6 +1471,12 @@ static void drop_client(sdata_t *sdata, int64_t id)
 		}
 	}
 	ck_wunlock(&sdata->instance_lock);
+
+	client_drop_message(id, dropped, false);
+	if (aged)
+		LOGINFO("Aged %d disconnected instances to dead", aged);
+	if (killed)
+		LOGINFO("Stratifier discarded %d dead instances", killed);
 
 	/* Decrease worker count outside of instance_lock to avoid recursive
 	 * locking */
@@ -3430,6 +3469,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 {
 	sdata_t *sdata = ckp->data;
 	stratum_instance_t *client;
+	bool added = false;
 	smsg_t *msg;
 	json_t *val;
 	int server;
@@ -3476,10 +3516,15 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	ck_wlock(&sdata->instance_lock);
 	client = __instance_by_id(sdata, msg->client_id);
 	/* If client_id instance doesn't exist yet, create one */
-	if (unlikely(!client))
+	if (unlikely(!client)) {
 		client = __stratum_add_instance(ckp, msg->client_id, server);
+		added = true;
+	}
 	__inc_instance_ref(client);
 	ck_wunlock(&sdata->instance_lock);
+
+	if (added)
+		LOGINFO("Stratifier added instance %ld server %d", client->id, server);
 
 	parse_instance_msg(sdata, msg, client);
 	dec_instance_ref(sdata, client);

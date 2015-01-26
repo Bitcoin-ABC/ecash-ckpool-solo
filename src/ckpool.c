@@ -81,6 +81,13 @@ void logmsg(int loglevel, const char *fmt, ...) {
 				tm.tm_hour,
 				tm.tm_min,
 				tm.tm_sec);
+		if (loglevel <= LOG_WARNING) {\
+			if (loglevel <= LOG_ERR && errno != 0)
+				fprintf(stderr, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
+			else
+				fprintf(stderr, "%s %s\n", stamp, buf);
+			fflush(stderr);
+		}
 		if (logfd) {
 			char *msg;
 
@@ -89,13 +96,6 @@ void logmsg(int loglevel, const char *fmt, ...) {
 			else
 				ASPRINTF(&msg, "%s %s\n", stamp, buf);
 			ckmsgq_add(global_ckp->logger, msg);
-		}
-		if (loglevel <= LOG_WARNING) {\
-			if (loglevel <= LOG_ERR && errno != 0)
-				fprintf(stderr, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
-			else
-				fprintf(stderr, "%s %s\n", stamp, buf);
-			fflush(stderr);
 		}
 		free(buf);
 	}
