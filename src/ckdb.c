@@ -170,14 +170,6 @@ const char *hashpatt = "^[A-Fa-f0-9]*$";
  * bitcoind is used to fully validate them when required */
 const char *addrpatt = "^[13][A-HJ-NP-Za-km-z1-9]*$";
 
-/* These are included in cmd_homepage
- *  to help identify when ckpool locks up (or dies) */
-tv_t last_heartbeat;
-tv_t last_workinfo;
-tv_t last_share;
-tv_t last_auth;
-cklock_t last_lock;
-
 // So the records below have the same 'name' as the klist
 const char Transfer[] = "Transfer";
 
@@ -294,6 +286,7 @@ tv_t last_heartbeat;
 tv_t last_workinfo;
 tv_t last_share;
 tv_t last_auth;
+cklock_t last_lock;
 
 static cklock_t fpm_lock;
 static char *first_pool_message;
@@ -1247,7 +1240,7 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 	char reply[1024] = "";
 	TRANSFER *transfer;
 	K_TREE_CTX ctx[1];
-	K_ITEM *item;
+	K_ITEM *item = NULL;
 	char *cmdptr, *idptr, *next, *eq, *end, *was;
 	char *data = NULL, *tmp;
 	bool noid = false;
@@ -1469,9 +1462,11 @@ static enum cmd_values breakdown(K_TREE **trf_root, K_STORE **trf_store,
 				JSON_END, tmp = safe_text(next));
 			free(tmp);
 			free(cmdptr);
-			K_WLOCK(transfer_free);
-			k_add_head(transfer_free, item);
-			K_WUNLOCK(transfer_free);
+			if (item) {
+				K_WLOCK(transfer_free);
+				k_add_head(transfer_free, item);
+				K_WUNLOCK(transfer_free);
+			}
 			return CMD_REPLY;
 		}
 	} else {

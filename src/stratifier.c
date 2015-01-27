@@ -1554,8 +1554,6 @@ static void reset_bestshares(sdata_t *sdata)
 	ck_runlock(&sdata->instance_lock);
 }
 
-/* Ram from blocks is NOT freed at all for now, only their entry is removed
- * from the linked list, leaving a very small leak here and reject. */
 static void block_solve(ckpool_t *ckp, const char *blockhash)
 {
 	ckmsg_t *block, *tmp, *found = NULL;
@@ -4341,10 +4339,11 @@ int stratifier(proc_instance_t *pi)
 	threads = threads / 2 ? : 1;
 	sdata->srecvs = create_ckmsgqs(ckp, "sreceiver", &srecv_process, threads);
 	sdata->sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
-	sdata->ckdbq = create_ckmsgq(ckp, "ckdbqueue", &ckdbq_process);
 	sdata->stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
-	if (!CKP_STANDALONE(ckp))
+	if (!CKP_STANDALONE(ckp)) {
+		sdata->ckdbq = create_ckmsgq(ckp, "ckdbqueue", &ckdbq_process);
 		create_pthread(&pth_heartbeat, ckdb_heartbeat, ckp);
+	}
 
 	cklock_init(&sdata->workbase_lock);
 	if (!ckp->proxy)

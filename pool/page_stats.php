@@ -15,6 +15,13 @@ function dostats($data, $user)
  if (isset($data['info']) && $data['info'] !== false)
  {
 	$info = $data['info'];
+
+	if (isset($info['p_elapsed']))
+	{
+		$dspel = howlongago($info['p_elapsed']);
+		$pg .= "Pool Uptime: $dspel<br>";
+	}
+
 	$dsp = '?THs';
 	$dsp5m = '?THs';
 	$dsp1hr = '?THs';
