@@ -1231,6 +1231,25 @@ static stratum_instance_t *ref_instance_by_id(sdata_t *sdata, int64_t id)
 	return instance;
 }
 
+/* Has this client_id already been used and is now in one of the dropped lists */
+static bool __dropped_instance(sdata_t *sdata, int64_t id)
+{
+	stratum_instance_t *client, *tmp;
+	bool ret = true;
+
+	HASH_ITER(hh, sdata->disconnected_instances, client, tmp) {
+		if (unlikely(client->id == id))
+			goto out;
+	}
+	DL_FOREACH(sdata->dead_instances, client) {
+		if (unlikely(client->id == id))
+			goto out;
+	}
+	ret = false;
+out:
+	return ret;
+}
+
 /* Ret = 1 is disconnected, 2 is killed, 3 is workerless killed */
 static int __drop_client(sdata_t *sdata, stratum_instance_t *client, user_instance_t *instance)
 {
@@ -3492,9 +3511,9 @@ out:
 
 static void srecv_process(ckpool_t *ckp, char *buf)
 {
+	bool noid = false, dropped = false;
 	sdata_t *sdata = ckp->data;
 	stratum_instance_t *client;
-	bool added = false;
 	smsg_t *msg;
 	json_t *val;
 	int server;
@@ -3542,14 +3561,26 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	client = __instance_by_id(sdata, msg->client_id);
 	/* If client_id instance doesn't exist yet, create one */
 	if (unlikely(!client)) {
-		client = __stratum_add_instance(ckp, msg->client_id, server);
-		added = true;
-	}
-	__inc_instance_ref(client);
+		noid = true;
+		if (likely(!__dropped_instance(sdata, msg->client_id)))
+			client = __stratum_add_instance(ckp, msg->client_id, server);
+		else
+			dropped = true;
+	} else if (unlikely(client->dropped))
+		dropped = true;
+	if (likely(!dropped))
+		__inc_instance_ref(client);
 	ck_wunlock(&sdata->instance_lock);
 
-	if (added)
+	if (unlikely(noid)) {
+		if (unlikely(dropped)) {
+			/* Client may be NULL here */
+			LOGNOTICE("Stratifier skipped dropped instance %ld message server %d",
+				  msg->client_id, server);
+			goto out;
+		}
 		LOGINFO("Stratifier added instance %ld server %d", client->id, server);
+	}
 
 	parse_instance_msg(sdata, msg, client);
 	dec_instance_ref(sdata, client);
