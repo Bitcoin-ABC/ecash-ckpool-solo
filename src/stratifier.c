@@ -197,6 +197,8 @@ struct user_instance {
 
 	bool authorised; /* Has this username ever been authorised? */
 	time_t auth_time;
+	time_t failed_authtime; /* Last time this username failed to authorise */
+	int auth_backoff; /* How long to reject any auth attempts since last failure */
 };
 
 /* Combined data from workers with the same workername */
@@ -2235,6 +2237,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	if (!user) {
 		/* New user instance. Secondary user id will be NULL */
 		user = ckzalloc(sizeof(user_instance_t));
+		user->auth_backoff = 3; /* Set initial backoff to 3 seconds */
 		strcpy(user->username, username);
 		new_instance = true;
 		user->id = sdata->user_instance_id++;
@@ -2468,8 +2471,17 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 	ts_realtime(&now);
 	client->start_time = now.tv_sec;
 	strcpy(client->address, address);
-
 	client->workername = strdup(buf);
+	if (user_instance->failed_authtime) {
+		time_t now_t = time(NULL);
+
+		if (now_t < user_instance->failed_authtime + user_instance->auth_backoff) {
+			LOGNOTICE("Client %ld worker %s rate limited due to failed auth attempts",
+				  client->id, buf);
+			client->dropped = true;
+			goto out;
+		}
+	}
 	if (CKP_STANDALONE(ckp)) {
 		if (!ckp->btcsolo || client->user_instance->btcaddress)
 			ret = true;
@@ -2497,9 +2509,15 @@ static json_t *parse_authorise(stratum_instance_t *client, json_t *params_val, j
 		inc_worker(ckp, user_instance);
 		LOGNOTICE("Authorised client %ld worker %s as user %s", client->id, buf,
 			  user_instance->username);
+		user_instance->auth_backoff = 3; /* Reset auth backoff time */
 	} else {
 		LOGNOTICE("Client %ld worker %s failed to authorise as user %s", client->id, buf,
 			  user_instance->username);
+		user_instance->failed_authtime = time(NULL);
+		user_instance->auth_backoff <<= 1;
+		/* Cap backoff time to 10 mins */
+		if (user_instance->auth_backoff > 600)
+			user_instance->auth_backoff = 600;
 	}
 out:
 	if (ckp->btcsolo && ret) {
@@ -3471,6 +3489,12 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 	return;
 }
 
+static void free_smsg(smsg_t *msg)
+{
+	json_decref(msg->json_msg);
+	free(msg);
+}
+
 /* Entered with client holding ref count */
 static void parse_instance_msg(sdata_t *sdata, smsg_t *msg, stratum_instance_t *client)
 {
@@ -3505,8 +3529,7 @@ static void parse_instance_msg(sdata_t *sdata, smsg_t *msg, stratum_instance_t *
 	}
 	parse_method(sdata, client, client_id, id_val, method, params, msg->address);
 out:
-	json_decref(val);
-	free(msg);
+	free_smsg(msg);
 }
 
 static void srecv_process(ckpool_t *ckp, char *buf)
@@ -3561,10 +3584,10 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	client = __instance_by_id(sdata, msg->client_id);
 	/* If client_id instance doesn't exist yet, create one */
 	if (unlikely(!client)) {
-		noid = true;
-		if (likely(!__dropped_instance(sdata, msg->client_id)))
+		if (likely(!__dropped_instance(sdata, msg->client_id))) {
+			noid = true;
 			client = __stratum_add_instance(ckp, msg->client_id, server);
-		else
+		} else
 			dropped = true;
 	} else if (unlikely(client->dropped))
 		dropped = true;
@@ -3572,15 +3595,15 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 		__inc_instance_ref(client);
 	ck_wunlock(&sdata->instance_lock);
 
-	if (unlikely(noid)) {
-		if (unlikely(dropped)) {
-			/* Client may be NULL here */
-			LOGNOTICE("Stratifier skipped dropped instance %ld message server %d",
-				  msg->client_id, server);
-			goto out;
-		}
-		LOGINFO("Stratifier added instance %ld server %d", client->id, server);
+	if (unlikely(dropped)) {
+		/* Client may be NULL here */
+		LOGNOTICE("Stratifier skipped dropped instance %ld message server %d",
+				msg->client_id, server);
+		free_smsg(msg);
+		goto out;
 	}
+	if (unlikely(noid))
+		LOGINFO("Stratifier added instance %ld server %d", client->id, server);
 
 	parse_instance_msg(sdata, msg, client);
 	dec_instance_ref(sdata, client);
