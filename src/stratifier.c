@@ -2200,8 +2200,8 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	char *base_username = strdupa(workername), *username;
 	bool new_instance = false, new_worker = false;
 	sdata_t *sdata = ckp->data;
-	user_instance_t *instance;
-	stratum_instance_t *tmp;
+	worker_instance_t *tmp;
+	user_instance_t *user;
 	int len;
 
 	username = strsep(&base_username, "._");
@@ -2212,18 +2212,18 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 		username[127] = '\0';
 
 	ck_wlock(&sdata->instance_lock);
-	HASH_FIND_STR(sdata->user_instances, username, instance);
-	if (!instance) {
+	HASH_FIND_STR(sdata->user_instances, username, user);
+	if (!user) {
 		/* New user instance. Secondary user id will be NULL */
-		instance = ckzalloc(sizeof(user_instance_t));
-		strcpy(instance->username, username);
+		user = ckzalloc(sizeof(user_instance_t));
+		strcpy(user->username, username);
 		new_instance = true;
-		instance->id = sdata->user_instance_id++;
-		HASH_ADD_STR(sdata->user_instances, username, instance);
+		user->id = sdata->user_instance_id++;
+		HASH_ADD_STR(sdata->user_instances, username, user);
 	}
-	DL_FOREACH(instance->instances, tmp) {
+	DL_FOREACH(user->worker_instances, tmp) {
 		if (!safecmp(workername, tmp->workername)) {
-			client->worker_instance = tmp->worker_instance;
+			client->worker_instance = tmp;
 			break;
 		}
 	}
@@ -2233,32 +2233,32 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 		worker_instance_t *worker = ckzalloc(sizeof(worker_instance_t));
 
 		worker->workername = strdup(workername);
-		worker->instance = instance;
-		DL_APPEND(instance->worker_instances, worker);
+		worker->instance = user;
+		DL_APPEND(user->worker_instances, worker);
 		new_worker = true;
 		worker->start_time = time(NULL);
 		client->worker_instance = worker;
 	}
-	DL_APPEND(instance->instances, client);
+	DL_APPEND(user->instances, client);
 	ck_wunlock(&sdata->instance_lock);
 
 	if (CKP_STANDALONE(ckp) && new_instance)
-		read_userstats(ckp, instance);
+		read_userstats(ckp, user);
 	if (CKP_STANDALONE(ckp) && new_worker)
 		read_workerstats(ckp, client->worker_instance);
 
 	if (new_instance && !ckp->proxy) {
 		/* Is this a btc address based username? */
 		if (len > 26 && len < 35) {
-			instance->btcaddress = test_address(ckp, username);
-			if (instance->btcaddress)
-				address_to_pubkeytxn(instance->txnbin, username);
+			user->btcaddress = test_address(ckp, username);
+			if (user->btcaddress)
+				address_to_pubkeytxn(user->txnbin, username);
 		}
-		LOGNOTICE("Added new user %s%s", username, instance->btcaddress ?
+		LOGNOTICE("Added new user %s%s", username, user->btcaddress ?
 			  " as address based registration" : "");
 	}
 
-	return instance;
+	return user;
 }
 
 /* Send this to the database and parse the response to authorise a user
