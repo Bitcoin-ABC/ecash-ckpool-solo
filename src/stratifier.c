@@ -184,7 +184,7 @@ struct user_instance {
 
 	int workers;
 	char txnbin[25];
-	struct userwb *userwbs;
+	struct userwb *userwbs; /* Protected by instance lock */
 
 	double best_diff; /* Best share found by this user */
 
@@ -721,6 +721,7 @@ static void send_ageworkinfo(ckpool_t *ckp, int64_t id)
 	ckdbq_add(ckp, ID_AGEWORKINFO, val);
 }
 
+/* Entered with instance_lock held */
 static void __generate_userwb(workbase_t *wb, user_instance_t *instance)
 {
 	struct userwb *userwb;
@@ -2794,8 +2795,8 @@ test_blocksolve(stratum_instance_t *client, workbase_t *wb, const uchar *data, c
 	ckdbq_add(ckp, ID_BLOCK, val);
 }
 
-/* Needs to be entered with client holding a ref count. */
-static inline uchar *user_coinb2(stratum_instance_t *client, workbase_t *wb)
+/* Entered with instance_lock held */
+static inline uchar *__user_coinb2(stratum_instance_t *client, workbase_t *wb)
 {
 	struct userwb *userwb;
 	int64_t id;
@@ -2811,7 +2812,7 @@ static inline uchar *user_coinb2(stratum_instance_t *client, workbase_t *wb)
 }
 
 /* Needs to be entered with client holding a ref count. */
-static double submission_diff(stratum_instance_t *client, workbase_t *wb, const char *nonce2,
+static double submission_diff(sdata_t *sdata, stratum_instance_t *client, workbase_t *wb, const char *nonce2,
 			      uint32_t ntime32, const char *nonce, uchar *hash)
 {
 	unsigned char merkle_root[32], merkle_sha[64];
@@ -2829,8 +2830,12 @@ static double submission_diff(stratum_instance_t *client, workbase_t *wb, const 
 	cblen += wb->enonce1constlen + wb->enonce1varlen;
 	hex2bin(coinbase + cblen, nonce2, wb->enonce2varlen);
 	cblen += wb->enonce2varlen;
-	coinb2bin = user_coinb2(client, wb);
+
+	ck_rlock(&sdata->instance_lock);
+	coinb2bin = __user_coinb2(client, wb);
 	memcpy(coinbase + cblen, coinb2bin, wb->coinb2len);
+	ck_runlock(&sdata->instance_lock);
+
 	cblen += wb->coinb2len;
 
 	gen_hash((uchar *)coinbase, merkle_root, cblen);
@@ -3023,7 +3028,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		memcpy(nonce2, tmp, nlen);
 		nonce2[len] = '\0';
 	}
-	sdiff = submission_diff(client, wb, nonce2, ntime32, nonce, hash);
+	sdiff = submission_diff(sdata, client, wb, nonce2, ntime32, nonce, hash);
 	if (sdiff > client->best_diff) {
 		worker_instance_t *worker = client->worker_instance;
 
