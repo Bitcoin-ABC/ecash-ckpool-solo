@@ -84,6 +84,8 @@ function pghead($script_marker, $name)
 {
  global $page_title;
 
+ $iCrap = strpos($_SERVER['HTTP_USER_AGENT'],'iP');
+
  $head = "<!DOCTYPE html>\n";
 
  $head .= "<html><head><title>$page_title$name</title>";
@@ -118,10 +120,15 @@ input.tiny {width: 0px; height: 0px; margin: 0px; padding: 0px; outline: none; b
 #n42 td {min-width: 100px; float: left; vertical-align: top; padding: 0px 2px;}
 #n42 td.navboxr {float: right;}
 #n42 td.nav {position: relative;}
+#n42 td.ts {border-width: 1px; border-color: #02e; border-style: solid none none none;}";
+if (!$iCrap)
+{
+ $head .= "
 #n42 div.sub {left: 0px; z-index: 42; position: absolute; visibility: hidden;}
-#n42 td.ts {border-width: 1px; border-color: #02e; border-style: solid none none none;}
 #n42 td.nav:hover {background:#09e;}
-#n42 td.nav:hover div.sub {background:#07e; visibility: visible;}
+#n42 td.nav:hover div.sub {background:#07e; visibility: visible;}";
+}
+ $head .= "
 h1 {margin-top: 20px; float:middle; font-size: 20px;}
 .foot, .push {height: 50px; font-size: 10pt;}
 .title {background-color: #909090;}
@@ -294,35 +301,35 @@ function pgtop($info, $dotop, $user, $douser)
 		$lsn = $info['now'] - $info['lastsh'];
 		$lhn = $info['now'] - $info['lasthb'];
 		$lwn = $info['now'] - $info['lastwi'];
-		if ($lsn < 2)
-			$lsc = 'green';
+		if ($lsn < 8)
+			$lsc = 'green.png';
 		else
 		{
-			if ($lsn < 4)
-				$lsc = 'orange';
+			if ($lsn < 10)
+				$lsc = 'orange.png';
 			else
-				$lsc = 'red';
+				$lsc = 'red.png';
 		}
-		if ($lhn < 3)
-			$lhc = 'green';
+		if ($lhn < 5)
+			$lhc = 'green.png';
 		else
 		{
-			if ($lhn < 6)
-				$lhc = 'orange';
+			if ($lhn < 10)
+				$lhc = 'orange.png';
 			else
-				$lhc = 'red';
+				$lhc = 'red.png';
 		}
 		if ($lwn < 36)
-			$lwc = 'green';
+			$lwc = 'green.png';
 		else
 		{
 			if ($lwn < 46)
-				$lwc = 'orange';
+				$lwc = 'orange.png';
 			else
-				$lwc = 'red';
+				$lwc = 'red.png';
 		}
 		$img1 = '<img border=0 src=/';
-		$img2 = '.png>';
+		$img2 = '>';
 		$ls = $img1.$lsc.$img2;
 		$lh = $img1.$lhc.$img2;
 		$lw = $img1.$lwc.$img2;
@@ -405,6 +412,8 @@ function pgtop($info, $dotop, $user, $douser)
 #
 function pgmenu($menus)
 {
+ $iCrap = strpos($_SERVER['HTTP_USER_AGENT'],'iP');
+
  $ret = "\n<table cellpadding=0 cellspacing=0 border=0 width=100% id=n42>";
  $ret .= '<tr><td width=100%>';
  $ret .= '<table cellpadding=0 cellspacing=0 border=0 width=100%>';
@@ -420,10 +429,17 @@ function pgmenu($menus)
 	$side = 'r';
 	continue;
   }
-  $ret .= "<td class=navbox$side><table cellpadding=0 cellspacing=0 border=0>";
-  $first = true;
-  foreach ($submenus as $submenu => $item)
+  if ($iCrap)
   {
+   foreach ($submenus as $submenu => $item)
+	$ret .= "<td class=nav>".makeLink($item)."$submenu</a></td>";
+  }
+  else
+  {
+   $ret .= "<td class=navbox$side><table cellpadding=0 cellspacing=0 border=0>";
+   $first = true;
+   foreach ($submenus as $submenu => $item)
+   {
 	if ($first == true)
 	{
 		$first = false;
@@ -437,10 +453,11 @@ function pgmenu($menus)
 		$ret .= '<div class=sub><table cellpadding=0 cellspacing=0 border=0 width=100%>';
 	}
 	$ret .= "<tr><td class=ts>".makeLink($item,'class=as')."$submenu</a></td></tr>";
-  }
-  if ($first == false)
+   }
+   if ($first == false)
 	$ret .= '</table></div></td></tr></table>';
-  $ret .= '</td>';
+   $ret .= '</td>';
+  }
  }
  $ret .= "</tr></table></td></tr></table>\n";
  return $ret;

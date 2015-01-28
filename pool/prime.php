@@ -53,7 +53,7 @@ function def_menu()
 		),
 		'gap' => array( # options not shown
 				'API' => 'api'),
-		'Help' => array('Help' => 'help',
+		'Help' => array(
 				'Payouts' => 'payout'));
  return $dmenu;
 }
@@ -84,9 +84,7 @@ function check()
 			'PBlocks' => 'pblocks'
 	),
 	'Help' => array(
-		'Payouts' => 'payout',
-		'Workers ' => 'workers',
-		'Blocks' => 'blocks'
+		'Payouts' => 'payout'
 	)
  );
  tryLogInOut();

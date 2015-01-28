@@ -1700,7 +1700,7 @@ static void ckmsgq_stats(ckmsgq_t *ckmsgq, int size, json_t **val)
 	JSON_CPACK(*val, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
 }
 
-static char *stratifier_stats(sdata_t *sdata)
+static char *stratifier_stats(ckpool_t *ckp, sdata_t *sdata)
 {
 	json_t *val = json_object(), *subval;
 	int objects, generated;
@@ -1756,8 +1756,10 @@ static char *stratifier_stats(sdata_t *sdata)
 	/* Don't know exactly how big the string is so just count the pointer for now */
 	ckmsgq_stats(sdata->srecvs, sizeof(char *), &subval);
 	json_set_object(val, "srecvs", subval);
-	ckmsgq_stats(sdata->ckdbq, sizeof(char *), &subval);
-	json_set_object(val, "ckdbq", subval);
+	if (!CKP_STANDALONE(ckp)) {
+		ckmsgq_stats(sdata->ckdbq, sizeof(char *), &subval);
+		json_set_object(val, "ckdbq", subval);
+	}
 	ckmsgq_stats(sdata->stxnq, sizeof(json_params_t), &subval);
 	json_set_object(val, "stxnq", subval);
 
@@ -1836,7 +1838,7 @@ retry:
 		char *msg;
 
 		LOGDEBUG("Stratifier received stats request");
-		msg = stratifier_stats(sdata);
+		msg = stratifier_stats(ckp, sdata);
 		send_unix_msg(sockd, msg);
 		Close(sockd);
 		goto retry;

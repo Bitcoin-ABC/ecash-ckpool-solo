@@ -1204,14 +1204,18 @@ static proc_instance_t *child_by_pid(ckpool_t *ckp, pid_t pid)
 
 static void *watchdog(void *arg)
 {
+#if 0
 	time_t last_relaunch_t = time(NULL);
+#endif
 	ckpool_t *ckp = (ckpool_t *)arg;
 
 	rename_proc("watchdog");
 	sleep(1);
 	while (42) {
 		proc_instance_t *pi;
+#if 0
 		time_t relaunch_t;
+#endif
 		int pid, status;
 
 		pid = waitpid(0, &status, 0);
@@ -1220,6 +1224,9 @@ static void *watchdog(void *arg)
 			LOGWARNING("Child process %s exited, terminating!", pi->processname);
 			break;
 		}
+#if 0
+		/* Don't bother trying to respawn for now since communication
+		 * breakdown between the processes will make them exit. */
 		relaunch_t = time(NULL);
 		if (relaunch_t == last_relaunch_t) {
 			LOGEMERG("Respawning processes too fast, exiting!");
@@ -1233,6 +1240,12 @@ static void *watchdog(void *arg)
 			LOGEMERG("Unknown child process %d dead, exiting!", pid);
 			break;
 		}
+#else
+		if (pi)
+			LOGEMERG("%s process dead, terminating!", pi->processname);
+		else
+			LOGEMERG("Unknown child process %d dead, exiting!", pid);
+#endif
 	}
 	send_proc(&ckp->main, "shutdown");
 	return NULL;
