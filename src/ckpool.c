@@ -1245,6 +1245,7 @@ static void *watchdog(void *arg)
 			LOGEMERG("%s process dead, terminating!", pi->processname);
 		else
 			LOGEMERG("Unknown child process %d dead, exiting!", pid);
+		break;
 #endif
 	}
 	send_proc(&ckp->main, "shutdown");
