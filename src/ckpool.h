@@ -190,13 +190,13 @@ struct ckpool_instance {
 #ifdef USE_CKDB
 #define CKP_STANDALONE(CKP) ((CKP)->standalone == true)
 #else
-#define CKP_STANDALONE(CKP) (true)
+#define CKP_STANDALONE(CKP) ((CKP) == (CKP)) /* Always true, silences unused warn */
 #endif
 
 #define SAFE_HASH_OVERHEAD(HASHLIST) (HASHLIST ? HASH_OVERHEAD(hh, HASHLIST) : 0)
 
 ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func);
-ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, int count);
+ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, const int count);
 void ckmsgq_add(ckmsgq_t *ckmsgq, void *data);
 bool ckmsgq_empty(ckmsgq_t *ckmsgq);
 
@@ -204,22 +204,22 @@ ckpool_t *global_ckp;
 
 bool ping_main(ckpool_t *ckp);
 void empty_buffer(connsock_t *cs);
-int read_socket_line(connsock_t *cs, int timeout);
+int read_socket_line(connsock_t *cs, const int timeout);
 bool _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
 #define send_proc(pi, msg) _send_proc(pi, msg, __FILE__, __func__, __LINE__)
 char *_send_recv_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
 #define send_recv_proc(pi, msg) _send_recv_proc(pi, msg, __FILE__, __func__, __LINE__)
 char *_send_recv_ckdb(const ckpool_t *ckp, const char *msg, const char *file, const char *func, const int line);
 #define send_recv_ckdb(ckp, msg) _send_recv_ckdb(ckp, msg, __FILE__, __func__, __LINE__)
-char *_ckdb_msg_call(const ckpool_t *ckp, char *msg,  const char *file, const char *func,
+char *_ckdb_msg_call(const ckpool_t *ckp, const char *msg,  const char *file, const char *func,
 		     const int line);
 #define ckdb_msg_call(ckp, msg) _ckdb_msg_call(ckp, msg, __FILE__, __func__, __LINE__)
 
 json_t *json_rpc_call(connsock_t *cs, const char *rpc_req);
 
-int process_exit(ckpool_t *ckp, proc_instance_t *pi, int ret);
-bool json_get_string(char **store, json_t *val, const char *res);
-bool json_get_int(int *store, json_t *val, const char *res);
-bool json_get_double(double *store, json_t *val, const char *res);
+int process_exit(ckpool_t *ckp, const proc_instance_t *pi, int ret);
+bool json_get_string(char **store, const json_t *val, const char *res);
+bool json_get_int(int *store, const json_t *val, const char *res);
+bool json_get_double(double *store, const json_t *val, const char *res);
 
 #endif /* CKPOOL_H */

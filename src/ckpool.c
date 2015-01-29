@@ -150,7 +150,7 @@ ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func)
 	return ckmsgq;
 }
 
-ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, int count)
+ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, const int count)
 {
 	ckmsgq_t *ckmsgq = ckzalloc(sizeof(ckmsgq_t) * count);
 	pthread_mutex_t *lock;
@@ -215,14 +215,14 @@ static void broadcast_proc(ckpool_t *ckp, const char *buf)
 
 /* Put a sanity check on kill calls to make sure we are not sending them to
  * pid 0. */
-static int kill_pid(int pid, int sig)
+static int kill_pid(const int pid, const int sig)
 {
 	if (pid < 1)
 		return -1;
 	return kill(pid, sig);
 }
 
-static int pid_wait(pid_t pid, int ms)
+static int pid_wait(const pid_t pid, const int ms)
 {
 	tv_t start, now;
 	int ret;
@@ -237,7 +237,7 @@ static int pid_wait(pid_t pid, int ms)
 	return ret;
 }
 
-static int send_procmsg(proc_instance_t *pi, const char *buf)
+static int send_procmsg(const proc_instance_t *pi, const char *buf)
 {
 	char *path = pi->us.path;
 	int ret = -1;
@@ -391,7 +391,7 @@ void empty_buffer(connsock_t *cs)
 /* Read from a socket into cs->buf till we get an '\n', converting it to '\0'
  * and storing how much extra data we've received, to be moved to the beginning
  * of the buffer for use on the next receive. */
-int read_socket_line(connsock_t *cs, int timeout)
+int read_socket_line(connsock_t *cs, const int timeout)
 {
 	int fd = cs->fd, ret = -1;
 	char *eom = NULL;
@@ -467,9 +467,9 @@ out:
 	return ret;
 }
 
-static void childsighandler(int sig);
+static void childsighandler(const int sig);
 
-static int get_proc_pid(proc_instance_t *pi)
+static int get_proc_pid(const proc_instance_t *pi)
 {
 	int ret, pid = 0;
 	char path[256];
@@ -596,7 +596,7 @@ out:
 }
 
 /* Send a json msg to ckdb and return the response */
-char *_ckdb_msg_call(const ckpool_t *ckp, char *msg,  const char *file, const char *func,
+char *_ckdb_msg_call(const ckpool_t *ckp, const char *msg,  const char *file, const char *func,
 		     const int line)
 {
 	char *buf = NULL;
@@ -693,7 +693,7 @@ out:
 
 /* Open the file in path, check if there is a pid in there that still exists
  * and if not, write the pid into that file. */
-static bool write_pid(ckpool_t *ckp, const char *path, pid_t pid)
+static bool write_pid(ckpool_t *ckp, const char *path, const pid_t pid)
 {
 	struct stat statbuf;
 	FILE *fp;
@@ -751,13 +751,13 @@ out:
 	return true;
 }
 
-static void name_process_sockname(unixsock_t *us, proc_instance_t *pi)
+static void name_process_sockname(unixsock_t *us, const proc_instance_t *pi)
 {
 	us->path = strdup(pi->ckp->socket_dir);
 	realloc_strcat(&us->path, pi->sockname);
 }
 
-static void open_process_sock(ckpool_t *ckp, proc_instance_t *pi, unixsock_t *us)
+static void open_process_sock(ckpool_t *ckp, const proc_instance_t *pi, unixsock_t *us)
 {
 	LOGDEBUG("Opening %s", us->path);
 	us->sockd = open_unix_server(us->path);
@@ -786,7 +786,7 @@ static void write_namepid(proc_instance_t *pi)
 		quit(1, "Failed to write %s pid %d", pi->processname, pi->pid);
 }
 
-static void rm_namepid(proc_instance_t *pi)
+static void rm_namepid(const proc_instance_t *pi)
 {
 	char s[256];
 
@@ -796,7 +796,7 @@ static void rm_namepid(proc_instance_t *pi)
 
 /* Disable signal handlers for child processes, but simply pass them onto the
  * parent process to shut down cleanly. */
-static void childsighandler(int sig)
+static void childsighandler(const int sig)
 {
 	signal(sig, SIG_IGN);
 	signal(SIGTERM, SIG_IGN);
@@ -808,7 +808,7 @@ static void childsighandler(int sig)
 	exit(0);
 }
 
-static void launch_logger(proc_instance_t *pi)
+static void launch_logger(const proc_instance_t *pi)
 {
 	ckpool_t *ckp = pi->ckp;
 	char loggername[16];
@@ -850,7 +850,7 @@ static void launch_process(proc_instance_t *pi)
 	pi->pid = pid;
 }
 
-static void launch_processes(ckpool_t *ckp)
+static void launch_processes(const ckpool_t *ckp)
 {
 	int i;
 
@@ -858,7 +858,7 @@ static void launch_processes(ckpool_t *ckp)
 		launch_process(ckp->children[i]);
 }
 
-int process_exit(ckpool_t *ckp, proc_instance_t *pi, int ret)
+int process_exit(ckpool_t *ckp, const proc_instance_t *pi, int ret)
 {
 	if (ret) {
 		/* Abnormal termination, kill entire process */
@@ -902,7 +902,7 @@ static void cancel_pthread(pthread_t *pth)
 	pth = NULL;
 }
 
-static void wait_child(pid_t *pid)
+static void wait_child(const pid_t *pid)
 {
 	int ret;
 
@@ -939,7 +939,7 @@ static void shutdown_children(ckpool_t *ckp)
 	__shutdown_children(ckp);
 }
 
-static void sighandler(int sig)
+static void sighandler(const int sig)
 {
 	ckpool_t *ckp = global_ckp;
 
@@ -954,7 +954,7 @@ static void sighandler(int sig)
 	exit(0);
 }
 
-static bool _json_get_string(char **store, json_t *entry, const char *res)
+static bool _json_get_string(char **store, const json_t *entry, const char *res)
 {
 	bool ret = false;
 	const char *buf;
@@ -976,12 +976,12 @@ out:
 	return ret;
 }
 
-bool json_get_string(char **store, json_t *val, const char *res)
+bool json_get_string(char **store, const json_t *val, const char *res)
 {
 	return _json_get_string(store, json_object_get(val, res), res);
 }
 
-static void json_get_int64(int64_t *store, json_t *val, const char *res)
+static void json_get_int64(int64_t *store, const json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);
 
@@ -997,7 +997,7 @@ static void json_get_int64(int64_t *store, json_t *val, const char *res)
 	LOGDEBUG("Json found entry %s: %ld", res, *store);
 }
 
-bool json_get_int(int *store, json_t *val, const char *res)
+bool json_get_int(int *store, const json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);
 	bool ret = false;
@@ -1017,7 +1017,7 @@ out:
 	return ret;
 }
 
-bool json_get_double(double *store, json_t *val, const char *res)
+bool json_get_double(double *store, const json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);
 	bool ret = false;
@@ -1037,7 +1037,7 @@ out:
 	return ret;
 }
 
-static bool json_get_bool(bool *store, json_t *val, const char *res)
+static bool json_get_bool(bool *store, const json_t *val, const char *res)
 {
 	json_t *entry = json_object_get(val, res);
 	bool ret = false;
@@ -1057,7 +1057,7 @@ out:
 	return ret;
 }
 
-static void parse_btcds(ckpool_t *ckp, json_t *arr_val, int arr_size)
+static void parse_btcds(ckpool_t *ckp, const json_t *arr_val, const int arr_size)
 {
 	json_t *val;
 	int i;
@@ -1076,7 +1076,7 @@ static void parse_btcds(ckpool_t *ckp, json_t *arr_val, int arr_size)
 	}
 }
 
-static void parse_proxies(ckpool_t *ckp, json_t *arr_val, int arr_size)
+static void parse_proxies(ckpool_t *ckp, const json_t *arr_val, const int arr_size)
 {
 	json_t *val;
 	int i;
@@ -1093,7 +1093,7 @@ static void parse_proxies(ckpool_t *ckp, json_t *arr_val, int arr_size)
 	}
 }
 
-static bool parse_serverurls(ckpool_t *ckp, json_t *arr_val)
+static bool parse_serverurls(ckpool_t *ckp, const json_t *arr_val)
 {
 	bool ret = false;
 	int arr_size, i;
@@ -1188,7 +1188,7 @@ static proc_instance_t *prepare_child(ckpool_t *ckp, int (*process)(), char *nam
 	return pi;
 }
 
-static proc_instance_t *child_by_pid(ckpool_t *ckp, pid_t pid)
+static proc_instance_t *child_by_pid(const ckpool_t *ckp, const pid_t pid)
 {
 	proc_instance_t *pi = NULL;
 	int i;
