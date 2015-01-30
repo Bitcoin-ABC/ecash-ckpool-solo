@@ -156,7 +156,6 @@ struct userwb {
 	UT_hash_handle hh;
 	int64_t id;
 
-	workbase_t *wb; // Master workbase
 	uchar *coinb2bin; // Coinb2 cointaining this user's address for generation
 	char *coinb2;
 };
@@ -722,19 +721,24 @@ static void send_ageworkinfo(ckpool_t *ckp, const int64_t id)
 	ckdbq_add(ckp, ID_AGEWORKINFO, val);
 }
 
-/* Entered with instance_lock held */
-static void __generate_userwb(workbase_t *wb, user_instance_t *instance)
+/* Entered with instance_lock held, make sure wb can't be pulled from us */
+static void __generate_userwb(workbase_t *wb, user_instance_t *user)
 {
 	struct userwb *userwb;
+	int64_t id = wb->id;
+
+	/* Make sure this user doesn't have this userwb already */
+	HASH_FIND_I64(user->userwbs, &id, userwb);
+	if (unlikely(userwb))
+		return;
 
 	userwb = ckzalloc(sizeof(struct userwb));
-	userwb->wb = wb;
-	userwb->id = wb->id;
+	userwb->id = id;
 	userwb->coinb2bin = ckalloc(wb->coinb2len);
 	memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
-	memcpy(userwb->coinb2bin + wb->genoffset, instance->txnbin, 25);
+	memcpy(userwb->coinb2bin + wb->genoffset, user->txnbin, 25);
 	userwb->coinb2 = bin2hex(userwb->coinb2bin, wb->coinb2len);
-	HASH_ADD_I64(instance->userwbs, id, userwb);
+	HASH_ADD_I64(user->userwbs, id, userwb);
 }
 
 static void generate_userwbs(sdata_t *sdata, workbase_t *wb)
@@ -2448,13 +2452,13 @@ static void queue_delayed_auth(stratum_instance_t *client)
 	ckdbq_add(ckp, ID_AUTH, val);
 }
 
-static json_t *__user_notify(sdata_t *sdata, user_instance_t *user_instance, bool clean);
+static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean);
 
 static void __update_solo_client(sdata_t *sdata, stratum_instance_t *client, user_instance_t *user_instance)
 {
 	json_t *json_msg;
 
-	json_msg = __user_notify(sdata, user_instance, true);
+	json_msg = __user_notify(sdata->current_workbase, user_instance, true);
 	stratum_add_send(sdata, json_msg, client->id);
 }
 
@@ -2556,15 +2560,13 @@ out:
 	if (ckp->btcsolo && ret) {
 		sdata_t *sdata = ckp->data;
 
-		/* recursive lock, grab workbase first then instance */
-		ck_rlock(&sdata->workbase_lock);
+		/* recursive lock, grab instance first then workbase */
 		ck_wlock(&sdata->instance_lock);
+		ck_rlock(&sdata->workbase_lock);
 		__generate_userwb(sdata->current_workbase, user);
-		/* Downgrade instance lock to read lock */
-		ck_dwlock(&sdata->instance_lock);
 		__update_solo_client(sdata, client, user);
-		ck_runlock(&sdata->instance_lock);
 		ck_runlock(&sdata->workbase_lock);
+		ck_wunlock(&sdata->instance_lock);
 
 		stratum_send_diff(sdata, client);
 	}
@@ -3257,14 +3259,14 @@ static void stratum_send_update(sdata_t *sdata, const int64_t client_id, const b
 	stratum_add_send(sdata, json_msg, client_id);
 }
 
-/* Hold instance lock */
-static json_t *__user_notify(sdata_t *sdata, user_instance_t *user_instance, bool clean)
+/* Hold instance and workbase lock */
+static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean)
 {
-	int64_t id = sdata->current_workbase->id;
+	int64_t id = wb->id;
 	struct userwb *userwb;
 	json_t *val;
 
-	HASH_FIND_I64(user_instance->userwbs, &id, userwb);
+	HASH_FIND_I64(user->userwbs, &id, userwb);
 	if (unlikely(!userwb)) {
 		LOGINFO("Failed to find userwb in __user_notify!");
 		return NULL;
@@ -3272,23 +3274,22 @@ static json_t *__user_notify(sdata_t *sdata, user_instance_t *user_instance, boo
 
 	JSON_CPACK(val, "{s:[ssssosssb],s:o,s:s}",
 			"params",
-			sdata->current_workbase->idstring,
-			sdata->current_workbase->prevhash,
-			sdata->current_workbase->coinb1,
+			wb->idstring,
+			wb->prevhash,
+			wb->coinb1,
 			userwb->coinb2,
-			json_deep_copy(sdata->current_workbase->merkle_array),
-			sdata->current_workbase->bbversion,
-			sdata->current_workbase->nbit,
-			sdata->current_workbase->ntime,
+			json_deep_copy(wb->merkle_array),
+			wb->bbversion,
+			wb->nbit,
+			wb->ntime,
 			clean,
 			"id", json_null(),
 			"method", "mining.notify");
 	return val;
 }
 
-/* Current workbase can't be pulled out from under us here even without
- * locking since it's serialised with this code. Sends a stratum update with
- * a unique coinb2 for every client. */
+/* Sends a stratum update with a unique coinb2 for every client. Note locking
+ * order, instance then workbase. */
 static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 {
 	stratum_instance_t *client, *tmp;
@@ -3299,7 +3300,10 @@ static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 		if (!client->user_instance)
 			continue;
 
-		json_msg = __user_notify(sdata, client->user_instance, clean);
+		ck_rlock(&sdata->workbase_lock);
+		json_msg = __user_notify(sdata->current_workbase, client->user_instance, clean);
+		ck_runlock(&sdata->workbase_lock);
+
 		if (likely(json_msg))
 			stratum_add_send(sdata, json_msg, client->id);
 	}
