@@ -2420,12 +2420,15 @@ out:
  * these clients while ckdb is offline, based on an existing client of the
  * same username already having been authorised. Needs to be entered with
  * client holding a ref count. */
-static void queue_delayed_auth(const stratum_instance_t *client)
+static void queue_delayed_auth(stratum_instance_t *client)
 {
 	ckpool_t *ckp = client->ckp;
 	char cdfield[64];
 	json_t *val;
 	ts_t now;
+
+	/* Read off any cached mindiff from previous auths */
+	client->suggest_diff = client->worker_instance->mindiff;
 
 	ts_realtime(&now);
 	sprintf(cdfield, "%lu,%lu", now.tv_sec, now.tv_nsec);

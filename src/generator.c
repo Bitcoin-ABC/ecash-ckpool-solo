@@ -815,6 +815,14 @@ static bool parse_reconnect(proxy_instance_t *proxi, json_t *val)
 
 	new_url = json_string_value(json_array_get(val, 0));
 	new_port = json_integer_value(json_array_get(val, 1));
+	/* See if we have an invalid entry listing port as a string instead of
+	 * integer and handle that. */
+	if (!new_port) {
+		const char *newport_string = json_string_value(json_array_get(val, 1));
+
+		if (newport_string)
+			sscanf(newport_string, "%d", &new_port);
+	}
 	if (new_url && strlen(new_url) && new_port) {
 		char *dot_pool, *dot_reconnect;
 		int len;

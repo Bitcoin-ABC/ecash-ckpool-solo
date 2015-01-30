@@ -428,6 +428,9 @@ int read_socket_line(connsock_t *cs, const int timeout)
 		}
 		ret = recv(fd, readbuf, PAGESIZE - 4, 0);
 		if (ret < 1) {
+			/* Closed socket after valid message */
+			if (!ret && eom)
+				break;
 			LOGERR("Failed to recv in read_socket_line");
 			ret = -1;
 			goto out;
