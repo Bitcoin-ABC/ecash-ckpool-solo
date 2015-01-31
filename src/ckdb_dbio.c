@@ -4490,22 +4490,17 @@ bool miningpayouts_fill(PGconn *conn)
 	return ok;
 }
 
+// TODO: discard them from RAM
 bool auths_add(PGconn *conn, char *poolinstance, char *username,
 		char *workername, char *clientid, char *enonce1,
 		char *useragent, char *preauth, char *by, char *code,
-		char *inet, tv_t *cd, bool igndup, K_TREE *trf_root,
+		char *inet, tv_t *cd, K_TREE *trf_root,
 		bool addressuser, USERS **users, WORKERS **workers)
 {
-	ExecStatusType rescode;
-	bool conned = false;
-	PGresult *res;
 	K_TREE_CTX ctx[1];
 	K_ITEM *a_item, *u_item, *w_item;
 	char cd_buf[DATE_BUFSIZ];
 	AUTHS *row;
-	char *ins;
-	char *params[8 + HISTORYDATECOUNT];
-	int n, par = 0;
 	bool ok = false;
 
 	LOGDEBUG("%s(): add", __func__);
@@ -4521,10 +4516,6 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 	K_RUNLOCK(users_free);
 	if (!u_item) {
 		if (addressuser) {
-			if (conn == NULL) {
-				conn = dbconnect();
-				conned = true;
-			}
 			u_item = users_add(conn, username, EMPTY, EMPTY,
 					   by, code, inet, cd, trf_root);
 		} else {
@@ -4569,14 +4560,10 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 		k_add_head(auths_free, a_item);
 		K_WUNLOCK(auths_free);
 
-		if (conned)
-			PQfinish(conn);
-
-		if (!igndup) {
-			tv_to_buf(cd, cd_buf, sizeof(cd_buf));
-			LOGERR("%s(): Duplicate auths ignored %s/%s/%s",
-				__func__, poolinstance, workername, cd_buf);
-		}
+		// Shouldn't actually be possible unless twice in the logs
+		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
+		LOGERR("%s(): Duplicate auths ignored %s/%s/%s",
+			__func__, poolinstance, workername, cd_buf);
 
 		/* Let them mine, that's what matters :)
 		 *  though this would normally only be during a reload */
@@ -4587,45 +4574,10 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 	// Update even if DB fails
 	workerstatus_update(row, NULL, NULL);
 
-	if (conn == NULL) {
-		conn = dbconnect();
-		conned = true;
-	}
+	row->authid = 1;
 
-	row->authid = nextid(conn, "authid", (int64_t)1, cd, by, code, inet);
-	if (row->authid == 0)
-		goto unitem;
-
-	par = 0;
-	params[par++] = bigint_to_buf(row->authid, NULL, 0);
-	params[par++] = str_to_buf(row->poolinstance, NULL, 0);
-	params[par++] = bigint_to_buf(row->userid, NULL, 0);
-	params[par++] = str_to_buf(row->workername, NULL, 0);
-	params[par++] = int_to_buf(row->clientid, NULL, 0);
-	params[par++] = str_to_buf(row->enonce1, NULL, 0);
-	params[par++] = str_to_buf(row->useragent, NULL, 0);
-	params[par++] = str_to_buf(row->preauth, NULL, 0);
-	HISTORYDATEPARAMS(params, par, row);
-	PARCHK(par, params);
-
-	ins = "insert into auths "
-		"(authid,poolinstance,userid,workername,clientid,enonce1,useragent,preauth"
-		HISTORYDATECONTROL ") values (" PQPARAM13 ")";
-
-	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-	rescode = PQresultStatus(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Insert", rescode, conn);
-		goto unparam;
-	}
 	ok = true;
-unparam:
-	PQclear(res);
-	for (n = 0; n < par; n++)
-		free(params[n]);
 unitem:
-	if (conned)
-		PQfinish(conn);
 	K_WLOCK(auths_free);
 #if 1
 	/* To save ram for now, don't store them,
@@ -4640,147 +4592,6 @@ unitem:
 	}
 #endif
 	K_WUNLOCK(auths_free);
-
-	return ok;
-}
-
-bool auths_fill(PGconn *conn)
-{
-	ExecStatusType rescode;
-	PGresult *res;
-	K_ITEM *item;
-	AUTHS *row;
-	char *params[2];
-	int n, i;
-	int par = 0;
-	char *field;
-	char *sel;
-	int fields = 7;
-	bool ok;
-	tv_t now;
-
-	LOGDEBUG("%s(): select", __func__);
-
-	// TODO: add/update a (single) fake auth every ~10min or 10min after the last one?
-
-	sel = "select "
-		"authid,userid,workername,clientid,enonce1,useragent,preauth"
-		HISTORYDATECONTROL
-		" from auths where expirydate=$1 and createdate>=$2";
-
-	setnow(&now);
-	now.tv_sec -= (24 * 60 * 60); // last day worth
-
-	par = 0;
-	params[par++] = tv_to_buf((tv_t *)(&default_expiry), NULL, 0);
-	params[par++] = tv_to_buf((tv_t *)(&now), NULL, 0);
-	PARCHK(par, params);
-	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
-	rescode = PQresultStatus(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Select", rescode, conn);
-		PQclear(res);
-		return false;
-	}
-
-#if 0
-	// Only load the last record for each workername
-	sel = "with last as ("
-		  "select authid,userid,workername,clientid,enonce1,useragent,preauth"
-		  HISTORYDATECONTROL
-		  ",row_number() over(partition by userid,workername "
-					"order by expirydate desc, createdate desc)"
-		  " as best from auths"
-		") select * from last where best=1";
-
-	res = PQexec(conn, sel, CKPQ_READ);
-	rescode = PQresultStatus(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Select", rescode, conn);
-		PQclear(res);
-		return false;
-	}
-#endif
-
-	n = PQnfields(res);
-	if (n != (fields + HISTORYDATECOUNT)) {
-		LOGERR("%s(): Invalid field count - should be %d, but is %d",
-			__func__, fields + HISTORYDATECOUNT, n);
-		PQclear(res);
-		return false;
-	}
-
-	n = PQntuples(res);
-	LOGDEBUG("%s(): tree build count %d", __func__, n);
-	ok = true;
-	K_WLOCK(auths_free);
-	for (i = 0; i < n; i++) {
-		item = k_unlink_head(auths_free);
-		DATA_AUTHS(row, item);
-
-		if (everyone_die) {
-			ok = false;
-			break;
-		}
-
-		PQ_GET_FLD(res, i, "authid", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("authid", field, row->authid);
-
-		PQ_GET_FLD(res, i, "userid", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("userid", field, row->userid);
-
-		PQ_GET_FLD(res, i, "workername", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_STR("workername", field, row->workername);
-
-		PQ_GET_FLD(res, i, "clientid", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_INT("clientid", field, row->clientid);
-
-		PQ_GET_FLD(res, i, "enonce1", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_STR("enonce1", field, row->enonce1);
-
-		PQ_GET_FLD(res, i, "useragent", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_STR("useragent", field, row->useragent);
-
-		PQ_GET_FLD(res, i, "preauth", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_STR("preauth", field, row->preauth);
-
-		HISTORYDATEFLDS(res, i, row, ok);
-		if (!ok)
-			break;
-
-		auths_root = add_to_ktree(auths_root, item, cmp_auths);
-		k_add_head(auths_store, item);
-		workerstatus_update(row, NULL, NULL);
-
-		if (tv_newer(&(dbstatus.newest_createdate_auths), &(row->createdate)))
-			copy_tv(&(dbstatus.newest_createdate_auths), &(row->createdate));
-
-		tick();
-	}
-	if (!ok)
-		k_add_head(auths_free, item);
-
-	K_WUNLOCK(auths_free);
-	PQclear(res);
-
-	if (ok) {
-		LOGDEBUG("%s(): built", __func__);
-		LOGWARNING("%s(): loaded %d auth records", __func__, n);
-	}
 
 	return ok;
 }

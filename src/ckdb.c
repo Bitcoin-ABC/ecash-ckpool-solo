@@ -31,18 +31,11 @@
  *  with an ok.queued reply to ckpool, to be processed after the reload
  *  completes and just process authorise messages immediately while the
  *  reload runs
- *  This can't cause a duplicate process of an authorise message since a
- *  reload will ignore any messages before the last DB auths message,
- *  however, if ckdb and ckpool get out of sync due to ckpool starting
- *  during the reload (as mentioned below) it is possible for ckdb to
- *  find an authorise message in the CCLs that was processed in the
- *  message queue and thus is already in the DB.
- *  This error would be very rare and also not an issue
- * To avoid this, we start the ckpool message queue after loading
- *  the users, auths, idcontrol and workers DB tables, before loading the
+ * We start the ckpool message queue after loading
+ *  the users, idcontrol and workers DB tables, before loading the
  *  much larger DB tables so that ckdb is effectively ready for messages
  *  almost immediately
- * The first ckpool message also allows us to know where ckpool is up to
+ * The first ckpool message allows us to know where ckpool is up to
  *  in the CCLs and thus where to stop processing the CCLs to stay in
  *  sync with ckpool
  * If ckpool isn't running, then the reload will complete at the end of
@@ -89,13 +82,14 @@
  *	TODO: Verify that all DB sharesummaries with complete='n'
  *	have done this
  *  DB+RAM workinfo: start from newest DB createdate workinfo
- *  DB+RAM auths: start from newest DB createdate auths
+ *  RAM auths: none (we store them in RAM only)
  *  DB+RAM poolstats: newest createdate poolstats
  *	TODO: subtract how much we need in RAM of the 'between'
  *	non db records - will depend on TODO: pool stats reporting
  *	requirements
  *  RAM userstats: none (we simply store the last one found)
- *  DB+RAM workers: created by auths so auths will resolve it
+ *  DB+RAM workers: created by auths so are simply ignore if they
+ *	already exist
  *  DB+RAM blocks: resolved by workinfo - any unsaved blocks (if any)
  *	will be after the last DB workinfo
  *  DB+RAM accountbalance (TODO): resolved by shares/workinfo/blocks
@@ -269,8 +263,8 @@ bool dbload_only_sharesummary = false;
  *  markersummaries and pplns payouts may not be correct */
 bool sharesummary_marks_limit = false;
 
-// DB users,workers,auth load is complete
-bool db_auths_complete = false;
+// DB users,workers load is complete
+bool db_users_complete = false;
 // DB load is complete
 bool db_load_complete = false;
 // Different input data handling
@@ -717,10 +711,7 @@ static bool getdata1()
 		goto matane;
 	if (!(ok = users_fill(conn)))
 		goto matane;
-	if (!(ok = workers_fill(conn)))
-		goto matane;
-	if (!confirm_sharesummary)
-		ok = auths_fill(conn);
+	ok = workers_fill(conn);
 
 matane:
 
@@ -792,8 +783,6 @@ static bool reload()
 	LOGWARNING("%s(): %s newest DB complete sharesummary", __func__, buf);
 	tv_to_buf(&(dbstatus.newest_createdate_workinfo), buf, sizeof(buf));
 	LOGWARNING("%s(): %s newest DB workinfo", __func__, buf);
-	tv_to_buf(&(dbstatus.newest_createdate_auths), buf, sizeof(buf));
-	LOGWARNING("%s(): %s newest DB auths", __func__, buf);
 	tv_to_buf(&(dbstatus.newest_createdate_poolstats), buf, sizeof(buf));
 	LOGWARNING("%s(): %s newest DB poolstats", __func__, buf);
 	tv_to_buf(&(dbstatus.newest_createdate_blocks), buf, sizeof(buf));
@@ -809,10 +798,6 @@ static bool reload()
 	if (!tv_newer(&start, &(dbstatus.newest_createdate_workinfo))) {
 		copy_tv(&start, &(dbstatus.newest_createdate_workinfo));
 		reason = "workinfo";
-	}
-	if (!tv_newer(&start, &(dbstatus.newest_createdate_auths))) {
-		copy_tv(&start, &(dbstatus.newest_createdate_auths));
-		reason = "auths";
 	}
 	if (!tv_newer(&start, &(dbstatus.newest_createdate_poolstats))) {
 		copy_tv(&start, &(dbstatus.newest_createdate_poolstats));
@@ -1184,7 +1169,7 @@ static bool setup_data()
 	if (!getdata1() || everyone_die)
 		return false;
 
-	db_auths_complete = true;
+	db_users_complete = true;
 	cksem_post(&socketer_sem);
 
 	if (!getdata2() || everyone_die)
@@ -2383,7 +2368,7 @@ static void *socketer(__maybe_unused void *arg)
 
 	rename_proc("db_socketer");
 
-	while (!everyone_die && !db_auths_complete)
+	while (!everyone_die && !db_users_complete)
 		cksem_mswait(&socketer_sem, 420);
 
 	socketer_using_data = true;
