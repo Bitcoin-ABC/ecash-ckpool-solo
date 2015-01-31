@@ -212,11 +212,13 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 /* Client must hold a reference count */
 static int drop_client(cdata_t *cdata, client_instance_t *client)
 {
+	int64_t client_id = 0;
 	int fd;
 
 	ck_wlock(&cdata->lock);
 	fd = client->fd;
 	if (fd != -1) {
+		client_id = client->id;
 		Close(client->fd);
 		HASH_DEL(cdata->clients, client);
 		DL_APPEND(cdata->dead_clients, client);
@@ -228,7 +230,7 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 	ck_wunlock(&cdata->lock);
 
 	if (fd > -1)
-		LOGINFO("Connector dropped client %"PRId64" fd %d", client->id, fd);
+		LOGINFO("Connector dropped client %"PRId64" fd %d", client_id, fd);
 
 	return fd;
 }

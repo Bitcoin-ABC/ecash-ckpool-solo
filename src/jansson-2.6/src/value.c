@@ -88,20 +88,33 @@ size_t json_object_size(const json_t *json)
     return object->hashtable.size;
 }
 
+/* Address sanitiser wants objects aligned to 4 bytes to be happy */
 json_t *json_object_get(const json_t *json, const char *key)
 {
     json_object_t *object;
+    json_t *ret;
+    char *safekey;
+    int slen = strlen(key) + 1, rem = slen % 4;
 
     if(!json_is_object(json))
         return NULL;
 
     object = json_to_object(json);
-    return hashtable_get(&object->hashtable, key);
+    if (!rem)
+	return hashtable_get(&object->hashtable, key);
+    rem = slen + 4 - rem;
+    safekey = malloc(rem);
+    memcpy(safekey, key, slen);
+    ret = hashtable_get(&object->hashtable, safekey);
+    free(safekey);
+    return ret;
 }
 
 int json_object_set_new_nocheck(json_t *json, const char *key, json_t *value)
 {
     json_object_t *object;
+    char *safekey;
+    int slen, rem, ret;
 
     if(!value)
         return -1;
@@ -113,7 +126,19 @@ int json_object_set_new_nocheck(json_t *json, const char *key, json_t *value)
     }
     object = json_to_object(json);
 
-    if(hashtable_set(&object->hashtable, key, object->serial++, value))
+    slen = strlen(key) + 1; rem = slen % 4;
+    if (!rem)
+	    ret = hashtable_set(&object->hashtable, key, object->serial++, value);
+	else {
+		rem = slen + 4 - rem;
+		safekey = malloc(rem);
+		memcpy(safekey, key, slen);
+		ret = hashtable_set(&object->hashtable, safekey, object->serial++, value);
+		free(safekey);
+	}
+
+
+    if(ret)
     {
         json_decref(value);
         return -1;
@@ -136,12 +161,21 @@ int json_object_set_new(json_t *json, const char *key, json_t *value)
 int json_object_del(json_t *json, const char *key)
 {
     json_object_t *object;
+    char *safekey;
+    int slen = strlen(key) + 1, rem = slen % 4, ret;
 
     if(!json_is_object(json))
         return -1;
 
     object = json_to_object(json);
-    return hashtable_del(&object->hashtable, key);
+    if (!rem)
+	return hashtable_del(&object->hashtable, key);
+    rem = slen + 4 - rem;
+    safekey = malloc(rem);
+    memcpy(safekey, key, slen);
+    ret = hashtable_del(&object->hashtable, safekey);
+    free(safekey);
+    return ret;
 }
 
 int json_object_clear(json_t *json)

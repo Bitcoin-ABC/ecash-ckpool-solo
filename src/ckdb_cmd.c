@@ -2174,7 +2174,7 @@ static char *cmd_blocks(PGconn *conn, char *cmd, char *id,
 }
 
 static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
-				char *code, char *inet, tv_t *cd, bool igndup,
+				char *code, char *inet, tv_t *cd,
 				K_TREE *trf_root)
 {
 	char reply[1024] = "";
@@ -2241,7 +2241,7 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 			     transfer_data(i_enonce1),
 			     transfer_data(i_useragent),
 			     transfer_data(i_preauth),
-			     by, code, inet, cd, igndup, trf_root, false,
+			     by, code, inet, cd, trf_root, false,
 			     &users, &workers);
 
 	if (!ok) {
@@ -2266,21 +2266,11 @@ static char *cmd_auth(PGconn *conn, char *cmd, char *id,
 			char *code, char *inet, tv_t *cd,
 			K_TREE *trf_root)
 {
-	bool igndup = false;
-
-	// confirm_summaries() doesn't call this
-	if (reloading) {
-		if (tv_equal(cd, &(dbstatus.newest_createdate_auths)))
-			igndup = true;
-		else if (tv_newer(cd, &(dbstatus.newest_createdate_auths)))
-			return NULL;
-	}
-
-	return cmd_auth_do(conn, cmd, id, by, code, inet, cd, igndup, trf_root);
+	return cmd_auth_do(conn, cmd, id, by, code, inet, cd, trf_root);
 }
 
 static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
-				char *code, char *inet, tv_t *cd, bool igndup,
+				char *code, char *inet, tv_t *cd,
 				K_TREE *trf_root)
 {
 	char reply[1024] = "";
@@ -2329,7 +2319,7 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 			     transfer_data(i_enonce1),
 			     transfer_data(i_useragent),
 			     transfer_data(i_preauth),
-			     by, code, inet, cd, igndup, trf_root, true,
+			     by, code, inet, cd, trf_root, true,
 			     &users, &workers);
 
 	if (!ok) {
@@ -2354,17 +2344,7 @@ static char *cmd_addrauth(PGconn *conn, char *cmd, char *id,
 			char *code, char *inet, tv_t *cd,
 			K_TREE *trf_root)
 {
-	bool igndup = false;
-
-	// confirm_summaries() doesn't call this
-	if (reloading) {
-		if (tv_equal(cd, &(dbstatus.newest_createdate_auths)))
-			igndup = true;
-		else if (tv_newer(cd, &(dbstatus.newest_createdate_auths)))
-			return NULL;
-	}
-
-	return cmd_addrauth_do(conn, cmd, id, by, code, inet, cd, igndup, trf_root);
+	return cmd_addrauth_do(conn, cmd, id, by, code, inet, cd, trf_root);
 }
 
 static char *cmd_heartbeat(__maybe_unused PGconn *conn, char *cmd, char *id,
