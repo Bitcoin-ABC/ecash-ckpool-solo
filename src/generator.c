@@ -101,6 +101,7 @@ struct proxy_instance {
 	bool notified; /* Received new template for work */
 	bool diffed; /* Received new diff */
 	bool reconnect; /* We need to drop and reconnect */
+	bool replaced; /* This proxy has issued a reconnect with new data */
 
 	pthread_mutex_t notify_lock;
 	notify_instance_t *notify_instances;
@@ -855,12 +856,13 @@ static bool parse_reconnect(proxy_instance_t *proxi, json_t *val)
 	newsi->id = ckp->proxies++;
 	ckp->servers = realloc(ckp->servers, sizeof(server_instance_t *) * ckp->proxies);
 	ckp->servers[newsi->id] = newsi;
-	ckp->chosen_server = newsi->id;
 	newsi->url = url;
 	newsi->auth = strdup(si->auth);
 	newsi->pass = strdup(si->pass);
 	proxi->reconnect = true;
+	proxi->replaced = true;
 
+	/* Reuse variable on a new proxy instance */
 	proxi = ckzalloc(sizeof(proxy_instance_t));
 	newsi->data = proxi;
 	proxi->auth = newsi->auth;
@@ -868,6 +870,9 @@ static bool parse_reconnect(proxy_instance_t *proxi, json_t *val)
 	proxi->si = newsi;
 	proxi->ckp = ckp;
 	proxi->cs = &newsi->cs;
+
+	/* Set chosen server only once all new proxy data exists */
+	ckp->chosen_server = newsi->id;
 out:
 	return ret;
 }
@@ -1345,6 +1350,9 @@ static bool proxy_alive(ckpool_t *ckp, server_instance_t *si, proxy_instance_t *
 			connsock_t *cs, bool pinging)
 {
 	bool ret = false;
+
+	if (proxi->replaced)
+		return false;
 
 	/* Has this proxy already been reconnected? */
 	if (cs->fd > 0)
