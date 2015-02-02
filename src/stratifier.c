@@ -3443,14 +3443,9 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 		LOGNOTICE("Adding passthrough client %ld", client_id);
 		/* We need to inform the connector process that this client
 		 * is a passthrough and to manage its messages accordingly.
-		 * Remove this instance since the client id may well be
-		 * reused */
-		ck_wlock(&sdata->instance_lock);
-		if (likely(__instance_by_id(sdata, client_id)))
-			HASH_DEL(sdata->stratum_instances, client);
-		__kill_instance(client);
-		ck_wunlock(&sdata->instance_lock);
-
+		 * The client_id stays on the list but we won't send anything
+		 * to it since it's unauthorised. Set the flag just in case. */
+		client->authorised = false;
 		snprintf(buf, 255, "passthrough=%ld", client_id);
 		send_proc(client->ckp->connector, buf);
 		return;
