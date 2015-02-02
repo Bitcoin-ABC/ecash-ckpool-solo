@@ -1490,7 +1490,6 @@ static void drop_client(sdata_t *sdata, const int64_t id)
 			dropped = __drop_client(sdata, client, user);
 		else
 			client->dropped = true;
-		client->authorised = false;
 	}
 
 	/* Old disconnected instances will not have any valid shares so remove
