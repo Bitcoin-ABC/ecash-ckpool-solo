@@ -354,10 +354,12 @@ retry:
 		LOGDEBUG("Listener received stratifierstats request");
 		msg = send_recv_proc(ckp->stratifier, "stats");
 		send_unix_msg(sockd, msg);
+		dealloc(msg);
 	} else if (cmdmatch(buf, "connectorstats")) {
 		LOGDEBUG("Listener received connectorstats request");
 		msg = send_recv_proc(ckp->connector, "stats");
 		send_unix_msg(sockd, msg);
+		dealloc(msg);
 	} else {
 		LOGINFO("Listener received unhandled message: %s", buf);
 		send_unix_msg(sockd, "unknown");
@@ -693,56 +695,35 @@ out:
 	return val;
 }
 
+static void terminate_oldpid(const ckpool_t *ckp, proc_instance_t *pi, const pid_t oldpid)
+{
+	if (!ckp->killold) {
+		quit(1, "Process %s pid %d still exists, start ckpool with -k if you wish to kill it",
+				pi->processname, oldpid);
+	}
+	LOGNOTICE("Terminating old process %s pid %d", pi->processname, oldpid);
+	if (kill_pid(oldpid, 15))
+		quit(1, "Unable to kill old process %s pid %d", pi->processname, oldpid);
+	LOGWARNING("Terminating old process %s pid %d", pi->processname, oldpid);
+	if (pid_wait(oldpid, 500))
+		return;
+	LOGWARNING("Old process %s pid %d failed to respond to terminate request, killing",
+			pi->processname, oldpid);
+	if (kill_pid(oldpid, 9) || !pid_wait(oldpid, 500))
+		quit(1, "Unable to kill old process %s pid %d", pi->processname, oldpid);
+}
 
 /* Open the file in path, check if there is a pid in there that still exists
  * and if not, write the pid into that file. */
-static bool write_pid(ckpool_t *ckp, const char *path, const pid_t pid)
+static bool write_pid(ckpool_t *ckp, const char *path, proc_instance_t *pi, const pid_t pid, const pid_t oldpid)
 {
-	struct stat statbuf;
 	FILE *fp;
-	int ret;
 
-	if (!stat(path, &statbuf)) {
-		int oldpid;
-
-		LOGNOTICE("File %s exists", path);
-		fp = fopen(path, "re");
-		if (!fp) {
-			LOGEMERG("Failed to open file %s", path);
-			return false;
-		}
-		ret = fscanf(fp, "%d", &oldpid);
-		fclose(fp);
-		if (ret == 1 && !(kill_pid(oldpid, 0))) {
-			if (ckp->handover) {
-				if (pid_wait(oldpid, 500))
-					goto out;
-				LOGWARNING("Old process pid %d failed to shutdown cleanly, terminating", oldpid);
-			}
-			if (!ckp->killold) {
-				LOGEMERG("Process %s pid %d still exists, start ckpool with -k if you wish to kill it",
-					 path, oldpid);
-				return false;
-			}
-			if (kill_pid(oldpid, 15)) {
-				LOGEMERG("Unable to kill old process %s pid %d", path, oldpid);
-				return false;
-			}
-			LOGWARNING("Terminating old process %s pid %d", path, oldpid);
-			if (pid_wait(oldpid, 500))
-				goto out;
-			if (kill_pid(oldpid, 9)) {
-				LOGEMERG("Unable to kill old process %s pid %d", path, oldpid);
-				return false;
-			}
-			LOGWARNING("Unable to terminate old process %s pid %d, killing", path, oldpid);
-			if (!pid_wait(oldpid, 500)) {
-				LOGEMERG("Unable to kill old process %s pid %d", path, oldpid);
-				return false;
-			}
-		}
+	if (ckp->handover && oldpid && !pid_wait(oldpid, 500)) {
+		LOGWARNING("Old process pid %d failed to shutdown cleanly, terminating", oldpid);
+		terminate_oldpid(ckp, pi, oldpid);
 	}
-out:
+
 	fp = fopen(path, "we");
 	if (!fp) {
 		LOGERR("Failed to open file %s", path);
@@ -785,7 +766,7 @@ static void write_namepid(proc_instance_t *pi)
 
 	pi->pid = getpid();
 	sprintf(s, "%s%s.pid", pi->ckp->socket_dir, pi->processname);
-	if (!write_pid(pi->ckp, s, pi->pid))
+	if (!write_pid(pi->ckp, s, pi, pi->pid, pi->oldpid))
 		quit(1, "Failed to write %s pid %d", pi->processname, pi->pid);
 }
 
@@ -1174,7 +1155,36 @@ static void parse_config(ckpool_t *ckp)
 		if (arr_size)
 			parse_proxies(ckp, arr_val, arr_size);
 	}
+	json_get_bool(&ckp->clientsvspeed, json_conf, "clientsvspeed");
 	json_decref(json_conf);
+}
+
+static void manage_old_child(ckpool_t *ckp, proc_instance_t *pi)
+{
+	struct stat statbuf;
+	char path[256];
+	FILE *fp;
+
+	sprintf(path, "%s%s.pid", pi->ckp->socket_dir, pi->processname);
+	if (!stat(path, &statbuf)) {
+		int oldpid, ret;
+
+		LOGNOTICE("File %s exists", path);
+		fp = fopen(path, "re");
+		if (!fp)
+			quit(1, "Failed to open file %s", path);
+		ret = fscanf(fp, "%d", &oldpid);
+		fclose(fp);
+		if (ret == 1 && !(kill_pid(oldpid, 0))) {
+			LOGNOTICE("Old process %s pid %d still exists", pi->processname, oldpid);
+			if (ckp->handover) {
+				LOGINFO("Saving pid to be handled at handover");
+				pi->oldpid = oldpid;
+				return;
+			}
+			terminate_oldpid(ckp, pi, oldpid);
+		}
+	}
 }
 
 static proc_instance_t *prepare_child(ckpool_t *ckp, int (*process)(), char *name)
@@ -1188,6 +1198,7 @@ static proc_instance_t *prepare_child(ckpool_t *ckp, int (*process)(), char *nam
 	pi->sockname = pi->processname;
 	pi->process = process;
 	create_process_unixsock(pi);
+	manage_old_child(ckp, pi);
 	return pi;
 }
 

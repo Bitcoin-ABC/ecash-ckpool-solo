@@ -853,8 +853,8 @@ static bool parse_reconnect(proxy_instance_t *proxi, json_t *val)
 
 	ret = true;
 	newsi = ckzalloc(sizeof(server_instance_t));
-	newsi->id = ckp->proxies++;
-	ckp->servers = realloc(ckp->servers, sizeof(server_instance_t *) * ckp->proxies);
+	newsi->id = ckp->proxies;
+	ckp->servers = realloc(ckp->servers, sizeof(server_instance_t *) * (ckp->proxies + 1));
 	ckp->servers[newsi->id] = newsi;
 	newsi->url = url;
 	newsi->auth = strdup(si->auth);
@@ -872,6 +872,7 @@ static bool parse_reconnect(proxy_instance_t *proxi, json_t *val)
 	proxi->cs = &newsi->cs;
 
 	/* Set chosen server only once all new proxy data exists */
+	ckp->proxies++;
 	ckp->chosen_server = newsi->id;
 out:
 	return ret;
@@ -1464,7 +1465,7 @@ static void kill_proxy(ckpool_t *ckp, proxy_instance_t *proxi)
 	if (!proxi) // This shouldn't happen
 		return;
 
-	LOGNOTICE("Killing proxy");
+	LOGNOTICE("Killing proxy connection to %s", proxi->si->url);
 	cs = proxi->cs;
 	Close(cs->fd);
 	empty_buffer(cs);

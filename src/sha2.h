@@ -57,7 +57,7 @@ typedef struct {
     uint32_t h[8];
 } sha256_ctx;
 
-uint32_t sha256_k[64];
+extern uint32_t sha256_k[64];
 
 void sha256_init(sha256_ctx * ctx);
 void sha256_update(sha256_ctx *ctx, const unsigned char *message,

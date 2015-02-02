@@ -75,6 +75,19 @@ function doblocks($data, $user)
 	else
 		$pg = '<h1>Blocks</h1>';
 
+	list($fg, $bg) = pctcolour(25.0);
+	$pg .= "<span style='background:$bg; color:$fg;'>";
+	$pg .= "&nbsp;Green&nbsp;</span>&nbsp;";
+	$pg .= 'is good luck. Lower Diff% and bright green is best luck.<br>';
+	list($fg, $bg) = pctcolour(100.0);
+	$pg .= "<span style='background:$bg; color:$fg;'>";
+	$pg .= "&nbsp;100%&nbsp;</span>&nbsp;";
+	$pg .= 'is expected average.&nbsp;';
+	list($fg, $bg) = pctcolour(400.0);
+	$pg .= "<span style='background:$bg; color:$fg;'>";
+	$pg .= "&nbsp;Red&nbsp;</span>&nbsp;";
+	$pg .= 'is bad luck. Higher Diff% and bright red is worse luck.<br><br>';
+
 	$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
 	$pg .= "<tr class=title>";
 	$pg .= "<td class=dr>#</td>";
