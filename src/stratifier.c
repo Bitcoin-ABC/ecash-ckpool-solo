@@ -4050,15 +4050,12 @@ static void *statsupdate(void *arg)
 	sleep(1);
 
 	while (42) {
-		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080;
-		double bias;
-		double tdiff, per_tdiff;
+		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080, per_tdiff;
 		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
 		char suffix360[16], suffix1440[16], suffix10080[16];
 		char_entry_t *char_list = NULL, *char_t, *chartmp_t;
-		user_instance_t *user, *tmpuser;
 		stratum_instance_t *client, *tmp;
-		double sps1, sps5, sps15, sps60;
+		user_instance_t *user, *tmpuser;
 		int idle_workers = 0;
 		char fname[512] = {};
 		tv_t now, diff;
@@ -4070,7 +4067,6 @@ static void *statsupdate(void *arg)
 
 		tv_time(&now);
 		timersub(&now, &stats->start_time, &diff);
-		tdiff = diff.tv_sec + (double)diff.tv_usec / 1000000;
 
 		ck_rlock(&sdata->instance_lock);
 		HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
@@ -4204,33 +4200,23 @@ static void *statsupdate(void *arg)
 
 		ghs1 = stats->dsps1 * nonces;
 		suffix_string(ghs1, suffix1, 16, 0);
-		sps1 = stats->sps1;
 
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 300);
-		ghs5 = stats->dsps5 * nonces / bias;
-		sps5 = stats->sps5 / bias;
+		ghs5 = stats->dsps5 * nonces;
 		suffix_string(ghs5, suffix5, 16, 0);
 
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 900);
-		ghs15 = stats->dsps15 * nonces / bias;
+		ghs15 = stats->dsps15 * nonces;
 		suffix_string(ghs15, suffix15, 16, 0);
-		sps15 = stats->sps15 / bias;
 
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 3600);
-		ghs60 = stats->dsps60 * nonces / bias;
-		sps60 = stats->sps60 / bias;
+		ghs60 = stats->dsps60 * nonces;
 		suffix_string(ghs60, suffix60, 16, 0);
 
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 21600);
-		ghs360 = stats->dsps360 * nonces / bias;
+		ghs360 = stats->dsps360 * nonces;
 		suffix_string(ghs360, suffix360, 16, 0);
 
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 86400);
-		ghs1440 = stats->dsps1440 * nonces / bias;
+		ghs1440 = stats->dsps1440 * nonces;
 		suffix_string(ghs1440, suffix1440, 16, 0);
 
-		bias = !CKP_STANDALONE(ckp) ? 1.0 : time_bias(tdiff, 604800);
-		ghs10080 = stats->dsps10080 * nonces / bias;
+		ghs10080 = stats->dsps10080 * nonces;
 		suffix_string(ghs10080, suffix10080, 16, 0);
 
 		snprintf(fname, 511, "%s/pool/pool.status", ckp->logdir);
@@ -4265,10 +4251,10 @@ static void *statsupdate(void *arg)
 		dealloc(s);
 
 		JSON_CPACK(val, "{sf,sf,sf,sf}",
-				"SPS1m", sps1,
-				"SPS5m", sps5,
-				"SPS15m", sps15,
-				"SPS1h", sps60);
+				"SPS1m", stats->sps1,
+				"SPS5m", stats->sps5,
+				"SPS15m", stats->sps15,
+				"SPS1h", stats->sps60);
 		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 		json_decref(val);
 		LOGNOTICE("Pool:%s", s);
@@ -4361,6 +4347,65 @@ static void *ckdb_heartbeat(void *arg)
 	return NULL;
 }
 
+static void read_poolstats(ckpool_t *ckp)
+{
+	sdata_t *sdata = ckp->data;
+	pool_stats_t *stats = &sdata->stats;
+	char *s = alloca(4096), *dsps, *sps;
+	json_t *val;
+	FILE *fp;
+	int ret;
+
+	snprintf(s, 4095, "%s/pool/pool.status", ckp->logdir);
+	fp = fopen(s, "re");
+	if (!fp) {
+		LOGINFO("Pool does not have a logfile to read");
+		return;
+	}
+	memset(s, 0, 4096);
+	ret = fread(s, 1, 4095, fp);
+	fclose(fp);
+	if (ret < 1 || !strlen(s)) {
+		LOGDEBUG("No string to read in pool logfile");
+		return;
+	}
+	/* Strip out end of line terminators */
+	strsep(&s, "\n");
+	dsps = strsep(&s, "\n");
+	sps = strsep(&s, "\n");
+	if (!s) {
+		LOGINFO("Failed to find EOL in pool logfile");
+		return;
+	}
+	val = json_loads(dsps, 0, NULL);
+	if (!val) {
+		LOGINFO("Failed to json decode dsps line from pool logfile: %s", sps);
+		return;
+	}
+	stats->dsps1 = dsps_from_key(val, "hashrate1m");
+	stats->dsps5 = dsps_from_key(val, "hashrate5m");
+	stats->dsps15 = dsps_from_key(val, "hashrate15m");
+	stats->dsps60 = dsps_from_key(val, "hashrate1hr");
+	stats->dsps360 = dsps_from_key(val, "hashrate6hr");
+	stats->dsps1440 = dsps_from_key(val, "hashrate1d");
+	stats->dsps10080 = dsps_from_key(val, "hashrate7d");
+	json_decref(val);
+	LOGINFO("Successfully read pool dsps: %s", dsps);
+
+	val = json_loads(sps, 0, NULL);
+	if (!val) {
+		LOGINFO("Failed to json decode sps line from pool logfile: %s", dsps);
+		return;
+	}
+	json_get_double(&stats->sps1, val, "SPS1m");
+	json_get_double(&stats->sps5, val, "SPS5m");
+	json_get_double(&stats->sps15, val, "SPS15m");
+	json_get_double(&stats->sps60, val, "SPS1h");
+	json_decref(val);
+
+	LOGINFO("Successfully read pool sps: %s", sps);
+}
+
 int stratifier(proc_instance_t *pi)
 {
 	pthread_t pth_blockupdate, pth_statsupdate, pth_heartbeat;
@@ -4427,7 +4472,8 @@ int stratifier(proc_instance_t *pi)
 	if (!CKP_STANDALONE(ckp)) {
 		sdata->ckdbq = create_ckmsgq(ckp, "ckdbqueue", &ckdbq_process);
 		create_pthread(&pth_heartbeat, ckdb_heartbeat, ckp);
-	}
+	} else
+		read_poolstats(ckp);
 
 	cklock_init(&sdata->workbase_lock);
 	if (!ckp->proxy)
