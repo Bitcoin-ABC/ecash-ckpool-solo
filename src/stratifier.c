@@ -2124,10 +2124,11 @@ static double dsps_from_key(json_t *val, const char *key)
 /* Enter holding a reference count */
 static void read_userstats(ckpool_t *ckp, user_instance_t *user)
 {
+	int tvsec_diff = 0, ret;
 	char s[512];
 	json_t *val;
 	FILE *fp;
-	int ret;
+	tv_t now;
 
 	snprintf(s, 511, "%s/users/%s", ckp->logdir, user->username);
 	fp = fopen(s, "re");
@@ -2148,26 +2149,40 @@ static void read_userstats(ckpool_t *ckp, user_instance_t *user)
 		return;
 	}
 
-	tv_time(&user->last_share);
+	tv_time(&now);
+	copy_tv(&user->last_share, &now);
 	user->dsps1 = dsps_from_key(val, "hashrate1m");
 	user->dsps5 = dsps_from_key(val, "hashrate5m");
 	user->dsps60 = dsps_from_key(val, "hashrate1hr");
 	user->dsps1440 = dsps_from_key(val, "hashrate1d");
 	user->dsps10080 = dsps_from_key(val, "hashrate7d");
+	json_get_int64(&user->last_update.tv_sec, val, "lastupdate");
 	json_get_double(&user->best_diff, val, "bestshare");
 	LOGINFO("Successfully read user %s stats %f %f %f %f %f %f", user->username,
 		user->dsps1, user->dsps5, user->dsps60, user->dsps1440,
 		user->dsps10080, user->best_diff);
 	json_decref(val);
+	if (user->last_update.tv_sec)
+		tvsec_diff = now.tv_sec - user->last_update.tv_sec - 60;
+	if (tvsec_diff > 60) {
+		LOGINFO("Old user stats indicate not logged for %d seconds, decaying stats",
+			tvsec_diff);
+		decay_time(&user->dsps1, 0, tvsec_diff, 60);
+		decay_time(&user->dsps5, 0, tvsec_diff, 300);
+		decay_time(&user->dsps60, 0, tvsec_diff, 3600);
+		decay_time(&user->dsps1440, 0, tvsec_diff, 86400);
+		decay_time(&user->dsps10080, 0, tvsec_diff, 604800);
+	}
 }
 
 /* Enter holding a reference count */
 static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 {
+	int tvsec_diff = 0, ret;
 	char s[512];
 	json_t *val;
 	FILE *fp;
-	int ret;
+	tv_t now;
 
 	snprintf(s, 511, "%s/workers/%s", ckp->logdir, worker->workername);
 	fp = fopen(s, "re");
@@ -2188,17 +2203,28 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 		return;
 	}
 
-	tv_time(&worker->last_share);
+	tv_time(&now);
+	copy_tv(&worker->last_share, &now);
 	worker->dsps1 = dsps_from_key(val, "hashrate1m");
 	worker->dsps5 = dsps_from_key(val, "hashrate5m");
 	worker->dsps60 = dsps_from_key(val, "hashrate1d");
 	worker->dsps1440 = dsps_from_key(val, "hashrate1d");
 	json_get_double(&worker->best_diff, val, "bestshare");
+	json_get_int64(&worker->last_update.tv_sec, val, "lastupdate");
 	LOGINFO("Successfully read worker %s stats %f %f %f %f %f", worker->workername,
 		worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440, worker->best_diff);
 	json_decref(val);
+	if (worker->last_update.tv_sec)
+		tvsec_diff = now.tv_sec - worker->last_update.tv_sec - 60;
+	if (tvsec_diff > 60) {
+		LOGINFO("Old worker stats indicate not logged for %d seconds, decaying stats",
+			tvsec_diff);
+		decay_time(&worker->dsps1, 0, tvsec_diff, 60);
+		decay_time(&worker->dsps5, 0, tvsec_diff, 300);
+		decay_time(&worker->dsps60, 0, tvsec_diff, 3600);
+		decay_time(&worker->dsps1440, 0, tvsec_diff, 86400);
+	}
 }
-
 
 /* This simply strips off the first part of the workername and matches it to a
  * user or creates a new one. Needs to be entered with client holding a ref
