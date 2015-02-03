@@ -192,6 +192,7 @@ struct user_instance {
 	double dsps1440;
 	double dsps10080;
 	tv_t last_share;
+	tv_t last_update;
 
 	bool authorised; /* Has this username ever been authorised? */
 	time_t auth_time;
@@ -212,6 +213,7 @@ struct worker_instance {
 	double dsps60;
 	double dsps1440;
 	tv_t last_share;
+	tv_t last_update;
 	time_t start_time;
 
 	double best_diff; /* Best share found by this worker */
@@ -4118,11 +4120,14 @@ static void *statsupdate(void *arg)
 				ghs = worker->dsps1440 * nonces;
 				suffix_string(ghs, suffix1440, 16, 0);
 
-				JSON_CPACK(val, "{ss,ss,ss,ss,sf}",
+				copy_tv(&worker->last_update, &now);
+
+				JSON_CPACK(val, "{ss,ss,ss,ss,si,sf}",
 						"hashrate1m", suffix1,
 						"hashrate5m", suffix5,
 						"hashrate1hr", suffix60,
 						"hashrate1d", suffix1440,
+						"lastupdate", now.tv_sec,
 						"bestshare", worker->best_diff);
 
 				snprintf(fname, 511, "%s/workers/%s", ckp->logdir, worker->workername);
@@ -4163,12 +4168,15 @@ static void *statsupdate(void *arg)
 			ghs = user->dsps10080 * nonces;
 			suffix_string(ghs, suffix10080, 16, 0);
 
-			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,sf}",
+			copy_tv(&user->last_update, &now);
+
+			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,si,sf}",
 					"hashrate1m", suffix1,
 					"hashrate5m", suffix5,
 					"hashrate1hr", suffix60,
 					"hashrate1d", suffix1440,
 					"hashrate7d", suffix10080,
+					"lastupdate", now.tv_sec,
 					"workers", user->workers,
 					"bestshare", user->best_diff);
 
