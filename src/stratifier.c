@@ -47,7 +47,7 @@ struct pool_stats {
 	int64_t unaccounted_shares;
 	int64_t accounted_shares;
 
-	/* Cycle of 24 to determine which users to dump stats on */
+	/* Cycle of 32 to determine which users to dump stats on */
 	uint8_t userstats_cycle;
 
 	/* Shares per second for 1/5/15/60 minute rolling averages */
