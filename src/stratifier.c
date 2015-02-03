@@ -4224,8 +4224,9 @@ static void *statsupdate(void *arg)
 		if (unlikely(!fp))
 			LOGERR("Failed to fopen %s", fname);
 
-		JSON_CPACK(val, "{si,si,si,si,si}",
+		JSON_CPACK(val, "{si,si,si,si,si,si}",
 				"runtime", diff.tv_sec,
+				"lastupdate", now.tv_sec,
 				"Users", stats->users,
 				"Workers", stats->workers,
 				"Idle", idle_workers,
@@ -4349,12 +4350,13 @@ static void *ckdb_heartbeat(void *arg)
 
 static void read_poolstats(ckpool_t *ckp)
 {
+	char *s = alloca(4096), *pstats, *dsps, *sps;
 	sdata_t *sdata = ckp->data;
 	pool_stats_t *stats = &sdata->stats;
-	char *s = alloca(4096), *dsps, *sps;
+	int tvsec_diff = 0, ret;
+	tv_t now, last;
 	json_t *val;
 	FILE *fp;
-	int ret;
 
 	snprintf(s, 4095, "%s/pool/pool.status", ckp->logdir);
 	fp = fopen(s, "re");
@@ -4370,13 +4372,24 @@ static void read_poolstats(ckpool_t *ckp)
 		return;
 	}
 	/* Strip out end of line terminators */
-	strsep(&s, "\n");
+	pstats = strsep(&s, "\n");
 	dsps = strsep(&s, "\n");
 	sps = strsep(&s, "\n");
 	if (!s) {
 		LOGINFO("Failed to find EOL in pool logfile");
 		return;
 	}
+	val = json_loads(pstats, 0, NULL);
+	if (!val) {
+		LOGINFO("Failed to json decode pstats line from pool logfile: %s", pstats);
+		return;
+	}
+	tv_time(&now);
+	last.tv_sec = 0;
+	json_get_int64(&last.tv_sec, val, "lastupdate");
+	json_decref(val);
+	LOGINFO("Successfully read pool pstats: %s", pstats);
+
 	val = json_loads(dsps, 0, NULL);
 	if (!val) {
 		LOGINFO("Failed to json decode dsps line from pool logfile: %s", sps);
@@ -4404,6 +4417,24 @@ static void read_poolstats(ckpool_t *ckp)
 	json_decref(val);
 
 	LOGINFO("Successfully read pool sps: %s", sps);
+	if (last.tv_sec)
+		tvsec_diff = now.tv_sec - last.tv_sec - 60;
+	if (tvsec_diff > 60) {
+		LOGNOTICE("Old pool stats indicate pool down for %d seconds, decaying stats",
+			  tvsec_diff);
+		decay_time(&stats->sps1, 0, tvsec_diff, 60);
+		decay_time(&stats->sps5, 0, tvsec_diff, 300);
+		decay_time(&stats->sps15, 0, tvsec_diff, 900);
+		decay_time(&stats->sps60, 0, tvsec_diff, 3600);
+
+		decay_time(&stats->dsps1, 0, tvsec_diff, 60);
+		decay_time(&stats->dsps5, 0, tvsec_diff, 300);
+		decay_time(&stats->dsps15, 0, tvsec_diff, 900);
+		decay_time(&stats->dsps60, 0, tvsec_diff, 3600);
+		decay_time(&stats->dsps360, 0, tvsec_diff, 21600);
+		decay_time(&stats->dsps1440, 0, tvsec_diff, 86400);
+		decay_time(&stats->dsps10080, 0, tvsec_diff, 604800);
+	}
 }
 
 int stratifier(proc_instance_t *pi)
