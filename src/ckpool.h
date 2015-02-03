@@ -223,6 +223,7 @@ json_t *json_rpc_call(connsock_t *cs, const char *rpc_req);
 
 int process_exit(ckpool_t *ckp, const proc_instance_t *pi, int ret);
 bool json_get_string(char **store, const json_t *val, const char *res);
+bool json_get_int64(int64_t *store, const json_t *val, const char *res);
 bool json_get_int(int *store, const json_t *val, const char *res);
 bool json_get_double(double *store, const json_t *val, const char *res);
 
