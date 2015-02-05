@@ -22,7 +22,6 @@
 #include "utlist.h"
 
 #define MAX_MSGSIZE 1024
-#define SOI (sizeof(int))
 
 struct client_instance {
 	/* For clients hashtable */
@@ -215,10 +214,12 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 	int64_t client_id = 0;
 	int fd;
 
-	ck_wlock(&cdata->lock);
+	ck_ilock(&cdata->lock);
 	fd = client->fd;
 	if (fd != -1) {
 		client_id = client->id;
+
+		ck_ulock(&cdata->lock);
 		Close(client->fd);
 		HASH_DEL(cdata->clients, client);
 		DL_APPEND(cdata->dead_clients, client);
@@ -226,8 +227,9 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 		 * epoll list. */
 		__dec_instance_ref(client);
 		cdata->dead_generated++;
+		ck_dwilock(&cdata->lock);
 	}
-	ck_wunlock(&cdata->lock);
+	ck_uilock(&cdata->lock);
 
 	if (fd > -1)
 		LOGINFO("Connector dropped client %"PRId64" fd %d", client_id, fd);
@@ -239,7 +241,7 @@ static void stratifier_drop_client(ckpool_t *ckp, int64_t id)
 {
 	char buf[256];
 
-	sprintf(buf, "dropclient=%ld", id);
+	sprintf(buf, "dropclient=%"PRId64, id);
 	send_proc(ckp->stratifier, buf);
 }
 
@@ -263,7 +265,7 @@ static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *c
 	DL_FOREACH_SAFE(cdata->dead_clients, client, tmp) {
 		if (!client->ref) {
 			DL_DELETE(cdata->dead_clients, client);
-			LOGINFO("Connector discarding client %ld", client->id);
+			LOGINFO("Connector discarding client %"PRId64, client->id);
 			dealloc(client);
 		}
 	}
@@ -335,7 +337,7 @@ reparse:
 	if (!(val = json_loads(msg, 0, NULL))) {
 		char *buf = strdup("Invalid JSON, disconnecting\n");
 
-		LOGINFO("Client id %ld sent invalid json message %s", client->id, msg);
+		LOGINFO("Client id %"PRId64" sent invalid json message %s", client->id, msg);
 		send_client(cdata, client->id, buf);
 		invalidate_client(ckp, cdata, client);
 		return;
@@ -378,8 +380,11 @@ reparse:
 void *receiver(void *arg)
 {
 	cdata_t *cdata = (cdata_t *)arg;
-	int ret, epfd, i, serverfds;
+	bool dropped_backlog = false;
 	struct epoll_event event;
+	uint64_t serverfds, i;
+	time_t start_t;
+	int ret, epfd;
 
 	rename_proc("creceiver");
 
@@ -400,27 +405,37 @@ void *receiver(void *arg)
 			LOGEMERG("FATAL: Failed to add epfd %d to epoll_ctl", epfd);
 			return NULL;
 		}
-		/* When we first start we listen to as many connections as
-		 * possible. Once we start polling we drop the listen to the
-		 * minimum to effectively ratelimit how fast we can receive
-		 * connections. */
-		LOGDEBUG("Dropping listen backlog to 0");
-		listen(cdata->serverfd[i], 0);
 	}
+
+	while (!cdata->accept)
+		cksleep_ms(1);
+	start_t = time(NULL);
 
 	while (42) {
 		client_instance_t *client;
 
-		while (unlikely(!cdata->accept))
-			cksleep_ms(100);
-		ret = epoll_wait(epfd, &event, 1, 1000);
-		if (unlikely(ret == -1)) {
-			LOGEMERG("FATAL: Failed to epoll_wait in receiver");
-			break;
+		if (unlikely(!dropped_backlog && time(NULL) - start_t > 90)) {
+			/* When we first start we listen to as many connections
+			 * as possible. After the first minute we drop the
+			 * listen to the minimum to effectively ratelimit how
+			 * fast we can receive new connections. */
+			dropped_backlog = true;
+			LOGNOTICE("Dropping server listen backlog to 0");
+			for (i = 0; i < serverfds; i++)
+				listen(cdata->serverfd[i], 0);
 		}
-		if (unlikely(!ret))
+		while (unlikely(!cdata->accept))
+			cksleep_ms(10);
+		ret = epoll_wait(epfd, &event, 1, 1000);
+		if (unlikely(ret < 1)) {
+			if (unlikely(ret == -1)) {
+				LOGEMERG("FATAL: Failed to epoll_wait in receiver");
+				break;
+			}
+			/* Nothing to service, still very unlikely */
 			continue;
-		if (event.data.u64 < (uint64_t)serverfds) {
+		}
+		if (event.data.u64 < serverfds) {
 			ret = accept_client(cdata, epfd, event.data.u64);
 			if (unlikely(ret < 0)) {
 				LOGEMERG("FATAL: Failed to accept_client in receiver");
@@ -502,7 +517,7 @@ void *sender(void *arg)
 		ret = wait_write_select(fd, 0);
 		if (ret < 1) {
 			if (ret < 0) {
-				LOGINFO("Client id %ld fd %d interrupted", client->id, fd);
+				LOGINFO("Client id %"PRId64" fd %d interrupted", client->id, fd);
 				invalidate_client(ckp, cdata, client);
 				goto contfree;
 			}
@@ -519,7 +534,7 @@ void *sender(void *arg)
 		while (sender_send->len) {
 			ret = send(fd, sender_send->buf + ofs, sender_send->len , 0);
 			if (unlikely(ret < 0)) {
-				LOGINFO("Client id %ld fd %d disconnected", client->id, fd);
+				LOGINFO("Client id %"PRId64" fd %d disconnected", client->id, fd);
 				invalidate_client(ckp, cdata, client);
 				break;
 			}
@@ -557,10 +572,10 @@ static void send_client(cdata_t *cdata, int64_t id, char *buf)
 	ck_ilock(&cdata->lock);
 	HASH_FIND_I64(cdata->clients, &id, client);
 	if (likely(client)) {
-		ck_ulock(&cdata->lock);
 		fd = client->fd;
 		/* Grab a reference to this client until the sender_send has
 		 * completed processing. */
+		ck_ulock(&cdata->lock);
 		__inc_instance_ref(client);
 		ck_dwilock(&cdata->lock);
 	}
@@ -571,10 +586,10 @@ static void send_client(cdata_t *cdata, int64_t id, char *buf)
 
 		if (client) {
 			/* This shouldn't happen */
-			LOGWARNING("Client id %ld disconnected but fd already invalidated!", id);
+			LOGWARNING("Client id %"PRId64" disconnected but fd already invalidated!", id);
 			invalidate_client(ckp, cdata, client);
 		} else {
-			LOGINFO("Connector failed to find client id %ld to send to", id);
+			LOGINFO("Connector failed to find client id %"PRId64" to send to", id);
 		}
 		free(buf);
 		return;
@@ -765,7 +780,7 @@ retry:
 	} else if (cmdmatch(buf, "dropclient")) {
 		client_instance_t *client;
 
-		ret = sscanf(buf, "dropclient=%ld", &client_id64);
+		ret = sscanf(buf, "dropclient=%"PRId64, &client_id64);
 		if (ret < 0) {
 			LOGDEBUG("Connector failed to parse dropclient command: %s", buf);
 			goto retry;
@@ -773,13 +788,13 @@ retry:
 		client_id = client_id64 & 0xffffffffll;
 		client = ref_client_by_id(cdata, client_id);
 		if (unlikely(!client)) {
-			LOGINFO("Connector failed to find client id %ld to drop", client_id);
+			LOGINFO("Connector failed to find client id %"PRId64" to drop", client_id);
 			goto retry;
 		}
 		ret = invalidate_client(ckp, cdata, client);
 		dec_instance_ref(cdata, client);
 		if (ret >= 0)
-			LOGINFO("Connector dropped client id: %ld", client_id);
+			LOGINFO("Connector dropped client id: %"PRId64, client_id);
 	} else if (cmdmatch(buf, "ping")) {
 		LOGDEBUG("Connector received ping request");
 		send_unix_msg(sockd, "pong");
@@ -802,14 +817,14 @@ retry:
 	} else if (cmdmatch(buf, "passthrough")) {
 		client_instance_t *client;
 
-		ret = sscanf(buf, "passthrough=%ld", &client_id);
+		ret = sscanf(buf, "passthrough=%"PRId64, &client_id);
 		if (ret < 0) {
 			LOGDEBUG("Connector failed to parse passthrough command: %s", buf);
 			goto retry;
 		}
 		client = ref_client_by_id(cdata, client_id);
 		if (unlikely(!client)) {
-			LOGINFO("Connector failed to find client id %ld to pass through", client_id);
+			LOGINFO("Connector failed to find client id %"PRId64" to pass through", client_id);
 			goto retry;
 		}
 		passthrough_client(cdata, client);
@@ -880,6 +895,7 @@ int connector(proc_instance_t *pi)
 			goto out;
 		}
 		cdata->serverfd[0] = sockd;
+		ckp->serverurls = 1;
 	} else {
 		for (i = 0; i < ckp->serverurls; i++) {
 			char oldurl[INET6_ADDRSTRLEN], oldport[8];

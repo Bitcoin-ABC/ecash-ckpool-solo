@@ -65,6 +65,14 @@ struct connsock {
 
 typedef struct connsock connsock_t;
 
+typedef struct char_entry char_entry_t;
+
+struct char_entry {
+	char_entry_t *next;
+	char_entry_t *prev;
+	char *buf;
+};
+
 struct server_instance {
 	/* Hash table data */
 	UT_hash_handle hh;
@@ -178,14 +186,12 @@ struct ckpool_instance {
 	char **serverurl; // Array of URLs to bind our server/proxy to
 	int serverurls; // Number of server bindings
 	int update_interval; // Seconds between stratum updates
-	int chosen_server; // Chosen server for next connection
 
 	/* Proxy options */
 	int proxies;
 	char **proxyurl;
 	char **proxyauth;
 	char **proxypass;
-	server_instance_t *btcdbackup;
 
 	/* Private data for each process */
 	void *data;
