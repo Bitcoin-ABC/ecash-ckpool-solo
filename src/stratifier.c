@@ -1406,6 +1406,11 @@ out:
 	return ret;
 }
 
+static inline bool client_active(stratum_instance_t *client)
+{
+	return (client->authorised && !client->dropped);
+}
+
 /* For creating a list of sends without locking that can then be concatenated
  * to the stratum_sends list. Minimises locking and avoids taking recursive
  * locks. */
@@ -1425,7 +1430,7 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val)
 		ckmsg_t *client_msg;
 		smsg_t *msg;
 
-		if (!client->authorised)
+		if (!client_active(client))
 			continue;
 		client_msg = ckalloc(sizeof(ckmsg_t));
 		msg = ckzalloc(sizeof(smsg_t));
@@ -3430,7 +3435,7 @@ static void suggest_diff(stratum_instance_t *client, const char *method, const j
 	sdata_t *sdata = client->ckp->data;
 	int64_t sdiff;
 
-	if (unlikely(!client->authorised)) {
+	if (unlikely(!client_active(client))) {
 		LOGWARNING("Attempted to suggest diff on unauthorised client %"PRId64, client->id);
 		return;
 	}
@@ -4129,7 +4134,7 @@ static void *statsupdate(void *arg)
 
 		ck_rlock(&sdata->instance_lock);
 		HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
-			if (!client->authorised)
+			if (!client_active(client))
 				continue;
 
 			per_tdiff = tvdiff(&now, &client->last_share);
