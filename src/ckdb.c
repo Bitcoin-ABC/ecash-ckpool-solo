@@ -301,7 +301,7 @@ K_STORE *logqueue_store;
 // WORKQUEUE
 K_LIST *workqueue_free;
 K_STORE *workqueue_store;
-pthread_mutex_t wq_waitlock;
+mutex_t wq_waitlock;
 pthread_cond_t wq_waitcond;
 
 // HEARTBEATQUEUE
@@ -3247,7 +3247,7 @@ static void *listener(void *arg)
 			timeraddspec(&abs, &tsdiff);
 
 			mutex_lock(&wq_waitlock);
-			pthread_cond_timedwait(&wq_waitcond, &wq_waitlock, &abs);
+			cond_timedwait(&wq_waitcond, &wq_waitlock, &abs);
 			mutex_unlock(&wq_waitlock);
 		}
 	}

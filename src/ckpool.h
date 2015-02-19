@@ -34,7 +34,7 @@ struct ckmsgq {
 	ckpool_t *ckp;
 	char name[16];
 	pthread_t pth;
-	pthread_mutex_t *lock;
+	mutex_t *lock;
 	pthread_cond_t *cond;
 	ckmsg_t *msgs;
 	void (*func)(ckpool_t *, void *);

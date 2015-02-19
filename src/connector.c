@@ -95,7 +95,7 @@ struct connector_data {
 	int64_t sends_delayed;
 
 	/* For protecting the pending sends list */
-	pthread_mutex_t sender_lock;
+	mutex_t sender_lock;
 	pthread_cond_t sender_cond;
 };
 
@@ -481,7 +481,7 @@ void *sender(void *arg)
 
 			ts_realtime(&timeout_ts);
 			timeraddspec(&timeout_ts, &polltime);
-			pthread_cond_timedwait(&cdata->sender_cond, &cdata->sender_lock, &timeout_ts);
+			cond_timedwait(&cdata->sender_cond, &cdata->sender_lock, &timeout_ts);
 		}
 		sender_send = cdata->sender_sends;
 		if (sender_send)

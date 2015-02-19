@@ -120,7 +120,7 @@ static void *ckmsg_queue(void *arg)
 		tv_to_ts(&abs, &now);
 		abs.tv_sec++;
 		if (!ckmsgq->msgs)
-			pthread_cond_timedwait(ckmsgq->cond, ckmsgq->lock, &abs);
+			cond_timedwait(ckmsgq->cond, ckmsgq->lock, &abs);
 		msg = ckmsgq->msgs;
 		if (msg)
 			DL_DELETE(ckmsgq->msgs, msg);
@@ -141,7 +141,7 @@ ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func)
 	strncpy(ckmsgq->name, name, 15);
 	ckmsgq->func = func;
 	ckmsgq->ckp = ckp;
-	ckmsgq->lock = ckalloc(sizeof(pthread_mutex_t));
+	ckmsgq->lock = ckalloc(sizeof(mutex_t));
 	ckmsgq->cond = ckalloc(sizeof(pthread_cond_t));
 	mutex_init(ckmsgq->lock);
 	cond_init(ckmsgq->cond);
@@ -153,11 +153,11 @@ ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func)
 ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, const int count)
 {
 	ckmsgq_t *ckmsgq = ckzalloc(sizeof(ckmsgq_t) * count);
-	pthread_mutex_t *lock;
+	mutex_t *lock;
 	pthread_cond_t *cond;
 	int i;
 
-	lock = ckalloc(sizeof(pthread_mutex_t));
+	lock = ckalloc(sizeof(mutex_t));
 	cond = ckalloc(sizeof(pthread_cond_t));
 	mutex_init(lock);
 	cond_init(cond);

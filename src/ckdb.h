@@ -654,7 +654,7 @@ typedef struct workqueue {
 
 extern K_LIST *workqueue_free;
 extern K_STORE *workqueue_store;
-extern pthread_mutex_t wq_waitlock;
+extern mutex_t wq_waitlock;
 extern pthread_cond_t wq_waitcond;
 
 // HEARTBEATQUEUE
