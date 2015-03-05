@@ -27,7 +27,7 @@
  *  and ckpool only verifies authorise responses
  *  Thus we can queue all messages:
  *	workinfo, shares, shareerror, ageworkinfo, poolstats, userstats
- *	and block
+ *	and blocks
  *  with an ok.queued reply to ckpool, to be processed after the reload
  *  completes and just process authorise messages immediately while the
  *  reload runs
@@ -61,7 +61,7 @@
  *  it would break the synchronisation and could cause DB problems, so
  *  ckdb aborting and needing a complete restart resolves it
  * The users table, required for the authorise messages, is always updated
- *  immediately and is not affected by ckpool messages until we
+ *  immediately
  */
 
 /* Reload data needed
@@ -92,17 +92,17 @@
  *	already exist
  *  DB+RAM blocks: resolved by workinfo - any unsaved blocks (if any)
  *	will be after the last DB workinfo
- *  DB+RAM accountbalance (TODO): resolved by shares/workinfo/blocks
  *  RAM workerstatus: all except last_idle are set at the end of the
  *	CCL reload
  *	Code currently doesn't use last_idle
+ *  RAM accountbalance: TODO: created as data is loaded
  *
  *  idcontrol: only userid reuse is critical and the user is added
  *	immeditately to the DB before replying to the add message
  *
  *  Tables that are/will be written straight to the DB, so are OK:
  *	users, useraccounts, paymentaddresses, payments,
- *	accountadjustment, optioncontrol, miningpayouts,
+ *	accountadjustment, optioncontrol, miningpayouts, payouts,
  *	eventlog, workmarkers, markersummary
  *
  * The code deals with the issue of 'now' when reloading by:
@@ -329,6 +329,7 @@ K_STORE *workers_store;
 
 // PAYMENTADDRESSES
 K_TREE *paymentaddresses_root;
+K_TREE *paymentaddresses_create_root;
 K_LIST *paymentaddresses_free;
 K_STORE *paymentaddresses_store;
 
@@ -337,7 +338,6 @@ K_TREE *payments_root;
 K_LIST *payments_free;
 K_STORE *payments_store;
 
-/* unused yet
 // ACCOUNTBALANCE
 K_TREE *accountbalance_root;
 K_LIST *accountbalance_free;
@@ -347,7 +347,6 @@ K_STORE *accountbalance_store;
 K_TREE *accountadjustment_root;
 K_LIST *accountadjustment_free;
 K_STORE *accountadjustment_store;
-*/
 
 // IDCONTROL
 // These are only used for db access - not stored in memory
@@ -404,6 +403,13 @@ K_STORE *blocks_store;
 K_TREE *miningpayouts_root;
 K_LIST *miningpayouts_free;
 K_STORE *miningpayouts_store;
+
+// PAYOUTS
+K_TREE *payouts_root;
+K_TREE *payouts_id_root;
+K_LIST *payouts_free;
+K_STORE *payouts_store;
+cklock_t process_pplns_lock;
 
 /*
 // EVENTLOG
@@ -742,6 +748,10 @@ static bool getdata3()
 			goto sukamudai;
 		if (!(ok = payments_fill(conn)) || everyone_die)
 			goto sukamudai;
+		if (!(ok = miningpayouts_fill(conn)) || everyone_die)
+			goto sukamudai;
+		if (!(ok = payouts_fill(conn)) || everyone_die)
+			goto sukamudai;
 	}
 	if (!(ok = workinfo_fill(conn)) || everyone_die)
 		goto sukamudai;
@@ -953,12 +963,18 @@ static void alloc_storage()
 					   LIMIT_PAYMENTADDRESSES, true);
 	paymentaddresses_store = k_new_store(paymentaddresses_free);
 	paymentaddresses_root = new_ktree();
+	paymentaddresses_create_root = new_ktree();
 	paymentaddresses_free->dsp_func = dsp_paymentaddresses;
 
 	payments_free = k_new_list("Payments", sizeof(PAYMENTS),
 					ALLOC_PAYMENTS, LIMIT_PAYMENTS, true);
 	payments_store = k_new_store(payments_free);
 	payments_root = new_ktree();
+
+	accountbalance_free = k_new_list("AccountBalance", sizeof(ACCOUNTBALANCE),
+					ALLOC_ACCOUNTBALANCE, LIMIT_ACCOUNTBALANCE, true);
+	accountbalance_store = k_new_store(accountbalance_free);
+	accountbalance_root = new_ktree();
 
 	idcontrol_free = k_new_list("IDControl", sizeof(IDCONTROL),
 					ALLOC_IDCONTROL, LIMIT_IDCONTROL, true);
@@ -998,6 +1014,12 @@ static void alloc_storage()
 					ALLOC_MININGPAYOUTS, LIMIT_MININGPAYOUTS, true);
 	miningpayouts_store = k_new_store(miningpayouts_free);
 	miningpayouts_root = new_ktree();
+
+	payouts_free = k_new_list("Payouts", sizeof(PAYOUTS),
+					ALLOC_PAYOUTS, LIMIT_PAYOUTS, true);
+	payouts_store = k_new_store(payouts_free);
+	payouts_root = new_ktree();
+	payouts_id_root = new_ktree();
 
 	auths_free = k_new_list("Auths", sizeof(AUTHS),
 					ALLOC_AUTHS, LIMIT_AUTHS, true);
@@ -1110,6 +1132,10 @@ static void dealloc_storage()
 
 	FREE_ALL(poolstats);
 	FREE_ALL(auths);
+
+	FREE_TREE(payouts_id);
+	FREE_ALL(payouts);
+
 	FREE_ALL(miningpayouts);
 	FREE_ALL(blocks);
 
@@ -1131,7 +1157,10 @@ static void dealloc_storage()
 	FREE_LIST_DATA(workinfo);
 
 	FREE_LISTS(idcontrol);
+	FREE_ALL(accountbalance);
 	FREE_ALL(payments);
+
+	FREE_TREE(paymentaddresses_create);
 	FREE_ALL(paymentaddresses);
 	FREE_ALL(workers);
 
@@ -1534,6 +1563,20 @@ static void check_blocks()
 	btc_blockstatus(blocks);
 }
 
+static void pplns_block(BLOCKS *blocks)
+{
+	if (sharesummary_marks_limit) {
+		LOGEMERG("%s() sharesummary marks limit, block %"PRId32" payout skipped",
+			 __func__, blocks->height);
+		return;
+	}
+
+	// Give it a sec after the block summarisation
+	sleep(1);
+
+	process_pplns(blocks->height, blocks->blockhash, NULL);
+}
+
 static void summarise_blocks()
 {
 	K_ITEM *b_item, *b_prev, *wi_item, ss_look, *ss_item;
@@ -1733,15 +1776,13 @@ static void summarise_blocks()
 			   "%0.f/%.0f/%.0f/%.0f/%"PRId64,
 			   __func__, blocks->height,
 			   diffacc, diffinv, shareacc, shareinv, elapsed);
+
+		// Now the summarisation is confirmed, generate the payout data
+		pplns_block(blocks);
 	} else {
 		LOGERR("%s() block %d, failed to confirm stats",
 			__func__, blocks->height);
 	}
-}
-
-static void summarise_poolstats()
-{
-// TODO
 }
 
 static void *summariser(__maybe_unused void *arg)
@@ -1752,7 +1793,7 @@ static void *summariser(__maybe_unused void *arg)
 
 	rename_proc("db_summariser");
 
-	while (!everyone_die && !db_load_complete)
+	while (!everyone_die && !startup_complete)
 		cksleep_ms(42);
 
 	summariser_using_data = true;
@@ -1764,12 +1805,8 @@ static void *summariser(__maybe_unused void *arg)
 		}
 		if (everyone_die)
 			break;
-		else {
-			if (startup_complete)
-				check_blocks();
-			if (!everyone_die)
-				summarise_blocks();
-		}
+		else
+			check_blocks();
 
 		for (i = 0; i < 4; i++) {
 			if (!everyone_die)
@@ -1778,7 +1815,7 @@ static void *summariser(__maybe_unused void *arg)
 		if (everyone_die)
 			break;
 		else
-			summarise_poolstats();
+			summarise_blocks();
 
 		for (i = 0; i < 4; i++) {
 			if (!everyone_die)
@@ -2624,6 +2661,8 @@ static void *socketer(__maybe_unused void *arg)
 					case CMD_WORKERS:
 					case CMD_PAYMENTS:
 					case CMD_PPLNS:
+					case CMD_PPLNS2:
+					case CMD_PAYOUTS:
 					case CMD_DSP:
 					case CMD_BLOCKSTATUS:
 						if (!startup_complete) {
@@ -2841,6 +2880,8 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_DSP:
 			case CMD_STATS:
 			case CMD_PPLNS:
+			case CMD_PPLNS2:
+			case CMD_PAYOUTS:
 			case CMD_USERSTATUS:
 			case CMD_MARKS:
 				LOGERR("%s() Message line %"PRIu64" '%s' - invalid - ignored",
@@ -4062,6 +4103,7 @@ int main(int argc, char **argv)
 	ckp.main.processname = strdup("main");
 
 	cklock_init(&last_lock);
+	cklock_init(&process_pplns_lock);
 
 	if (confirm_sharesummary) {
 		// TODO: add a system lock to stop running 2 at once?

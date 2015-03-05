@@ -8,6 +8,7 @@
  */
 
 #include "ckdb.h"
+#include <math.h>
 
 // Data free functions (added here as needed)
 void free_workinfo_data(K_ITEM *item)
@@ -1208,6 +1209,21 @@ cmp_t cmp_paymentaddresses(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
+// order by userid asc,createdate asc,payaddress asc
+cmp_t cmp_payaddr_create(K_ITEM *a, K_ITEM *b)
+{
+	PAYMENTADDRESSES *pa, *pb;
+	DATA_PAYMENTADDRESSES(pa, a);
+	DATA_PAYMENTADDRESSES(pb, b);
+	cmp_t c = CMP_BIGINT(pa->userid, pb->userid);
+	if (c == 0) {
+		c = CMP_TV(pa->createdate, pb->createdate);
+		if (c == 0)
+			c = CMP_STR(pa->payaddress, pb->payaddress);
+	}
+	return c;
+}
+
 /* Find the last CURRENT paymentaddresses for the given userid
  * N.B. there can be more than one
  *  any more will be prev_in_ktree(ctx): CURRENT and userid matches */
@@ -1227,6 +1243,32 @@ K_ITEM *find_paymentaddresses(int64_t userid, K_TREE_CTX *ctx)
 	if (item) {
 		DATA_PAYMENTADDRESSES(pa, item);
 		if (pa->userid == userid && CURRENT(&(pa->expirydate)))
+			return item;
+		else
+			return NULL;
+	} else
+		return NULL;
+}
+
+/* Find the first paymentaddresses for the given userid
+ *  sorted by userid+createdate+... */
+K_ITEM *find_paymentaddresses_create(int64_t userid, K_TREE_CTX *ctx)
+{
+	PAYMENTADDRESSES paymentaddresses, *pa;
+	K_ITEM look, *item;
+
+	paymentaddresses.userid = userid;
+	paymentaddresses.createdate.tv_sec = 0;
+	paymentaddresses.createdate.tv_usec = 0;
+	paymentaddresses.payaddress[0] = '\0';
+
+	INIT_PAYMENTADDRESSES(&look);
+	look.data = (void *)(&paymentaddresses);
+	item = find_after_in_ktree(paymentaddresses_create_root, &look,
+				    cmp_payaddr_create, ctx);
+	if (item) {
+		DATA_PAYMENTADDRESSES(pa, item);
+		if (pa->userid == userid)
 			return item;
 		else
 			return NULL;
@@ -1254,7 +1296,10 @@ K_ITEM *find_one_payaddress(int64_t userid, char *payaddress, K_TREE_CTX *ctx)
  *  that has EVER been seen before
  * However, also, cmd_userset() that uses it, effectively ensures
  *  that 2 standard users, that mine to a username rather than
- *  a bitcoin address, cannot ever use the same bitcoin address */
+ *  a bitcoin address, cannot ever use the same bitcoin address
+ * N.B. this is faster than a bitcoind check, but still slow
+ *  It needs a tree based on payaddress to speed it up
+ * N.B.2 paymentadresses_root doesn't contain addrauth usernames */
 K_ITEM *find_any_payaddress(char *payaddress)
 {
 	PAYMENTADDRESSES *pa;
@@ -1271,7 +1316,7 @@ K_ITEM *find_any_payaddress(char *payaddress)
 	return NULL;
 }
 
-// order by userid asc,paydate asc,payaddress asc,expirydate desc
+// order by userid asc,payoutid asc,subname asc,expirydate desc
 cmp_t cmp_payments(K_ITEM *a, K_ITEM *b)
 {
 	PAYMENTS *pa, *pb;
@@ -1279,14 +1324,95 @@ cmp_t cmp_payments(K_ITEM *a, K_ITEM *b)
 	DATA_PAYMENTS(pb, b);
 	cmp_t c = CMP_BIGINT(pa->userid, pb->userid);
 	if (c == 0) {
-		c = CMP_TV(pa->paydate, pb->paydate);
+		c = CMP_BIGINT(pa->payoutid, pb->payoutid);
 		if (c == 0) {
-			c = CMP_STR(pa->payaddress, pb->payaddress);
+			c = CMP_STR(pa->subname, pb->subname);
 			if (c == 0)
 				c = CMP_TV(pb->expirydate, pa->expirydate);
 		}
 	}
 	return c;
+}
+
+K_ITEM *find_payments(int64_t payoutid, int64_t userid, char *subname)
+{
+	PAYMENTS payments;
+	K_TREE_CTX ctx[1];
+	K_ITEM look;
+
+	payments.payoutid = payoutid;
+	payments.userid = userid;
+	STRNCPY(payments.subname, subname);
+	payments.expirydate.tv_sec = default_expiry.tv_sec;
+	payments.expirydate.tv_usec = default_expiry.tv_usec;
+
+	INIT_PAYMENTS(&look);
+	look.data = (void *)(&payments);
+	return find_in_ktree(payments_root, &look, cmp_payments, ctx);
+}
+
+K_ITEM *find_first_payments(int64_t userid, K_TREE_CTX *ctx)
+{
+	PAYMENTS payments;
+	K_TREE_CTX ctx0[1];
+	K_ITEM look, *item;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	bzero(&payments, sizeof(payments));
+	payments.userid = userid;
+
+	INIT_PAYMENTS(&look);
+	look.data = (void *)(&payments);
+	// userid needs to be checked if item returned != NULL
+	item = find_after_in_ktree(payments_root, &look, cmp_payments, ctx);
+	return item;
+}
+
+K_ITEM *find_first_paypayid(int64_t userid, int64_t payoutid, K_TREE_CTX *ctx)
+{
+	PAYMENTS payments;
+	K_TREE_CTX ctx0[1];
+	K_ITEM look, *item;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	payments.userid = userid;
+	payments.payoutid = payoutid;
+	payments.subname[0] = '\0';
+
+	INIT_PAYMENTS(&look);
+	look.data = (void *)(&payments);
+	// userid+payoutid needs to be checked if item returned != NULL
+	item = find_after_in_ktree(payments_root, &look, cmp_payments, ctx);
+	return item;
+}
+
+// order by userid asc
+cmp_t cmp_accountbalance(K_ITEM *a, K_ITEM *b)
+{
+	PAYMENTS *aba, *abb;
+	DATA_PAYMENTS(aba, a);
+	DATA_PAYMENTS(abb, b);
+	return CMP_BIGINT(aba->userid, abb->userid);
+}
+
+K_ITEM *find_accountbalance(int64_t userid)
+{
+	ACCOUNTBALANCE accountbalance;
+	K_TREE_CTX ctx[1];
+	K_ITEM look, *item;
+
+	accountbalance.userid = userid;
+
+	INIT_ACCOUNTBALANCE(&look);
+	look.data = (void *)(&accountbalance);
+	K_RLOCK(accountbalance_free);
+	item = find_in_ktree(accountbalance_root, &look, cmp_accountbalance, ctx);
+	K_RUNLOCK(accountbalance_free);
+	return item;
 }
 
 // order by optionname asc,activationdate asc,activationheight asc,expirydate desc
@@ -1308,16 +1434,16 @@ cmp_t cmp_optioncontrol(K_ITEM *a, K_ITEM *b)
 }
 
 // Must be R or W locked before call
-K_ITEM *find_optioncontrol(char *optionname, tv_t *now)
+K_ITEM *find_optioncontrol(char *optionname, tv_t *now, int32_t height)
 {
 	OPTIONCONTROL optioncontrol, *oc, *ocbest;
 	K_TREE_CTX ctx[1];
 	K_ITEM look, *item, *best;
 
-	/* Step through all records having optionaname and check:
+	/* Step through all records having optionname and check:
 	 * 1) activationdate is <= now
 	 *  and
-	 * 2) height <= current
+	 * 2) height <= specified height (pool.height = current)
 	 * Remember the active record with the newest activationdate
 	 * If two records have the same activation date, then
 	 *  remember the active record with the highest height
@@ -1350,7 +1476,7 @@ K_ITEM *find_optioncontrol(char *optionname, tv_t *now)
 
 		// Is oc active?
 		if (CURRENT(&(oc->expirydate)) &&
-		    oc->activationheight <= pool.height &&
+		    oc->activationheight <= height &&
 		    tv_newer_eq(&(oc->activationdate), now)) {
 			// Is oc newer than ocbest?
 			if (!ocbest ||
@@ -1972,11 +2098,14 @@ cmp_t cmp_blocks(K_ITEM *a, K_ITEM *b)
  * or add new ones as required here */
 
 // Must be R or W locked before call - gets current status (default_expiry)
-K_ITEM *find_blocks(int32_t height, char *blockhash)
+K_ITEM *find_blocks(int32_t height, char *blockhash, K_TREE_CTX *ctx)
 {
 	BLOCKS blocks;
-	K_TREE_CTX ctx[1];
+	K_TREE_CTX ctx0[1];
 	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
 
 	blocks.height = height;
 	STRNCPY(blocks.blockhash, blockhash);
@@ -2221,20 +2350,930 @@ void set_block_share_counters()
 	LOGWARNING("%s(): Update block counters complete", __func__);
 }
 
-/* order by height asc,userid asc,expirydate asc
+/* order by payoutid asc,userid asc,expirydate asc
  * i.e. only one payout amount per block per user */
 cmp_t cmp_miningpayouts(K_ITEM *a, K_ITEM *b)
 {
 	MININGPAYOUTS *ma, *mb;
 	DATA_MININGPAYOUTS(ma, a);
 	DATA_MININGPAYOUTS(mb, b);
-	cmp_t c = CMP_INT(ma->height, mb->height);
+	cmp_t c = CMP_BIGINT(ma->payoutid, mb->payoutid);
 	if (c == 0) {
 		c = CMP_BIGINT(ma->userid, mb->userid);
 		if (c == 0)
 			c = CMP_TV(ma->expirydate, mb->expirydate);
 	}
 	return c;
+}
+
+K_ITEM *find_miningpayouts(int64_t payoutid, int64_t userid)
+{
+	MININGPAYOUTS miningpayouts;
+	K_TREE_CTX ctx[1];
+	K_ITEM look;
+
+	miningpayouts.payoutid = payoutid;
+	miningpayouts.userid = userid;
+	miningpayouts.expirydate.tv_sec = default_expiry.tv_sec;
+	miningpayouts.expirydate.tv_usec = default_expiry.tv_usec;
+
+	INIT_MININGPAYOUTS(&look);
+	look.data = (void *)(&miningpayouts);
+	return find_in_ktree(miningpayouts_root, &look, cmp_miningpayouts, ctx);
+}
+
+K_ITEM *first_miningpayouts(int64_t payoutid, K_TREE_CTX *ctx)
+{
+	MININGPAYOUTS miningpayouts;
+	K_TREE_CTX ctx0[1];
+	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	miningpayouts.payoutid = payoutid;
+	miningpayouts.userid = 0;
+	miningpayouts.expirydate.tv_sec = 0;
+	miningpayouts.expirydate.tv_usec = 0;
+
+	INIT_MININGPAYOUTS(&look);
+	look.data = (void *)(&miningpayouts);
+	return find_after_in_ktree(miningpayouts_root, &look, cmp_miningpayouts, ctx);
+}
+
+/* Processing payouts uses it's own tree of miningpayouts keyed only on userid
+ *  that is stored in the miningpayouts tree/db when the calculations are done
+ * cmp_mu() and upd_add_mu() are used for that */
+
+// order by userid asc
+cmp_t cmp_mu(K_ITEM *a, K_ITEM *b)
+{
+	MININGPAYOUTS *ma, *mb;
+	DATA_MININGPAYOUTS(ma, a);
+	DATA_MININGPAYOUTS(mb, b);
+	return CMP_BIGINT(ma->userid, mb->userid);
+}
+
+// update the userid record or add a new one if the userid isn't already present
+K_TREE *upd_add_mu(K_TREE *mu_root, K_STORE *mu_store, int64_t userid,
+		   double diffacc)
+{
+	MININGPAYOUTS lookminingpayouts, *miningpayouts;
+	K_ITEM look, *mu_item;
+	K_TREE_CTX ctx[1];
+
+	lookminingpayouts.userid = userid;
+	INIT_MININGPAYOUTS(&look);
+	look.data = (void *)(&lookminingpayouts);
+	// No locking required since it's not a shared tree or store
+	mu_item = find_in_ktree(mu_root, &look, cmp_mu, ctx);
+	if (mu_item) {
+		DATA_MININGPAYOUTS(miningpayouts, mu_item);
+		miningpayouts->diffacc += diffacc;
+	} else {
+		K_WLOCK(mu_store);
+		mu_item = k_unlink_head(miningpayouts_free);
+		DATA_MININGPAYOUTS(miningpayouts, mu_item);
+		miningpayouts->userid = userid;
+		miningpayouts->diffacc = diffacc;
+		mu_root = add_to_ktree(mu_root, mu_item, cmp_mu);
+		k_add_head(mu_store, mu_item);
+		K_WUNLOCK(mu_store);
+	}
+
+	return mu_root;
+}
+
+// order by height asc,blockhash asc,expirydate asc
+cmp_t cmp_payouts(K_ITEM *a, K_ITEM *b)
+{
+	PAYOUTS *pa, *pb;
+	DATA_PAYOUTS(pa, a);
+	DATA_PAYOUTS(pb, b);
+	cmp_t c = CMP_INT(pa->height, pb->height);
+	if (c == 0) {
+		c = CMP_STR(pa->blockhash, pb->blockhash);
+		if (c == 0)
+			c = CMP_TV(pa->expirydate, pb->expirydate);
+	}
+	return c;
+}
+
+// order by payoutid asc,expirydate asc
+cmp_t cmp_payouts_id(K_ITEM *a, K_ITEM *b)
+{
+	PAYOUTS *pa, *pb;
+	DATA_PAYOUTS(pa, a);
+	DATA_PAYOUTS(pb, b);
+	cmp_t c = CMP_BIGINT(pa->payoutid, pb->payoutid);
+	if (c == 0)
+		c = CMP_TV(pa->expirydate, pb->expirydate);
+	return c;
+}
+
+K_ITEM *find_payouts(int32_t height, char *blockhash)
+{
+	PAYOUTS payouts;
+	K_TREE_CTX ctx[1];
+	K_ITEM look;
+
+	payouts.height = height;
+	STRNCPY(payouts.blockhash, blockhash);
+	payouts.expirydate.tv_sec = default_expiry.tv_sec;
+	payouts.expirydate.tv_usec = default_expiry.tv_usec;
+
+	INIT_PAYOUTS(&look);
+	look.data = (void *)(&payouts);
+	return find_in_ktree(payouts_root, &look, cmp_payouts, ctx);
+}
+
+// Last block payout calculated
+K_ITEM *find_last_payouts()
+{
+	K_TREE_CTX ctx[1];
+	PAYOUTS *payouts;
+	K_ITEM *p_item;
+
+	p_item = last_in_ktree(payouts_root, ctx);
+	while (p_item) {
+		DATA_PAYOUTS(payouts, p_item);
+		if (CURRENT(&(payouts->expirydate)))
+			return p_item;
+		p_item = prev_in_ktree(ctx);
+	}
+	return p_item;
+}
+
+K_ITEM *find_payoutid(int64_t payoutid)
+{
+	PAYOUTS payouts;
+	K_TREE_CTX ctx[1];
+	K_ITEM look;
+
+	payouts.payoutid = payoutid;
+	payouts.expirydate.tv_sec = default_expiry.tv_sec;
+	payouts.expirydate.tv_usec = default_expiry.tv_usec;
+
+	INIT_PAYOUTS(&look);
+	look.data = (void *)(&payouts);
+	return find_in_ktree(payouts_id_root, &look, cmp_payouts_id, ctx);
+}
+
+/* Find the block_workinfoid of the block requested
+    then add all it's diffacc shares
+    then keep stepping back shares until diffacc_total matches or exceeds
+     the number required (diff_want) - this is begin_workinfoid
+     (also summarising diffacc per user)
+    then keep stepping back until we complete the current begin_workinfoid
+     (also summarising diffacc per user)
+   While we are still below diff_want
+    find each next workmarker and add on the full set of worksummary
+     diffacc shares (also summarising diffacc per user)
+   This will give us the total number of diff1 shares (diffacc_total)
+    to use for the payment calculations
+   The value of diff_want defaults to the block's network difficulty
+    (block_ndiff) but can be changed with diff_times and diff_add to:
+	block_ndiff * diff_times + diff_add
+    they are stored in the optioncontrol table and thus can use the
+    block number to change their values over time
+    N.B. diff_times and diff_add can be zero, positive or negative
+   The pplns_elapsed time of the shares is from the createdate of the
+    begin_workinfoid that has shares accounted to the total,
+    up to the createdate of the last share
+   The user average hashrate would be:
+	diffacc_user * 2^32 / pplns_elapsed
+   PPLNS fraction of the payout would be:
+	diffacc_user / diffacc_total
+
+   N.B. 'begin' means the oldest back in time and 'end' means the newest
+	'end' should usually be the info of the found block with the pplns
+	data going back in time to 'begin'
+
+ The data processing procedure is to:
+  create a separate tree/store of miningpayouts during the diff_used
+   calculation,
+  store the payout in the db with a 'processing' status,
+  create a seperate store of payments per miningpayout that are stored
+   in the db,
+  store each mininging payout in the db after storing the payments for the
+   given miningpayout,
+  commit that all and if it succeeds then update the ram tables for all
+   of the above
+  then update the payout status, in the db and ram, to 'generated'
+
+ TODO: recheck the payout if it already exists?
+
+ N.B. process_pplns() is only automatically triggered once after the block
+	summarisation is verified, so it can always report all errors
+*/
+bool process_pplns(int32_t height, char *blockhash, tv_t *addr_cd)
+{
+	K_TREE_CTX b_ctx[1], ss_ctx[1], wm_ctx[1], ms_ctx[1], pay_ctx[1], mu_ctx[1];
+	bool allow_aged = true, conned = false, begun = false;
+	bool countbacklimit, ok = false;
+	PGconn *conn = NULL;
+	MININGPAYOUTS *miningpayouts;
+	OPTIONCONTROL *optioncontrol;
+	PAYMENTS *payments;
+	WORKINFO *workinfo;
+	PAYOUTS *payouts, *payouts2;
+	BLOCKS *blocks, *blocks2;
+	USERS *users;
+	K_ITEM *p_item, *old_p_item, *b_item, *b2_item, *w_item, *wb_item;
+	K_ITEM *u_item, *mu_item, *oc_item, *pay_item, *p2_item, *old_p2_item;
+	SHARESUMMARY looksharesummary, *sharesummary;
+	WORKMARKERS lookworkmarkers, *workmarkers;
+	MARKERSUMMARY lookmarkersummary, *markersummary;
+	K_ITEM ss_look, *ss_item, wm_look, *wm_item, ms_look, *ms_item;
+	int64_t amount, used, d64, g64, begin_workinfoid, end_workinfoid;
+	int64_t total_share_count, acc_share_count;
+	int64_t ss_count, wm_count, ms_count;
+	K_STORE *mu_store = NULL, *pay_store = NULL, *addr_store = NULL;
+	K_TREE *mu_root = NULL;
+	int usercount;
+	double ndiff, total_diff, diff_want, elapsed;
+	char ndiffbin[TXT_SML+1];
+	double diff_times, diff_add;
+	char cd_buf[CDATE_BUFSIZ];
+	tv_t end_tv = { 0L, 0L };
+	tv_t begin_tv, now;
+	char buf[1024];
+
+	/*
+	 * Only allow one process_pplns() at a time
+	 * This ensures that a payout can't be processed twice at the same time
+	 *  and simply avoids the problems that would cause without much more
+	 *  strict locking than is used already
+	 */
+	ck_wlock(&process_pplns_lock);
+
+	setnow(&now);
+
+	K_RLOCK(payouts_free);
+	p_item = find_payouts(height, blockhash);
+	K_RUNLOCK(payouts_free);
+	// TODO: regenerate miningpayouts and payments if required or missing?
+	if (p_item) {
+		DATA_PAYOUTS(payouts, p_item);
+		tv_to_buf(&(payouts->createdate), cd_buf, sizeof(cd_buf));
+		LOGERR("%s(): payout for block %"PRId32"/%s already exists"
+			"%"PRId64"/%"PRId64"/%"PRId64"/%s",
+			__func__, height, blockhash, payouts->payoutid,
+			payouts->workinfoidstart, payouts->workinfoidend,
+			cd_buf);
+		goto oku;
+	}
+
+	// Check the block status
+	K_RLOCK(blocks_free);
+	b_item = find_blocks(height, blockhash, b_ctx);
+	if (!b_item) {
+		K_RUNLOCK(blocks_free);
+		LOGERR("%s(): no block %"PRId32"/%s for payout",
+			__func__, height, blockhash);
+		goto oku;
+	}
+	DATA_BLOCKS(blocks, b_item);
+	b2_item = b_item;
+	DATA_BLOCKS(blocks2, b2_item);
+	while (b2_item && blocks2->height == height &&
+	       strcmp(blocks2->blockhash, blockhash) == 0) {
+		if (blocks2->confirmed[0] == BLOCKS_NEW) {
+			copy_tv(&end_tv, &(blocks2->createdate));
+			if (!addr_cd)
+				addr_cd = &(blocks2->createdate);
+			break;
+		}
+		b2_item = next_in_ktree(b_ctx);
+		DATA_BLOCKS_NULL(blocks2, b2_item);
+	}
+	K_RUNLOCK(blocks_free);
+	// If addr_cd was null it should've been set to the block NEW createdate
+	if (!addr_cd || end_tv.tv_sec == 0) {
+		LOGEMERG("%s(): missing %s record for block %"PRId32
+			 "/%"PRId64"/%s/%s/%"PRId64,
+			 __func__, blocks_confirmed(BLOCKS_NEW_STR),
+			 blocks->height, blocks->workinfoid,
+			 blocks->workername, blocks->confirmed,
+			 blocks->reward);
+		goto oku;
+	}
+
+	LOGDEBUG("%s(): block %"PRId32"/%"PRId64"/%s/%s/%"PRId64,
+		 __func__, blocks->height, blocks->workinfoid,
+		 blocks->workername, blocks->confirmed, blocks->reward);
+
+	switch (blocks->confirmed[0]) {
+		case BLOCKS_NEW:
+		case BLOCKS_ORPHAN:
+			LOGERR("%s(): can't process block %"PRId32"/%"
+				PRId64"/%s/%"PRId64" status: %s/%s",
+				__func__, blocks->height, blocks->workinfoid,
+				blocks->workername, blocks->reward,
+				blocks->confirmed,
+				blocks_confirmed(blocks->confirmed));
+			goto oku;
+	}
+	w_item = find_workinfo(blocks->workinfoid, NULL);
+	if (!w_item) {
+		LOGEMERG("%s(): missing block workinfoid %"PRId32"/%"PRId64
+			 "/%s/%s/%"PRId64,
+			 __func__, blocks->height, blocks->workinfoid,
+			 blocks->workername, blocks->confirmed,
+			 blocks->reward);
+		goto oku;
+	}
+	DATA_WORKINFO(workinfo, w_item);
+
+	// Get the PPLNS N values
+	K_RLOCK(optioncontrol_free);
+	oc_item = find_optioncontrol(PPLNSDIFFTIMES, &(blocks->createdate),
+				     height);
+	K_RUNLOCK(optioncontrol_free);
+	if (!oc_item) {
+		tv_to_buf(&(blocks->createdate), cd_buf, sizeof(cd_buf));
+		LOGEMERG("%s(): missing optioncontrol %s (%s/%"PRId32")",
+			 __func__, PPLNSDIFFTIMES, cd_buf, blocks->height);
+		goto oku;
+	}
+	DATA_OPTIONCONTROL(optioncontrol, oc_item);
+	diff_times = atof(optioncontrol->optionvalue);
+
+	K_RLOCK(optioncontrol_free);
+	oc_item = find_optioncontrol(PPLNSDIFFADD, &(blocks->createdate),
+				     height);
+	K_RUNLOCK(optioncontrol_free);
+	if (!oc_item) {
+		tv_to_buf(&(blocks->createdate), cd_buf, sizeof(cd_buf));
+		LOGEMERG("%s(): missing optioncontrol %s (%s/%"PRId32")",
+			 __func__, PPLNSDIFFADD, cd_buf, blocks->height);
+		goto oku;
+	}
+	DATA_OPTIONCONTROL(optioncontrol, oc_item);
+	diff_add = atof(optioncontrol->optionvalue);
+
+	hex2bin(ndiffbin, workinfo->bits, 4);
+	ndiff = diff_from_nbits(ndiffbin);
+	diff_want = ndiff * diff_times + diff_add;
+	if (diff_want < 1.0) {
+		LOGERR("%s(): invalid diff_want %.1f, block %"PRId32"/%"
+			PRId64"/%s/%s/%"PRId64,
+			__func__, diff_want, blocks->height, blocks->workinfoid,
+			blocks->workername, blocks->confirmed, blocks->reward);
+		goto oku;
+	}
+
+	// Check for the hard coded limit
+	if (blocks->height > FIVExSTT)
+		countbacklimit = true;
+	else
+		countbacklimit = false;
+	LOGDEBUG("%s(): ndiff %.1f limit %c",
+		 __func__, ndiff, countbacklimit ? 'Y' : 'N');
+
+	// add up all the shares ...
+	begin_workinfoid = end_workinfoid = 0;
+	total_share_count = acc_share_count = 0;
+	total_diff = 0;
+	ss_count = wm_count = ms_count = 0;
+
+	mu_store = k_new_store(miningpayouts_free);
+	mu_root = new_ktree();
+
+	looksharesummary.workinfoid = blocks->workinfoid;
+	looksharesummary.userid = MAXID;
+	looksharesummary.workername = EMPTY;
+	INIT_SHARESUMMARY(&ss_look);
+	ss_look.data = (void *)(&looksharesummary);
+	K_RLOCK(sharesummary_free);
+	K_RLOCK(workmarkers_free);
+	K_RLOCK(markersummary_free);
+	ss_item = find_before_in_ktree(sharesummary_workinfoid_root, &ss_look,
+					cmp_sharesummary_workinfoid, ss_ctx);
+	DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
+	if (ss_item)
+		end_workinfoid = sharesummary->workinfoid;
+	/* Add up all sharesummaries until >= diff_want
+	 * also record the latest lastshare - that will be the end pplns time
+	 *  which will be >= blocks->createdate */
+	while (total_diff < diff_want && ss_item) {
+		switch (sharesummary->complete[0]) {
+			case SUMMARY_CONFIRM:
+				break;
+			case SUMMARY_COMPLETE:
+				if (allow_aged)
+					break;
+			default:
+				// Release ASAP
+				K_RUNLOCK(markersummary_free);
+				K_RUNLOCK(workmarkers_free);
+				K_RUNLOCK(sharesummary_free);
+				LOGERR("%s(): sharesummary not ready %"
+					PRId64"/%s/%"PRId64"/%s. allow_aged=%s",
+					__func__, sharesummary->userid,
+					sharesummary->workername,
+					sharesummary->workinfoid,
+					sharesummary->complete,
+					allow_aged ? "true" : "false");
+				goto shazbot;
+		}
+
+		// Stop before FIVExWID if necessary
+		if (countbacklimit && sharesummary->workinfoid <= FIVExWID)
+			break;
+
+		ss_count++;
+		total_share_count += sharesummary->sharecount;
+		acc_share_count += sharesummary->shareacc;
+		total_diff += sharesummary->diffacc;
+		begin_workinfoid = sharesummary->workinfoid;
+		// TODO: add lastshareacc to sharesummary and markersummary
+		if (sharesummary->shareacc > 0 &&
+		    tv_newer(&end_tv, &(sharesummary->lastshare)))
+			copy_tv(&end_tv, &(sharesummary->lastshare));
+		mu_root = upd_add_mu(mu_root, mu_store,
+				     sharesummary->userid,
+				     sharesummary->diffacc);
+		ss_item = prev_in_ktree(ss_ctx);
+		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
+	}
+
+	// Include the rest of the sharesummaries matching begin_workinfoid
+	while (ss_item && sharesummary->workinfoid == begin_workinfoid) {
+		switch (sharesummary->complete[0]) {
+			case SUMMARY_CONFIRM:
+				break;
+			case SUMMARY_COMPLETE:
+				if (allow_aged)
+					break;
+			default:
+				// Release ASAP
+				K_RUNLOCK(markersummary_free);
+				K_RUNLOCK(workmarkers_free);
+				K_RUNLOCK(sharesummary_free);
+				LOGERR("%s(): sharesummary2 not ready %"
+					PRId64"/%s/%"PRId64"/%s. allow_aged=%s",
+					__func__, sharesummary->userid,
+					sharesummary->workername,
+					sharesummary->workinfoid,
+					sharesummary->complete,
+					allow_aged ? "true" : "false");
+				goto shazbot;
+		}
+		ss_count++;
+		total_share_count += sharesummary->sharecount;
+		acc_share_count += sharesummary->shareacc;
+		total_diff += sharesummary->diffacc;
+		// TODO: add lastshareacc to sharesummary and markersummary
+		if (sharesummary->shareacc > 0 &&
+		    tv_newer(&end_tv, &(sharesummary->lastshare)))
+			copy_tv(&end_tv, &(sharesummary->lastshare));
+		mu_root = upd_add_mu(mu_root, mu_store,
+				     sharesummary->userid,
+				     sharesummary->diffacc);
+		ss_item = prev_in_ktree(ss_ctx);
+		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
+	}
+	LOGDEBUG("%s(): ss %"PRId64" total %.1f want %.1f",
+		 __func__, ss_count, total_diff, diff_want);
+
+	/* If we haven't met or exceeded the required N,
+	 * move on to the markersummaries ... this is now mandatory */
+	if (total_diff < diff_want) {
+		lookworkmarkers.expirydate.tv_sec = default_expiry.tv_sec;
+		lookworkmarkers.expirydate.tv_usec = default_expiry.tv_usec;
+		if (begin_workinfoid != 0)
+			lookworkmarkers.workinfoidend = begin_workinfoid;
+		else
+			lookworkmarkers.workinfoidend = blocks->workinfoid + 1;
+		INIT_WORKMARKERS(&wm_look);
+		wm_look.data = (void *)(&lookworkmarkers);
+		wm_item = find_before_in_ktree(workmarkers_workinfoid_root, &wm_look,
+					       cmp_workmarkers_workinfoid, wm_ctx);
+		DATA_WORKMARKERS_NULL(workmarkers, wm_item);
+		LOGDEBUG("%s(): workmarkers < %"PRId64, __func__, lookworkmarkers.workinfoidend);
+		while (total_diff < diff_want && wm_item && CURRENT(&(workmarkers->expirydate))) {
+			if (WMPROCESSED(workmarkers->status)) {
+				// Stop before FIVExWID if necessary
+				if (countbacklimit && workmarkers->workinfoidstart <= FIVExWID)
+					break;
+
+				wm_count++;
+				lookmarkersummary.markerid = workmarkers->markerid;
+				lookmarkersummary.userid = MAXID;
+				lookmarkersummary.workername = EMPTY;
+				INIT_MARKERSUMMARY(&ms_look);
+				ms_look.data = (void *)(&lookmarkersummary);
+				ms_item = find_before_in_ktree(markersummary_root, &ms_look,
+							       cmp_markersummary, ms_ctx);
+				DATA_MARKERSUMMARY_NULL(markersummary, ms_item);
+				// add the whole markerid
+				while (ms_item && markersummary->markerid == workmarkers->markerid) {
+					if (end_workinfoid == 0)
+						end_workinfoid = workmarkers->workinfoidend;
+					ms_count++;
+					total_share_count += markersummary->sharecount;
+					acc_share_count += markersummary->shareacc;
+					total_diff += markersummary->diffacc;
+					begin_workinfoid = workmarkers->workinfoidstart;
+					if (markersummary->shareacc > 0 &&
+					    tv_newer(&end_tv, &(markersummary->lastshare)))
+						copy_tv(&end_tv, &(markersummary->lastshare));
+					mu_root = upd_add_mu(mu_root, mu_store,
+							     markersummary->userid,
+							     markersummary->diffacc);
+					ms_item = prev_in_ktree(ms_ctx);
+					DATA_MARKERSUMMARY_NULL(markersummary, ms_item);
+				}
+			}
+			wm_item = prev_in_ktree(wm_ctx);
+			DATA_WORKMARKERS_NULL(workmarkers, wm_item);
+		}
+		LOGDEBUG("%s(): wm %"PRId64" ms %"PRId64" total %.1f want %.1f",
+			 __func__, wm_count, ms_count, total_diff, diff_want);
+	}
+	K_RUNLOCK(markersummary_free);
+	K_RUNLOCK(workmarkers_free);
+	K_RUNLOCK(sharesummary_free);
+
+	usercount = mu_store->count;
+
+	if (wm_count < 1) {
+		/* Problem means either workmarkers are not being processed
+		 *  or if they are, then when the shifts are later created,
+		 *  they almost certainly won't match the begin_workinfo
+		 *  calculated
+		 *  i.e. the payout N is too small, it's less than the time
+		 *   needed to create and process any workmarkers for this
+		 *   block - so abort
+		 * The fix is to create the marks and summaries needed via
+		 *  cmd_marks() then manually trigger the payout generation
+		 *  TODO: via cmd_payouts() ... which isn't available yet */
+		LOGEMERG("%s(): payout had < 1 (%"PRId64") workmarkers for "
+			 "block %"PRId32"/%"PRId64"/%s/%s/%"PRId64
+			 " beginwi=%"PRId64" ss=%"PRId64" diff=%.1f",
+			 __func__, wm_count, blocks->height, blocks->workinfoid,
+			 blocks->workername, blocks->confirmed, blocks->reward,
+			 begin_workinfoid, ss_count, total_diff);
+		goto shazbot;
+	}
+
+	LOGDEBUG("%s(): total %.1f want %.1f", __func__, total_diff, diff_want);
+	if (total_diff == 0.0) {
+		LOGERR("%s(): total share diff zero before block %"PRId32
+			"/%"PRId64"/%s/%s/%"PRId64,
+			__func__, blocks->height, blocks->workinfoid,
+			blocks->workername, blocks->confirmed,
+			blocks->reward);
+		goto shazbot;
+	}
+
+	wb_item = find_workinfo(begin_workinfoid, NULL);
+	if (!wb_item) {
+		LOGEMERG("%s(): missing begin workinfo record %"PRId64
+			 " payout of block %"PRId32"/%"PRId64"/%s/%s/%"PRId64,
+			 __func__, begin_workinfoid, blocks->height,
+			 blocks->workinfoid, blocks->workername,
+			 blocks->confirmed, blocks->reward);
+		goto shazbot;
+	}
+	DATA_WORKINFO(workinfo, wb_item);
+
+	copy_tv(&begin_tv, &(workinfo->createdate));
+	/* Elapsed is from the start of the first workinfoid used,
+	 *  to the time of the last share accepted -
+	 *  which can be after the block, but must have the same workinfoid as
+	 *  the block, if it is after the block
+	 * Any shares accepted in all workinfoids after the block's workinfoid
+	 *  will not be creditied to this block no matter what the height
+	 *  of their workinfoid - but will be candidates for subsequent blocks */
+	elapsed = tvdiff(&end_tv, &begin_tv);
+
+	// Create the payout
+	K_WLOCK(payouts_free);
+	p_item = k_unlink_head(payouts_free);
+	K_WUNLOCK(payouts_free);
+	DATA_PAYOUTS(payouts, p_item);
+
+	bzero(payouts, sizeof(*payouts));
+	payouts->height = height;
+	STRNCPY(payouts->blockhash, blockhash);
+	d64 = blocks->reward * 9 / 1000;
+	g64 = blocks->reward - d64;
+	payouts->minerreward = g64;
+	payouts->workinfoidstart = begin_workinfoid;
+	payouts->workinfoidend = end_workinfoid;
+	payouts->elapsed = elapsed;
+	STRNCPY(payouts->status, PAYOUTS_PROCESSING_STR);
+	payouts->diffwanted = diff_want;
+	payouts->diffused = total_diff;
+	payouts->shareacc = acc_share_count;
+	copy_tv(&(payouts->lastshareacc), &end_tv);
+
+	ctv_to_buf(addr_cd, cd_buf, sizeof(cd_buf));
+	snprintf(buf, sizeof(buf),
+		 "diff_times=%f%cdiff_add=%f%ctotal_share_count=%"PRId64
+		 "%css_count=%"PRId64"%cwm_count=%"PRId64"%cms_count=%"PRId64
+		 "%caddr_cd=%s",
+		 diff_times, FLDSEP, diff_add, FLDSEP, total_share_count,
+		 FLDSEP, ss_count, FLDSEP, wm_count, FLDSEP, ms_count,
+		 FLDSEP, cd_buf);
+	payouts->stats = buf;
+
+	conned = CKPQConn(&conn);
+	begun = CKPQBegin(conn);
+	if (!begun)
+		goto shazbot;
+
+	// begun is true
+	ok = payouts_add(conn, true, p_item, &old_p_item, (char *)by_default,
+			 (char *)__func__, (char *)inet_default, &now, NULL,
+			 begun);
+	if (!ok)
+		goto shazbot;
+
+	// Update and store the miningpayouts and payments
+	pay_store = k_new_store(payments_free);
+	mu_item = first_in_ktree(mu_root, mu_ctx);
+	while (mu_item) {
+		DATA_MININGPAYOUTS(miningpayouts, mu_item);
+
+		K_RLOCK(users_free);
+		u_item = find_userid(miningpayouts->userid);
+		K_RUNLOCK(users_free);
+		if (!u_item) {
+			LOGEMERG("%s(): unknown userid %"PRId64"/%.1f in "
+				 "payout for block %"PRId32,
+				 __func__, miningpayouts->userid,
+				 miningpayouts->diffacc, blocks->height);
+			goto shazbot;
+		}
+		DATA_USERS(users, u_item);
+
+		K_ITEM *pa_item, *pa_item2;
+		PAYMENTADDRESSES *pa, *pa2;
+		int64_t paytotal = 0;
+		int count = 0;
+
+		used = 0;
+		amount = floor((double)(payouts->minerreward) *
+				miningpayouts->diffacc / payouts->diffused);
+
+		/* Get the paymentaddresses active as at *addr_cd
+		 *  which defaults to when the block was found */
+		addr_store = k_new_store(paymentaddresses_free);
+		K_WLOCK(paymentaddresses_free);
+		pa_item = find_paymentaddresses_create(miningpayouts->userid,
+						       pay_ctx);
+		if (pa_item) {
+			DATA_PAYMENTADDRESSES(pa, pa_item);
+			/* The tv_newer and tv_newer_eq are critical since:
+			 *  when a record is replaced, the expirydate is set
+			 *  to 'now' and the new record will have the same
+			 *  createdate of 'now', so to avoid possibly selecting
+			 *  both records, we get the one that was created
+			 *  before addr_cd and expires on or after addr_cd
+			 */
+			while (pa_item && pa->userid == miningpayouts->userid &&
+			       tv_newer(&(pa->createdate), addr_cd)) {
+				if (tv_newer_eq(addr_cd, &(pa->expirydate))) {
+					paytotal += pa->payratio;
+
+					/* Duplicate it to a new store -
+					 * thus changes to paymentaddresses
+					 * can't affect the code below
+					 * and we don't need to keep
+					 * paymentaddresses locked until we
+					 * have completed the db
+					 * additions/updates */
+					pa_item2 = k_unlink_head(paymentaddresses_free);
+					DATA_PAYMENTADDRESSES(pa2, pa_item2);
+					pa2->userid = pa->userid;
+					STRNCPY(pa2->payaddress, pa->payaddress);
+					pa2->payratio = pa->payratio;
+					k_add_tail(addr_store, pa_item2);
+				}
+				pa_item = next_in_ktree(pay_ctx);
+				DATA_PAYMENTADDRESSES_NULL(pa, pa_item);
+			}
+		}
+		K_WUNLOCK(paymentaddresses_free);
+
+		pa_item = addr_store->head;
+		if (pa_item) {
+			// Normal user with at least 1 paymentaddress
+			while (pa_item) {
+				DATA_PAYMENTADDRESSES(pa, pa_item);
+				K_WLOCK(payments_free);
+				pay_item = k_unlink_head(payments_free);
+				K_WUNLOCK(payments_free);
+				DATA_PAYMENTS(payments, pay_item);
+				bzero(payments, sizeof(*payments));
+				payments->payoutid = payouts->payoutid;
+				payments->userid = miningpayouts->userid;
+				snprintf(payments->subname,
+					 sizeof(payments->subname),
+					 "%s.%d", users->username, ++count);
+				STRNCPY(payments->payaddress, pa->payaddress);
+				d64 = floor((double)amount *
+					    (double)(pa->payratio) /
+					    (double)paytotal);
+				payments->amount = d64;
+				payments->diffacc = miningpayouts->diffacc *
+						    (double)(pa->payratio) /
+						    (double)paytotal;
+				used += d64;
+				k_add_tail(pay_store, pay_item);
+				ok = payments_add(conn, true, pay_item,
+						  &(payments->old_item),
+						  (char *)by_default,
+						  (char *)__func__,
+						  (char *)inet_default, &now,
+						  NULL, begun);
+				if (!ok)
+					goto shazbot;
+
+				pa_item = pa_item->next;
+			}
+		} else {
+			/* Address user or normal user without a paymentaddress
+			 * TODO: user table needs a flag to say which it is ...
+			 *  for now use a simple test */
+			bool gotaddr = false;
+			size_t len;
+
+			switch (users->username[0]) {
+				case '1':
+				case '3':
+					len = strlen(users->username);
+					if (len >= ADDR_MIN_LEN && len <= ADDR_MAX_LEN)
+						gotaddr = true;
+			}
+			if (gotaddr) {
+				K_WLOCK(payments_free);
+				pay_item = k_unlink_head(payments_free);
+				K_WUNLOCK(payments_free);
+				DATA_PAYMENTS(payments, pay_item);
+				bzero(payments, sizeof(*payments));
+				payments->payoutid = payouts->payoutid;
+				payments->userid = miningpayouts->userid;
+				snprintf(payments->subname,
+					 sizeof(payments->subname),
+					 "%s.0", users->username);
+				STRNCPY(payments->payaddress, users->username);
+				payments->amount = amount;
+				payments->diffacc = miningpayouts->diffacc;
+				used = amount;
+				k_add_tail(pay_store, pay_item);
+				ok = payments_add(conn, true, pay_item,
+						  &(payments->old_item),
+						  (char *)by_default,
+						  (char *)__func__,
+						  (char *)inet_default, &now,
+						  NULL, begun);
+				if (!ok)
+					goto shazbot;
+			} // else they go to their dust balance
+		}
+
+		/* N.B. there will, of course, be a miningpayouts record without
+		 *  any payments record if the paymentaddress was missing */
+		miningpayouts->payoutid = payouts->payoutid;
+		if (used == 0)
+			miningpayouts->amount = amount;
+		else
+			miningpayouts->amount = used;
+
+		ok = miningpayouts_add(conn, true, mu_item,
+					&(miningpayouts->old_item),
+					(char *)by_default, (char *)__func__,
+					(char *)inet_default, &now, NULL, begun);
+		if (!ok)
+			goto shazbot;
+
+		if (addr_store->count) {
+			K_WLOCK(paymentaddresses_free);
+			k_list_transfer_to_head(addr_store, paymentaddresses_free);
+			K_WUNLOCK(addr_store);
+		}
+		addr_store = k_free_store(addr_store);
+
+		mu_item = next_in_ktree(mu_ctx);
+	}
+
+	// begun is true
+	CKPQEnd(conn, begun);
+
+	payouts_add_ram(true, p_item, old_p_item, &now);
+
+	mu_root = free_ktree(mu_root, NULL);
+	mu_item = k_unlink_head(mu_store);
+	while (mu_item) {
+		DATA_MININGPAYOUTS(miningpayouts, mu_item);
+		miningpayouts_add_ram(true, mu_item, miningpayouts->old_item, &now);
+		mu_item = k_unlink_head(mu_store);
+	}
+	mu_store = k_free_store(mu_store);
+
+	pay_item = k_unlink_head(pay_store);
+	while (pay_item) {
+		DATA_PAYMENTS(payments, pay_item);
+		payments_add_ram(true, pay_item, payments->old_item, &now);
+		pay_item = k_unlink_head(pay_store);
+	}
+	pay_store = k_free_store(pay_store);
+
+	ctv_to_buf(addr_cd, cd_buf, sizeof(cd_buf));
+	LOGWARNING("%s(): payout %"PRId64" setup for block %"PRId32"/%"PRId64
+		   "/%s/%"PRId64" ss=%"PRId64" wm=%"PRId64" ms=%"PRId64
+		   " users=%d times=%.1f add=%.1f addr_cd=%s",
+		   __func__, payouts->payoutid, blocks->height,
+		   blocks->workinfoid, blocks->confirmed, blocks->reward,
+		   ss_count, wm_count, ms_count, usercount, diff_times,
+		   diff_add, cd_buf);
+
+	// convert the stack memory to heap memeory
+	payouts->stats = strdup(payouts->stats);
+
+	K_WLOCK(payouts_free);
+	p2_item = k_unlink_head(payouts_free);
+	K_WUNLOCK(payouts_free);
+	DATA_PAYOUTS(payouts2, p2_item);
+	bzero(payouts2, sizeof(*payouts2));
+	payouts2->payoutid = payouts->payoutid;
+	payouts2->height = payouts->height;
+	STRNCPY(payouts2->blockhash, payouts->blockhash);
+	payouts2->minerreward = payouts->minerreward;
+	payouts2->workinfoidstart = payouts->workinfoidstart;
+	payouts2->workinfoidend = payouts->workinfoidend;
+	payouts2->elapsed = payouts->elapsed;
+	STRNCPY(payouts2->status, PAYOUTS_GENERATED_STR);
+	payouts2->diffwanted = payouts->diffwanted;
+	payouts2->diffused = payouts->diffused;
+	payouts2->shareacc = payouts->shareacc;
+	copy_tv(&(payouts2->lastshareacc), &(payouts->lastshareacc));
+	payouts2->stats = strdup(payouts->stats);
+
+	setnow(&now);
+	/* N.B. the PROCESSING payouts could have expirydate = createdate
+	 *  if the code above executes faster than the pgsql time resolution */
+	ok = payouts_add(conn, true, p2_item, &old_p2_item, (char *)by_default,
+			 (char *)__func__, (char *)inet_default, &now, NULL,
+			 false);
+	if (!ok) {
+		LOGEMERG("%s(): payout %"PRId64" for block %"PRId32"/%s "
+			 "NOT set generated - it needs to be set manually",
+			 __func__, payouts->payoutid, blocks->height,
+			 blocks->blockhash);
+	}
+
+	CKPQDisco(&conn, conned);
+
+	goto oku;
+
+shazbot:
+	ok = false;
+
+	if (begun)
+		CKPQEnd(conn, false);
+	CKPQDisco(&conn, conned);
+
+	if (p_item) {
+		K_WLOCK(payouts_free);
+		k_add_head(payouts_free, p_item);
+		K_WUNLOCK(payouts_free);
+	}
+
+oku:
+	;
+	ck_wunlock(&process_pplns_lock);
+	if (mu_root)
+		mu_root = free_ktree(mu_root, NULL);
+	if (mu_store) {
+		if (mu_store->count) {
+			K_WLOCK(mu_store);
+			k_list_transfer_to_head(mu_store, miningpayouts_free);
+			K_WUNLOCK(mu_store);
+		}
+		mu_store = k_free_store(mu_store);
+	}
+	if (pay_store) {
+		if (pay_store->count) {
+			K_WLOCK(pay_store);
+			k_list_transfer_to_head(pay_store, payments_free);
+			K_WUNLOCK(pay_store);
+		}
+		pay_store = k_free_store(pay_store);
+	}
+	if (addr_store) {
+		if (addr_store->count) {
+			K_WLOCK(addr_store);
+			k_list_transfer_to_head(addr_store, paymentaddresses_free);
+			K_WUNLOCK(addr_store);
+		}
+		addr_store = k_free_store(addr_store);
+	}
+	return ok;
 }
 
 // order by userid asc,createdate asc,authid asc,expirydate desc

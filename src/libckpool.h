@@ -493,6 +493,7 @@ int _open_unix_server(const char *server_path, const char *file, const char *fun
 #define open_unix_server(server_path) _open_unix_server(server_path, __FILE__, __func__, __LINE__)
 int _open_unix_client(const char *server_path, const char *file, const char *func, const int line);
 #define open_unix_client(server_path) _open_unix_client(server_path, __FILE__, __func__, __LINE__)
+int wait_close(int sockd, int timeout);
 int wait_read_select(int sockd, int timeout);
 int read_length(int sockd, void *buf, int len);
 char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, const char *func, const int line);

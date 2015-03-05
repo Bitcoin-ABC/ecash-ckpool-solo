@@ -910,6 +910,24 @@ out:
 	return sockd;
 }
 
+/* Wait till a socket has been closed at the other end */
+int wait_close(int sockd, int timeout)
+{
+	struct pollfd sfd;
+	int ret;
+
+	if (unlikely(sockd < 0))
+		return -1;
+	sfd.fd = sockd;
+	sfd.events = POLLIN;
+	sfd.revents = 0;
+	timeout *= 1000;
+	ret = poll(&sfd, 1, timeout);
+	if (ret < 1)
+		return 0;
+	return sfd.revents & POLLHUP;
+}
+
 /* Emulate a select read wait for high fds that select doesn't support */
 int wait_read_select(int sockd, int timeout)
 {

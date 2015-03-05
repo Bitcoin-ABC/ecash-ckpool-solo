@@ -237,7 +237,25 @@ static int pid_wait(const pid_t pid, const int ms)
 	return ret;
 }
 
-static int send_procmsg(const proc_instance_t *pi, const char *buf)
+static int get_proc_pid(const proc_instance_t *pi)
+{
+	int ret, pid = 0;
+	char path[256];
+	FILE *fp;
+
+	sprintf(path, "%s%s.pid", pi->ckp->socket_dir, pi->processname);
+	fp = fopen(path, "re");
+	if (!fp)
+		goto out;
+	ret = fscanf(fp, "%d", &pid);
+	if (ret < 1)
+		pid = 0;
+	fclose(fp);
+out:
+	return pid;
+}
+
+static int send_procmsg(proc_instance_t *pi, const char *buf)
 {
 	char *path = pi->us.path;
 	int ret = -1;
@@ -250,6 +268,12 @@ static int send_procmsg(const proc_instance_t *pi, const char *buf)
 	if (unlikely(!buf || !strlen(buf))) {
 		LOGERR("Attempted to send null message to socket %s in send_proc", path);
 		goto out;
+	}
+	if (unlikely(!pi->pid)) {
+		pi->pid = get_proc_pid(pi);
+		if (!pi->pid)
+			goto out;
+
 	}
 	if (unlikely(kill_pid(pi->pid, 0))) {
 		LOGALERT("Attempting to send message %s to dead process %s", buf, pi->processname);
@@ -419,9 +443,9 @@ int read_socket_line(connsock_t *cs, const int timeout)
 		char *newbuf;
 
 		ret = wait_read_select(fd, eom ? 0 : timeout);
-		if (eom && !ret)
-			break;
 		if (ret < 1) {
+			if (eom)
+				break;
 			if (!ret)
 				LOGDEBUG("Select timed out in read_socket_line");
 			else
@@ -431,7 +455,7 @@ int read_socket_line(connsock_t *cs, const int timeout)
 		ret = recv(fd, readbuf, PAGESIZE - 4, 0);
 		if (ret < 1) {
 			/* Closed socket after valid message */
-			if (!ret && eom)
+			if (eom)
 				break;
 			LOGERR("Failed to recv in read_socket_line");
 			ret = -1;
@@ -474,46 +498,48 @@ out:
 
 static void childsighandler(const int sig);
 
-static int get_proc_pid(const proc_instance_t *pi)
-{
-	int ret, pid = 0;
-	char path[256];
-	FILE *fp;
+struct proc_message {
+	proc_instance_t *pi;
+	char *msg;
+	const char *file;
+	const char *func;
+	int line;
+};
 
-	sprintf(path, "%s%s.pid", pi->ckp->socket_dir, pi->processname);
-	fp = fopen(path, "re");
-	if (!fp)
-		goto out;
-	ret = fscanf(fp, "%d", &pid);
-	if (ret < 1)
-		pid = 0;
-	fclose(fp);
-out:
-	return pid;
-}
-
-/* Send a single message to a process instance when there will be no response,
- * closing the socket immediately. */
-bool _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line)
+/* Send all one way messages asynchronously so we can wait till the receiving
+ * end closes the socket to ensure all messages are received but no deadlocks
+ * can occur with 2 processes waiting for each other's socket closure. */
+void *async_send_proc(void *arg)
 {
+	struct proc_message *pm = (struct proc_message *)arg;
+	proc_instance_t *pi = pm->pi;
+	char *msg = pm->msg;
+	const char *file = pm->file;
+	const char *func = pm->func;
+	int line = pm->line;
+
 	char *path = pi->us.path;
 	bool ret = false;
 	int sockd;
+
+	pthread_detach(pthread_self());
 
 	if (unlikely(!path || !strlen(path))) {
 		LOGERR("Attempted to send message %s to null path in send_proc", msg ? msg : "");
 		goto out;
 	}
-	if (unlikely(!msg || !strlen(msg))) {
-		LOGERR("Attempted to send null message to socket %s in send_proc", path);
-		goto out;
-	}
 	/* At startup the pid fields are not set up before some processes are
 	 * forked so they never inherit them. */
-	if (unlikely(!pi->pid))
+	if (unlikely(!pi->pid)) {
 		pi->pid = get_proc_pid(pi);
+		if (!pi->pid) {
+			LOGALERT("Attempting to send message %s to non existent process %s", msg, pi->processname);
+			goto out_nofail;
+		}
+	}
 	if (unlikely(kill_pid(pi->pid, 0))) {
-		LOGALERT("Attempting to send message %s to non existent process %s", msg, pi->processname);
+		LOGALERT("Attempting to send message %s to non existent process %s pid %d",
+			 msg, pi->processname, pi->pid);
 		goto out;
 	}
 	sockd = open_unix_client(path);
@@ -525,13 +551,38 @@ bool _send_proc(proc_instance_t *pi, const char *msg, const char *file, const ch
 		LOGWARNING("Failed to send %s to socket %s", msg, path);
 	else
 		ret = true;
+	if (!wait_close(sockd, 5))
+		LOGWARNING("send_proc %s did not detect close from %s %s:%d", msg, file, func, line);
 	Close(sockd);
 out:
 	if (unlikely(!ret)) {
 		LOGERR("Failure in send_proc from %s %s:%d", file, func, line);
 		childsighandler(15);
 	}
-	return ret;
+out_nofail:
+	free(msg);
+	free(pm);
+	return NULL;
+}
+
+/* Send a single message to a process instance when there will be no response,
+ * closing the socket immediately. */
+void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line)
+{
+	struct proc_message *pm;
+	pthread_t pth;
+
+	if (unlikely(!msg || !strlen(msg))) {
+		LOGERR("Attempted to send null message to %s in send_proc", pi->processname);
+		return;
+	}
+	pm = ckalloc(sizeof(struct proc_message));
+	pm->pi = pi;
+	pm->msg = strdup(msg);
+	pm->file = file;
+	pm->func = func;
+	pm->line = line;
+	create_pthread(&pth, async_send_proc, pm);
 }
 
 /* Send a single message to a process instance and retrieve the response, then
@@ -549,7 +600,15 @@ char *_send_recv_proc(proc_instance_t *pi, const char *msg, const char *file, co
 		LOGERR("Attempted to send null message to socket %s in send_proc", path);
 		goto out;
 	}
+	if (unlikely(!pi->pid)) {
+		pi->pid = get_proc_pid(pi);
+		if (!pi->pid)
+			goto out;
+	}
 	if (unlikely(kill_pid(pi->pid, 0))) {
+		/* Reset the pid value in case we are still looking for an old
+		 * process */
+		pi->pid = 0;
 		LOGALERT("Attempting to send message %s to dead process %s", msg, pi->processname);
 		goto out;
 	}
@@ -1202,6 +1261,8 @@ static proc_instance_t *prepare_child(ckpool_t *ckp, int (*process)(), char *nam
 	pi->process = process;
 	create_process_unixsock(pi);
 	manage_old_child(ckp, pi);
+	/* Remove the old pid file if we've succeeded in coming this far */
+	rm_namepid(pi);
 	return pi;
 }
 

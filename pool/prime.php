@@ -19,6 +19,7 @@ function process($p, $user, $menu)
  if ($user == 'Kano' || $user == 'ckolivas')
  {
 	$menu['Admin']['ckp'] = 'ckp';
+	$menu['Admin']['PPLNS2'] = 'pplns2';
 	$menu['Admin']['PPLNS'] = 'pplns';
 	$menu['Admin']['AllWork'] = 'allwork';
  }

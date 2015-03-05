@@ -51,8 +51,8 @@
  */
 
 #define DB_VLOCK "1"
-#define DB_VERSION "0.9.6"
-#define CKDB_VERSION DB_VERSION"-0.920"
+#define DB_VERSION "1.0.0"
+#define CKDB_VERSION DB_VERSION"-1.007"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -94,6 +94,9 @@ extern const char *addrpatt;
 // BTC address size
 #define ADDR_MIN_LEN 26
 #define ADDR_MAX_LEN 34
+/* All characters in a payaddress are less than this
+ * thus setting the 1st char to this will be greater than any payaddress */
+#define MAX_PAYADDR '~'
 
 typedef struct loadstatus {
 	tv_t oldest_sharesummary_firstshare_n;
@@ -336,6 +339,8 @@ enum cmd_values {
 	CMD_DSP,
 	CMD_STATS,
 	CMD_PPLNS,
+	CMD_PPLNS2,
+	CMD_PAYOUTS,
 	CMD_USERSTATUS,
 	CMD_MARKS,
 	CMD_END
@@ -816,6 +821,7 @@ typedef struct paymentaddresses {
 #define DATA_PAYMENTADDRESSES_NULL(_var, _item) DATA_GENERIC(_var, _item, paymentaddresses, false)
 
 extern K_TREE *paymentaddresses_root;
+extern K_TREE *paymentaddresses_create_root;
 extern K_LIST *paymentaddresses_free;
 extern K_STORE *paymentaddresses_store;
 
@@ -824,14 +830,18 @@ extern K_STORE *paymentaddresses_store;
 // PAYMENTS
 typedef struct payments {
 	int64_t paymentid;
+	int64_t payoutid;
 	int64_t userid;
+	char subname[TXT_BIG+1];
 	tv_t paydate;
 	char payaddress[TXT_BIG+1];
 	char originaltxn[TXT_BIG+1];
 	int64_t amount;
+	double diffacc;
 	char committxn[TXT_BIG+1];
 	char commitblockhash[TXT_BIG+1];
 	HISTORYDATECONTROLFIELDS;
+	K_ITEM *old_item; // Non-db field
 } PAYMENTS;
 
 #define ALLOC_PAYMENTS 1024
@@ -844,7 +854,6 @@ extern K_TREE *payments_root;
 extern K_LIST *payments_free;
 extern K_STORE *payments_store;
 
-/* unused yet
 // ACCOUNTBALANCE
 typedef struct accountbalance {
 	int64_t userid;
@@ -852,7 +861,7 @@ typedef struct accountbalance {
 	int64_t confirmedunpaid;
 	int64_t pendingconfirm;
 	int32_t heightupdate;
-	HISTORYDATECONTROLFIELDS;
+	MODIFYDATECONTROLFIELDS;
 } ACCOUNTBALANCE;
 
 #define ALLOC_ACCOUNTBALANCE 1024
@@ -881,7 +890,6 @@ typedef struct accountadjustment {
 extern K_TREE *accountadjustment_root;
 extern K_LIST *accountadjustment_free;
 extern K_STORE *accountadjustment_store;
-*/
 
 // IDCONTROL
 typedef struct idcontrol {
@@ -1126,22 +1134,62 @@ extern K_STORE *blocks_store;
 
 // MININGPAYOUTS
 typedef struct miningpayouts {
-	int64_t miningpayoutid;
+	int64_t payoutid;
 	int64_t userid;
-	int32_t height;
-	char blockhash[TXT_BIG+1];
+	double diffacc;
 	int64_t amount;
 	HISTORYDATECONTROLFIELDS;
+	K_ITEM *old_item; // Non-db field
 } MININGPAYOUTS;
 
 #define ALLOC_MININGPAYOUTS 1000
 #define LIMIT_MININGPAYOUTS 0
 #define INIT_MININGPAYOUTS(_item) INIT_GENERIC(_item, miningpayouts)
 #define DATA_MININGPAYOUTS(_var, _item) DATA_GENERIC(_var, _item, miningpayouts, true)
+#define DATA_MININGPAYOUTS_NULL(_var, _item) DATA_GENERIC(_var, _item, miningpayouts, false)
 
 extern K_TREE *miningpayouts_root;
 extern K_LIST *miningpayouts_free;
 extern K_STORE *miningpayouts_store;
+
+// PAYOUTS
+typedef struct payouts {
+	int64_t payoutid;
+	int32_t height;
+	char blockhash[TXT_BIG+1];
+	int64_t minerreward;
+	int64_t workinfoidstart;
+	int64_t workinfoidend;
+	int64_t elapsed;
+	char status[TXT_FLAG+1];
+	double diffwanted;
+	double diffused;
+	double shareacc;
+	tv_t lastshareacc;
+	char *stats;
+	HISTORYDATECONTROLFIELDS;
+} PAYOUTS;
+
+#define ALLOC_PAYOUTS 1000
+#define LIMIT_PAYOUTS 0
+#define INIT_PAYOUTS(_item) INIT_GENERIC(_item, payouts)
+#define DATA_PAYOUTS(_var, _item) DATA_GENERIC(_var, _item, payouts, true)
+#define DATA_PAYOUTS_NULL(_var, _item) DATA_GENERIC(_var, _item, payouts, false)
+
+extern K_TREE *payouts_root;
+extern K_TREE *payouts_id_root;
+extern K_LIST *payouts_free;
+extern K_STORE *payouts_store;
+extern cklock_t process_pplns_lock;
+
+// N.B. status should be checked under r/w lock
+#define PAYOUTS_GENERATED 'G'
+#define PAYOUTS_GENERATED_STR "G"
+#define PAYGENERATED(_status) ((_status)[0] == PAYOUTS_GENERATED)
+// A processing payout must be ignored
+#define PAYOUTS_PROCESSING 'P'
+#define PAYOUTS_PROCESSING_STR "P"
+#define PAYPROCESSING(_status) ((_status)[0] == PAYOUTS_PROCESSING)
 
 /*
 // EVENTLOG
@@ -1527,6 +1575,20 @@ extern PGconn *dbconnect();
 // *** ckdb_data.c ***
 // ***
 
+/* Blocks after 334106 were set to 5xN
+ *  however, they cannot count back to include the workinfoid of 333809
+ *  due to the markersummaries that were created.
+ * Code checks that if the block is after FIVExSTT then it must stop
+ *  counting back shares at - and not include - FIVExWID */
+#define FIVExSTT 334106
+#define FIVExLIM 333809
+// 333809 workinfoid
+#define FIVExWID 6085620100361140756
+
+// optioncontrol names for PPLNS N diff calculation
+#define PPLNSDIFFTIMES "pplns_diff_times"
+#define PPLNSDIFFADD "pplns_diff_add"
+
 // Data free functions (first)
 extern void free_workinfo_data(K_ITEM *item);
 extern void free_sharesummary_data(K_ITEM *item);
@@ -1635,12 +1697,19 @@ extern K_ITEM *new_default_worker(PGconn *conn, bool update, int64_t userid, cha
 				  char *by, char *code, char *inet, tv_t *cd, K_TREE *trf_root);
 extern void dsp_paymentaddresses(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_paymentaddresses(K_ITEM *a, K_ITEM *b);
+extern cmp_t cmp_payaddr_create(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_paymentaddresses(int64_t userid, K_TREE_CTX *ctx);
+extern K_ITEM *find_paymentaddresses_create(int64_t userid, K_TREE_CTX *ctx);
 extern K_ITEM *find_one_payaddress(int64_t userid, char *payaddress, K_TREE_CTX *ctx);
 extern K_ITEM *find_any_payaddress(char *payaddress);
 extern cmp_t cmp_payments(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *find_payments(int64_t payoutid, int64_t userid, char *subname);
+extern K_ITEM *find_first_payments(int64_t userid, K_TREE_CTX *ctx);
+extern K_ITEM *find_first_paypayid(int64_t userid, int64_t payoutid, K_TREE_CTX *ctx);
+extern cmp_t cmp_accountbalance(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *find_accountbalance(int64_t userid);
 extern cmp_t cmp_optioncontrol(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *find_optioncontrol(char *optionname, tv_t *now);
+extern K_ITEM *find_optioncontrol(char *optionname, tv_t *now, int32_t height);
 extern cmp_t cmp_workinfo(K_ITEM *a, K_ITEM *b);
 #define coinbase1height(_cb1) _coinbase1height(_cb1, WHERE_FFL_HERE)
 extern int32_t _coinbase1height(char *coinbase1, WHERE_FFL_ARGS);
@@ -1670,12 +1739,23 @@ void _dbhash2btchash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS);
 extern void _dsp_hash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS);
 extern void dsp_blocks(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_blocks(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *find_blocks(int32_t height, char *blockhash);
+extern K_ITEM *find_blocks(int32_t height, char *blockhash, K_TREE_CTX *ctx);
 extern K_ITEM *find_prev_blocks(int32_t height);
 extern const char *blocks_confirmed(char *confirmed);
 extern void zero_on_new_block();
 extern void set_block_share_counters();
 extern cmp_t cmp_miningpayouts(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *find_miningpayouts(int64_t payoutid, int64_t userid);
+extern K_ITEM *first_miningpayouts(int64_t payoutid, K_TREE_CTX *ctx);
+extern cmp_t cmp_mu(K_ITEM *a, K_ITEM *b);
+extern K_TREE *upd_add_mu(K_TREE *mu_root, K_STORE *mu_store, int64_t userid,
+			  double diffacc);
+extern cmp_t cmp_payouts(K_ITEM *a, K_ITEM *b);
+extern cmp_t cmp_payouts_id(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *find_payouts(int32_t height, char *blockhash);
+extern K_ITEM *find_last_payouts();
+extern K_ITEM *find_payoutid(int64_t payoutid);
+extern bool process_pplns(int32_t height, char *blockhash, tv_t *now);
 extern cmp_t cmp_auths(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_poolstats(K_ITEM *a, K_ITEM *b);
 extern void dsp_userstats(K_ITEM *item, FILE *stream);
@@ -1751,6 +1831,12 @@ extern PGresult *_CKPQexecParams(PGconn *conn, const char *qry,
 #define PGLOGEMERG(_str, _rescode, _conn) PGLOG(LOGEMERG, _str, _rescode, _conn)
 
 extern char *pqerrmsg(PGconn *conn);
+extern bool CKPQConn(PGconn **conn);
+extern void CKPQDisco(PGconn **conn, bool conned);
+extern bool _CKPQBegin(PGconn *conn, WHERE_FFL_ARGS);
+#define CKPQBegin(_conn) _CKPQBegin(conn, WHERE_FFL_HERE)
+extern void _CKPQEnd(PGconn *conn, bool commit, WHERE_FFL_ARGS);
+#define CKPQEnd(_conn, _commit) _CKPQEnd(_conn, _commit, WHERE_FFL_HERE)
 
 extern int64_t nextid(PGconn *conn, char *idname, int64_t increment,
 			tv_t *cd, char *by, char *code, char *inet);
@@ -1783,6 +1869,11 @@ extern bool paymentaddresses_set(PGconn *conn, int64_t userid, K_LIST *pa_store,
 				 char *by, char *code, char *inet, tv_t *cd,
 				 K_TREE *trf_root);
 extern bool paymentaddresses_fill(PGconn *conn);
+extern void payments_add_ram(bool ok, K_ITEM *mp_item, K_ITEM *old_mp_item,
+				tv_t *cd);
+extern bool payments_add(PGconn *conn, bool add, K_ITEM *p_item,
+			 K_ITEM **old_p_item, char *by, char *code, char *inet,
+			 tv_t *cd, K_TREE *trf_root, bool already);
 extern bool payments_fill(PGconn *conn);
 extern bool idcontrol_add(PGconn *conn, char *idname, char *idvalue, char *by,
 			  char *code, char *inet, tv_t *cd, K_TREE *trf_root);
@@ -1827,10 +1918,19 @@ extern bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			char *by, char *code, char *inet, tv_t *cd,
 			bool igndup, char *id, K_TREE *trf_root);
 extern bool blocks_fill(PGconn *conn);
-extern bool miningpayouts_add(PGconn *conn, char *username, char *height,
-			      char *blockhash, char *amount, char *by,
-			      char *code, char *inet, tv_t *cd, K_TREE *trf_root);
+extern void miningpayouts_add_ram(bool ok, K_ITEM *mp_item, K_ITEM *old_mp_item,
+				  tv_t *cd);
+extern bool miningpayouts_add(PGconn *conn, bool add, K_ITEM *mp_item,
+				K_ITEM **old_mp_item, char *by, char *code,
+				char *inet, tv_t *cd, K_TREE *trf_root,
+				bool already);
 extern bool miningpayouts_fill(PGconn *conn);
+extern void payouts_add_ram(bool ok, K_ITEM *p_item, K_ITEM *old_p_item,
+			    tv_t *cd);
+extern bool payouts_add(PGconn *conn, bool add, K_ITEM *p_item,
+			K_ITEM **old_p_item, char *by, char *code, char *inet,
+			tv_t *cd, K_TREE *trf_root, bool already);
+extern bool payouts_fill(PGconn *conn);
 extern bool auths_add(PGconn *conn, char *poolinstance, char *username,
 			char *workername, char *clientid, char *enonce1,
 			char *useragent, char *preauth, char *by, char *code,

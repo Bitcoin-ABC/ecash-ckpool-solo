@@ -167,6 +167,8 @@ char *pqerrmsg(PGconn *conn)
 #define PQPARAM14 PQPARAM8 ",$9,$10,$11,$12,$13,$14"
 #define PQPARAM15 PQPARAM8 ",$9,$10,$11,$12,$13,$14,$15"
 #define PQPARAM16 PQPARAM8 ",$9,$10,$11,$12,$13,$14,$15,$16"
+#define PQPARAM17 PQPARAM16 ",$17"
+#define PQPARAM18 PQPARAM16 ",$17,$18"
 #define PQPARAM22 PQPARAM16 ",$17,$18,$19,$20,$21,$22"
 #define PQPARAM26 PQPARAM22 ",$23,$24,$25,$26"
 #define PQPARAM27 PQPARAM26 ",$27"
@@ -221,6 +223,70 @@ PGresult *_CKPQexecParams(PGconn *conn, const char *qry,
 
 #define PQexec CKPQexec
 #define PQexecParams CKPQexecParams
+
+// TODO: switch all to use this
+bool CKPQConn(PGconn **conn)
+{
+	if (*conn == NULL) {
+		LOGDEBUG("%s(): connecting", __func__);
+		*conn = dbconnect();
+		return true;
+	}
+	return false;
+}
+
+// TODO: switch all to use this
+void CKPQDisco(PGconn **conn, bool conned)
+{
+	if (conned) {
+		LOGDEBUG("%s(): disco", __func__);
+		PQfinish(*conn);
+	}
+}
+
+// TODO: switch all to use this
+bool _CKPQBegin(PGconn *conn, WHERE_FFL_ARGS)
+{
+	ExecStatusType rescode;
+	PGresult *res;
+
+	res = PQexec(conn, "Begin", CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		char *buf = pqerrmsg(conn);
+		LOGEMERG("%s(): Begin failed (%d) '%s'" WHERE_FFL,
+			 __func__, (int)rescode, buf, WHERE_FFL_PASS);
+		free(buf);
+		return false;
+	}
+	LOGDEBUG("%s(): begin", __func__);
+	return true;
+}
+
+// TODO: switch all to use this
+void _CKPQEnd(PGconn *conn, bool commit, WHERE_FFL_ARGS)
+{
+	ExecStatusType rescode;
+	PGresult *res;
+
+	if (commit) {
+		LOGDEBUG("%s(): commit", __func__);
+		res = PQexec(conn, "Commit", CKPQ_WRITE);
+	} else {
+		LOGDEBUG("%s(): rollback", __func__);
+		res = PQexec(conn, "Rollback", CKPQ_WRITE);
+	}
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		char *buf = pqerrmsg(conn);
+		LOGEMERG("%s(): %s failed (%d) '%s'" WHERE_FFL,
+			 __func__, commit ? "commit" : "rollback",
+			 (int)rescode, buf, WHERE_FFL_PASS);
+		free(buf);
+	}
+}
 
 int64_t nextid(PGconn *conn, char *idname, int64_t increment,
 		tv_t *cd, char *by, char *code, char *inet)
@@ -1642,9 +1708,13 @@ unparam:
 				n++;
 				paymentaddresses_root = remove_from_ktree(paymentaddresses_root, item,
 									  cmp_paymentaddresses);
+				paymentaddresses_create_root = remove_from_ktree(paymentaddresses_create_root,
+										 item, cmp_payaddr_create);
 				copy_tv(&(row->expirydate), cd);
 				paymentaddresses_root = add_to_ktree(paymentaddresses_root, item,
 								     cmp_paymentaddresses);
+				paymentaddresses_create_root = add_to_ktree(paymentaddresses_create_root,
+									    item, cmp_payaddr_create);
 			}
 			item = prev;
 			DATA_PAYMENTADDRESSES_NULL(row, item);
@@ -1658,6 +1728,8 @@ unparam:
 			if (!pa->match) {
 				paymentaddresses_root = add_to_ktree(paymentaddresses_root, match,
 								     cmp_paymentaddresses);
+				paymentaddresses_create_root = add_to_ktree(paymentaddresses_create_root,
+									    match, cmp_payaddr_create);
 				k_unlink_item(pa_store, match);
 				k_add_head(paymentaddresses_store, match);
 				count++;
@@ -1745,7 +1817,10 @@ bool paymentaddresses_fill(PGconn *conn)
 		if (!ok)
 			break;
 
-		paymentaddresses_root = add_to_ktree(paymentaddresses_root, item, cmp_paymentaddresses);
+		paymentaddresses_root = add_to_ktree(paymentaddresses_root, item,
+						     cmp_paymentaddresses);
+		paymentaddresses_create_root = add_to_ktree(paymentaddresses_create_root,
+							    item, cmp_payaddr_create);
 		k_add_head(paymentaddresses_store, item);
 	}
 	if (!ok)
@@ -1762,30 +1837,169 @@ bool paymentaddresses_fill(PGconn *conn)
 	return ok;
 }
 
+// The timing of the memory table updates depends on 'already'
+void payments_add_ram(bool ok, K_ITEM *p_item, K_ITEM *old_p_item, tv_t *cd)
+{
+	PAYMENTS *oldp;
+
+	LOGDEBUG("%s(): ok %c", __func__, ok ? 'Y' : 'N');
+
+	K_WLOCK(payments_free);
+	if (!ok) {
+		// Cleanup for the calling function
+		k_add_head(payments_free, p_item);
+	} else {
+		if (old_p_item) {
+			DATA_PAYMENTS(oldp, old_p_item);
+			payments_root = remove_from_ktree(payments_root, old_p_item, cmp_payments);
+			copy_tv(&(oldp->expirydate), cd);
+			payments_root = add_to_ktree(payments_root, old_p_item, cmp_payments);
+		}
+		payments_root = add_to_ktree(payments_root, p_item, cmp_payments);
+		k_add_head(payments_store, p_item);
+	}
+	K_WUNLOCK(payments_free);
+}
+
+/* Add means create a new one and expire the old one if it exists,
+ *  otherwise we only expire the old one if it exists
+ * It's the calling functions job to determine if a new one is required
+ *  - i.e. if there is a difference between the old and new
+ * already = already begun a transaction - and don't update the ram table */
+bool payments_add(PGconn *conn, bool add, K_ITEM *p_item, K_ITEM **old_p_item,
+		  char *by, char *code, char *inet, tv_t *cd, K_TREE *trf_root,
+		  bool already)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	PGresult *res;
+	bool ok = false, begun = false;
+	PAYMENTS *row, *oldp = NULL;
+	char *upd, *ins;
+	char *params[11 + HISTORYDATECOUNT];
+	int n, par = 0;
+
+	LOGDEBUG("%s(): add %c already %c", __func__,
+		 add ? 'Y' : 'N', already ? 'Y' : 'N');
+
+	DATA_PAYMENTS(row, p_item);
+	K_RLOCK(payments_free);
+	*old_p_item = find_payments(row->payoutid, row->userid, row->subname);
+	K_RUNLOCK(payments_free);
+
+	conned = CKPQConn(&conn);
+	if (!already) {
+		begun = CKPQBegin(conn);
+		if (!begun)
+			goto unparam;
+	}
+		
+	if (*old_p_item) {
+		LOGDEBUG("%s(): updating old", __func__);
+
+		DATA_PAYMENTS(oldp, *old_p_item);
+
+		upd = "update payments set expirydate=$1 where paymentid=$2"
+			" and expirydate=$3";
+		par = 0;
+		params[par++] = tv_to_buf(cd, NULL, 0);
+		params[par++] = bigint_to_buf(oldp->paymentid, NULL, 0);
+		params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+		PARCHKVAL(par, 3, params);
+
+		res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Update", rescode, conn);
+			goto rollback;
+		}
+
+		for (n = 0; n < par; n++)
+			free(params[n]);
+		par = 0;
+
+		// Expiring an old record
+		row->paymentid = oldp->paymentid;
+	} else {
+		if (add) {
+			// Creating a new record
+			row->paymentid = nextid(conn, "paymentid", (int64_t)1, cd, by, code, inet);
+			if (row->paymentid == 0)
+				goto rollback;
+		}
+	}
+
+	if (add) {
+		LOGDEBUG("%s(): adding new", __func__);
+
+		HISTORYDATEINIT(row, cd, by, code, inet);
+		HISTORYDATETRANSFER(trf_root, row);
+
+		par = 0;
+		params[par++] = bigint_to_buf(row->paymentid, NULL, 0);
+		params[par++] = bigint_to_buf(row->payoutid, NULL, 0);
+		params[par++] = bigint_to_buf(row->userid, NULL, 0);
+		params[par++] = str_to_buf(row->subname, NULL, 0);
+		params[par++] = tv_to_buf(&(row->paydate), NULL, 0);
+		params[par++] = str_to_buf(row->payaddress, NULL, 0);
+		params[par++] = str_to_buf(row->originaltxn, NULL, 0);
+		params[par++] = bigint_to_buf(row->amount, NULL, 0);
+		params[par++] = double_to_buf(row->diffacc, NULL, 0);
+		params[par++] = str_to_buf(row->committxn, NULL, 0);
+		params[par++] = str_to_buf(row->commitblockhash, NULL, 0);
+		HISTORYDATEPARAMS(params, par, row);
+		PARCHK(par, params);
+
+		ins = "insert into payments "
+			"(paymentid,payoutid,userid,subname,paydate,payaddress,"
+			"originaltxn,amount,diffacc,committxn,commitblockhash"
+			HISTORYDATECONTROL ") values (" PQPARAM16 ")";
+
+		res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Insert", rescode, conn);
+			goto unparam;
+		}
+	}
+
+	ok = true;
+rollback:
+	if (begun)
+		CKPQEnd(conn, ok);
+unparam:
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	CKPQDisco(&conn, conned);
+
+	if (!already)
+		payments_add_ram(ok, p_item, *old_p_item, cd);
+
+	return ok;
+}
+
 bool payments_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
 	PGresult *res;
 	K_ITEM *item;
 	PAYMENTS *row;
-	char *params[1];
-	int n, i, par = 0;
+	int n, i;
 	char *field;
 	char *sel;
-	int fields = 8;
+	int fields = 11;
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
 
-	// TODO: handle selecting a subset, eg 20 per web page (in blocklist also)
 	sel = "select "
-		"userid,paydate,payaddress,originaltxn,amount,committxn,commitblockhash"
+		"paymentid,payoutid,userid,subname,paydate,payaddress,"
+		"originaltxn,amount,diffacc,committxn,commitblockhash"
 		HISTORYDATECONTROL
-		",paymentid from payments where expirydate=$1";
-	par = 0;
-	params[par++] = tv_to_buf((tv_t *)(&default_expiry), NULL, 0);
-	PARCHK(par, params);
-	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
+		" from payments";
+	res = PQexec(conn, sel, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
 		PGLOGERR("Select", rescode, conn);
@@ -1814,10 +2028,25 @@ bool payments_fill(PGconn *conn)
 			break;
 		}
 
+		PQ_GET_FLD(res, i, "paymentid", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("paymentid", field, row->paymentid);
+
+		PQ_GET_FLD(res, i, "payoutid", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("payoutid", field, row->payoutid);
+
 		PQ_GET_FLD(res, i, "userid", field, ok);
 		if (!ok)
 			break;
 		TXT_TO_BIGINT("userid", field, row->userid);
+
+		PQ_GET_FLD(res, i, "subname", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("subname", field, row->subname);
 
 		PQ_GET_FLD(res, i, "paydate", field, ok);
 		if (!ok)
@@ -1839,6 +2068,11 @@ bool payments_fill(PGconn *conn)
 			break;
 		TXT_TO_BIGINT("amount", field, row->amount);
 
+		PQ_GET_FLD(res, i, "diffacc", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_DOUBLE("diffacc", field, row->diffacc);
+
 		PQ_GET_FLD(res, i, "committxn", field, ok);
 		if (!ok)
 			break;
@@ -1852,11 +2086,6 @@ bool payments_fill(PGconn *conn)
 		HISTORYDATEFLDS(res, i, row, ok);
 		if (!ok)
 			break;
-
-		PQ_GET_FLD(res, i, "paymentid", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("paymentid", field, row->paymentid);
 
 		payments_root = add_to_ktree(payments_root, item, cmp_payments);
 		k_add_head(payments_store, item);
@@ -3653,7 +3882,7 @@ bool blocks_stats(PGconn *conn, int32_t height, char *blockhash,
 	dsp_hash(blockhash, hash_dsp, sizeof(hash_dsp));
 
 	K_RLOCK(blocks_free);
-	old_b_item = find_blocks(height, blockhash);
+	old_b_item = find_blocks(height, blockhash, NULL);
 	K_RUNLOCK(blocks_free);
 
 	if (!old_b_item) {
@@ -3811,7 +4040,7 @@ bool blocks_add(PGconn *conn, char *height, char *blockhash,
 	dsp_hash(blockhash, hash_dsp, sizeof(hash_dsp));
 
 	K_RLOCK(blocks_free);
-	old_b_item = find_blocks(row->height, blockhash);
+	old_b_item = find_blocks(row->height, blockhash, NULL);
 	K_RUNLOCK(blocks_free);
 	DATA_BLOCKS_NULL(oldblocks, old_b_item);
 
@@ -4297,96 +4526,128 @@ bool blocks_fill(PGconn *conn)
 	return ok;
 }
 
-bool miningpayouts_add(PGconn *conn, char *username, char *height,
-			char *blockhash, char *amount, char *by,
-			char *code, char *inet, tv_t *cd, K_TREE *trf_root)
+// The timing of the memory table updates depends on 'already'
+void miningpayouts_add_ram(bool ok, K_ITEM *mp_item, K_ITEM *old_mp_item, tv_t *cd)
+{
+	MININGPAYOUTS *oldmp;
+
+	LOGDEBUG("%s(): ok %c", __func__, ok ? 'Y' : 'N');
+
+	K_WLOCK(miningpayouts_free);
+	if (!ok) {
+		// Cleanup for the calling function
+		k_add_head(miningpayouts_free, mp_item);
+	} else {
+		if (old_mp_item) {
+			DATA_MININGPAYOUTS(oldmp, old_mp_item);
+			miningpayouts_root = remove_from_ktree(miningpayouts_root, old_mp_item, cmp_miningpayouts);
+			copy_tv(&(oldmp->expirydate), cd);
+			miningpayouts_root = add_to_ktree(miningpayouts_root, old_mp_item, cmp_miningpayouts);
+		}
+		miningpayouts_root = add_to_ktree(miningpayouts_root, mp_item, cmp_miningpayouts);
+		k_add_head(miningpayouts_store, mp_item);
+	}
+	K_WUNLOCK(miningpayouts_free);
+}
+
+/* Add means create a new one and expire the old one if it exists,
+ *  otherwise we only expire the old one if it exists
+ * It's the calling functions job to determine if a new one is required
+ *  - i.e. if there is a difference between the old and new
+ * already = already begun a transaction - and don't update the ram table */
+bool miningpayouts_add(PGconn *conn, bool add, K_ITEM *mp_item,
+			K_ITEM **old_mp_item, char *by, char *code, char *inet,
+			tv_t *cd, K_TREE *trf_root, bool already)
 {
 	ExecStatusType rescode;
 	bool conned = false;
 	PGresult *res;
-	K_ITEM *m_item, *u_item;
-	bool ok = false;
-	MININGPAYOUTS *row;
-	USERS *users;
-	char *ins;
-	char *params[5 + HISTORYDATECOUNT];
+	bool ok = false, begun = false;
+	MININGPAYOUTS *row, *oldmp = NULL;
+	char *upd, *ins;
+	char *params[4 + HISTORYDATECOUNT];
 	int n, par = 0;
 
-	LOGDEBUG("%s(): add", __func__);
+	LOGDEBUG("%s(): add %c already %c", __func__,
+		 add ? 'Y' : 'N', already ? 'Y' : 'N');
 
-	K_WLOCK(miningpayouts_free);
-	m_item = k_unlink_head(miningpayouts_free);
-	K_WUNLOCK(miningpayouts_free);
+	DATA_MININGPAYOUTS(row, mp_item);
+	K_RLOCK(miningpayouts_free);
+	*old_mp_item = find_miningpayouts(row->payoutid, row->userid);
+	K_RUNLOCK(miningpayouts_free);
 
-	DATA_MININGPAYOUTS(row, m_item);
+	conned = CKPQConn(&conn);
+	if (!already) {
+		begun = CKPQBegin(conn);
+		if (!begun)
+			goto unparam;
+	}
+		
+	if (*old_mp_item) {
+		LOGDEBUG("%s(): updating old", __func__);
 
-	if (conn == NULL) {
-		conn = dbconnect();
-		conned = true;
+		DATA_MININGPAYOUTS(oldmp, *old_mp_item);
+
+		upd = "update miningpayouts set expirydate=$1 where payoutid=$2"
+			" and userid=$3 and expirydate=$4";
+		par = 0;
+		params[par++] = tv_to_buf(cd, NULL, 0);
+		params[par++] = bigint_to_buf(oldmp->payoutid, NULL, 0);
+		params[par++] = bigint_to_buf(oldmp->userid, NULL, 0);
+		params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+		PARCHKVAL(par, 4, params);
+
+		res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Update", rescode, conn);
+			goto rollback;
+		}
+
+		for (n = 0; n < par; n++)
+			free(params[n]);
+		par = 0;
 	}
 
-	row->miningpayoutid = nextid(conn, "miningpayoutid", (int64_t)1, cd, by, code, inet);
-	if (row->miningpayoutid == 0)
-		goto unitem;
+	if (add) {
+		LOGDEBUG("%s(): adding new", __func__);
 
-	K_RLOCK(users_free);
-	u_item = find_users(username);
-	K_RUNLOCK(users_free);
-	if (!u_item) {
-		char *txt;
-		LOGERR("%s(): unknown user '%s'",
-			__func__,
-			txt = safe_text(username));
-		free(txt);
-		goto unitem;
-	}
-	DATA_USERS(users, u_item);
+		HISTORYDATEINIT(row, cd, by, code, inet);
+		HISTORYDATETRANSFER(trf_root, row);
 
-	row->userid = users->userid;
-	TXT_TO_INT("height", height, row->height);
-	STRNCPY(row->blockhash, blockhash);
-	TXT_TO_BIGINT("amount", amount, row->amount);
+		par = 0;
+		params[par++] = bigint_to_buf(row->payoutid, NULL, 0);
+		params[par++] = bigint_to_buf(row->userid, NULL, 0);
+		params[par++] = double_to_buf(row->diffacc, NULL, 0);
+		params[par++] = bigint_to_buf(row->amount, NULL, 0);
+		HISTORYDATEPARAMS(params, par, row);
+		PARCHK(par, params);
 
-	HISTORYDATEINIT(row, cd, by, code, inet);
-	HISTORYDATETRANSFER(trf_root, row);
+		ins = "insert into miningpayouts "
+			"(payoutid,userid,diffacc,amount"
+			HISTORYDATECONTROL ") values (" PQPARAM9 ")";
 
-	par = 0;
-	params[par++] = bigint_to_buf(row->miningpayoutid, NULL, 0);
-	params[par++] = bigint_to_buf(row->userid, NULL, 0);
-	params[par++] = int_to_buf(row->height, NULL, 0);
-	params[par++] = str_to_buf(row->blockhash, NULL, 0);
-	params[par++] = bigint_to_buf(row->amount, NULL, 0);
-	HISTORYDATEPARAMS(params, par, row);
-	PARCHK(par, params);
-
-	ins = "insert into miningpayouts "
-		"(miningpayoutid,userid,height,blockhash,amount"
-		HISTORYDATECONTROL ") values (" PQPARAM10 ")";
-
-	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-	rescode = PQresultStatus(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Insert", rescode, conn);
-		goto unparam;
+		res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Insert", rescode, conn);
+			goto unparam;
+		}
 	}
 
 	ok = true;
-
+rollback:
+	if (begun)
+		CKPQEnd(conn, ok);
 unparam:
-	PQclear(res);
 	for (n = 0; n < par; n++)
 		free(params[n]);
-unitem:
-	if (conned)
-		PQfinish(conn);
-	K_WLOCK(miningpayouts_free);
-	if (!ok)
-		k_add_head(miningpayouts_free, m_item);
-	else {
-		miningpayouts_root = add_to_ktree(miningpayouts_root, m_item, cmp_miningpayouts);
-		k_add_head(miningpayouts_store, m_item);
-	}
-	K_WUNLOCK(miningpayouts_free);
+
+	CKPQDisco(&conn, conned);
+
+	if (!already)
+		miningpayouts_add_ram(ok, mp_item, *old_mp_item, cd);
 
 	return ok;
 }
@@ -4397,23 +4658,19 @@ bool miningpayouts_fill(PGconn *conn)
 	PGresult *res;
 	K_ITEM *item;
 	MININGPAYOUTS *row;
-	char *params[1];
-	int n, i, par = 0;
+	int n, i;
 	char *field;
 	char *sel;
-	int fields = 5;
+	int fields = 4;
 	bool ok;
 
 	LOGDEBUG("%s(): select", __func__);
 
 	sel = "select "
-		"miningpayoutid,userid,height,blockhash,amount"
+		"payoutid,userid,diffacc,amount"
 		HISTORYDATECONTROL
-		" from miningpayouts where expirydate=$1";
-	par = 0;
-	params[par++] = tv_to_buf((tv_t *)(&default_expiry), NULL, 0);
-	PARCHK(par, params);
-	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
+		" from miningpayouts";
+	res = PQexec(conn, sel, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	if (!PGOK(rescode)) {
 		PGLOGERR("Select", rescode, conn);
@@ -4442,25 +4699,20 @@ bool miningpayouts_fill(PGconn *conn)
 			break;
 		}
 
-		PQ_GET_FLD(res, i, "miningpayoutid", field, ok);
+		PQ_GET_FLD(res, i, "payoutid", field, ok);
 		if (!ok)
 			break;
-		TXT_TO_BIGINT("miningpayoutid", field, row->miningpayoutid);
+		TXT_TO_BIGINT("payoutid", field, row->payoutid);
 
 		PQ_GET_FLD(res, i, "userid", field, ok);
 		if (!ok)
 			break;
 		TXT_TO_BIGINT("userid", field, row->userid);
 
-		PQ_GET_FLD(res, i, "height", field, ok);
+		PQ_GET_FLD(res, i, "diffacc", field, ok);
 		if (!ok)
 			break;
-		TXT_TO_INT("height", field, row->height);
-
-		PQ_GET_FLD(res, i, "blockhash", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_STR("blockhash", field, row->blockhash);
+		TXT_TO_DOUBLE("diffacc", field, row->diffacc);
 
 		PQ_GET_FLD(res, i, "amount", field, ok);
 		if (!ok)
@@ -4485,6 +4737,292 @@ bool miningpayouts_fill(PGconn *conn)
 	if (ok) {
 		LOGDEBUG("%s(): built", __func__);
 		LOGWARNING("%s(): loaded %d miningpayout records", __func__, n);
+	}
+
+	return ok;
+}
+
+// The timing of the memory table updates depends on 'already'
+void payouts_add_ram(bool ok, K_ITEM *p_item, K_ITEM *old_p_item, tv_t *cd)
+{
+	PAYOUTS *oldp;
+
+	LOGDEBUG("%s(): ok %c", __func__, ok ? 'Y' : 'N');
+
+	K_WLOCK(payouts_free);
+	if (!ok) {
+		// Cleanup for the calling function
+		k_add_head(payouts_free, p_item);
+	} else {
+		if (old_p_item) {
+			DATA_PAYOUTS(oldp, old_p_item);
+			payouts_root = remove_from_ktree(payouts_root, old_p_item, cmp_payouts);
+			payouts_id_root = remove_from_ktree(payouts_id_root, old_p_item, cmp_payouts_id);
+			copy_tv(&(oldp->expirydate), cd);
+			payouts_root = add_to_ktree(payouts_root, old_p_item, cmp_payouts);
+			payouts_id_root = add_to_ktree(payouts_id_root, old_p_item, cmp_payouts_id);
+		}
+		payouts_root = add_to_ktree(payouts_root, p_item, cmp_payouts);
+		payouts_id_root = add_to_ktree(payouts_id_root, p_item, cmp_payouts_id);
+		k_add_head(payouts_store, p_item);
+	}
+	K_WUNLOCK(payouts_free);
+}
+
+/* Add means create a new one and expire the old one if it exists,
+ *  otherwise we only expire the old one if it exists
+ * It's the calling functions job to determine if a new one is required
+ *  - i.e. if there is a difference between the old and new
+ * already = already begun a transaction - and don't update the ram table */
+bool payouts_add(PGconn *conn, bool add, K_ITEM *p_item, K_ITEM **old_p_item,
+		 char *by, char *code, char *inet, tv_t *cd, K_TREE *trf_root,
+		 bool already)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	PGresult *res;
+	bool ok = false, begun = false;
+	PAYOUTS *row, *oldpayouts = NULL;
+	char *upd, *ins;
+	char *params[13 + HISTORYDATECOUNT];
+	int n, par = 0;
+
+	LOGDEBUG("%s(): add %c already %c", __func__,
+		 add ? 'Y' : 'N', already ? 'Y' : 'N');
+
+	DATA_PAYOUTS(row, p_item);
+	K_RLOCK(payouts_free);
+	*old_p_item = find_payouts(row->height, row->blockhash);
+	K_RUNLOCK(payouts_free);
+
+	conned = CKPQConn(&conn);
+	if (!already) {
+		begun = CKPQBegin(conn);
+		if (!begun)
+			goto unparam;
+	}
+
+	if (*old_p_item) {
+		LOGDEBUG("%s(): updating old", __func__);
+
+		DATA_PAYOUTS(oldpayouts, *old_p_item);
+
+		upd = "update payouts set expirydate=$1 where payoutid=$2"
+			" and expirydate=$3";
+		par = 0;
+		params[par++] = tv_to_buf(cd, NULL, 0);
+		params[par++] = bigint_to_buf(oldpayouts->payoutid, NULL, 0);
+		params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+		PARCHKVAL(par, 3, params);
+
+		res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		PQclear(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Update", rescode, conn);
+			goto rollback;
+		}
+
+		for (n = 0; n < par; n++)
+			free(params[n]);
+		par = 0;
+
+		// Expiring an old record
+		row->payoutid = oldpayouts->payoutid;
+	} else {
+		if (add) {
+			// Creating a new record
+			row->payoutid = nextid(conn, "payoutid", (int64_t)1, cd, by, code, inet);
+			if (row->payoutid == 0)
+				goto rollback;
+		}
+	}
+
+	if (add) {
+		LOGDEBUG("%s(): adding new", __func__);
+
+		HISTORYDATEINIT(row, cd, by, code, inet);
+		HISTORYDATETRANSFER(trf_root, row);
+
+		par = 0;
+		params[par++] = bigint_to_buf(row->payoutid, NULL, 0);
+		params[par++] = int_to_buf(row->height, NULL, 0);
+		params[par++] = str_to_buf(row->blockhash, NULL, 0);
+		params[par++] = bigint_to_buf(row->minerreward, NULL, 0);
+		params[par++] = bigint_to_buf(row->workinfoidstart, NULL, 0);
+		params[par++] = bigint_to_buf(row->workinfoidend, NULL, 0);
+		params[par++] = bigint_to_buf(row->elapsed, NULL, 0);
+		params[par++] = str_to_buf(row->status, NULL, 0);
+		params[par++] = double_to_buf(row->diffwanted, NULL, 0);
+		params[par++] = double_to_buf(row->diffused, NULL, 0);
+		params[par++] = double_to_buf(row->shareacc, NULL, 0);
+		params[par++] = tv_to_buf(&(row->lastshareacc), NULL, 0);
+		params[par++] = str_to_buf(row->stats, NULL, 0);
+		HISTORYDATEPARAMS(params, par, row);
+		PARCHK(par, params);
+
+		ins = "insert into payouts "
+			"(payoutid,height,blockhash,minerreward,workinfoidstart,"
+			"workinfoidend,elapsed,status,diffwanted,diffused,shareacc,"
+			"lastshareacc,stats"
+			HISTORYDATECONTROL ") values (" PQPARAM18 ")";
+
+		res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+		rescode = PQresultStatus(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Insert", rescode, conn);
+			goto unparam;
+		}
+	}
+
+	ok = true;
+rollback:
+	if (begun)
+		CKPQEnd(conn, ok);
+unparam:
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	CKPQDisco(&conn, conned);
+
+	if (!already)
+		payouts_add_ram(ok, p_item, *old_p_item, cd);
+
+	return ok;
+}
+
+bool payouts_fill(PGconn *conn)
+{
+	ExecStatusType rescode;
+	PGresult *res;
+	K_ITEM *item;
+	PAYOUTS *row;
+	int n, i;
+	char *field;
+	char *sel;
+	int fields = 13;
+	bool ok;
+
+	LOGDEBUG("%s(): select", __func__);
+
+	sel = "select "
+		"payoutid,height,blockhash,minerreward,workinfoidstart,workinfoidend,"
+		"elapsed,status,diffwanted,diffused,shareacc,lastshareacc,stats"
+		HISTORYDATECONTROL
+		" from payouts";
+	res = PQexec(conn, sel, CKPQ_READ);
+	rescode = PQresultStatus(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Select", rescode, conn);
+		PQclear(res);
+		return false;
+	}
+
+	n = PQnfields(res);
+	if (n != (fields + HISTORYDATECOUNT)) {
+		LOGERR("%s(): Invalid field count - should be %d, but is %d",
+			__func__, fields + HISTORYDATECOUNT, n);
+		PQclear(res);
+		return false;
+	}
+
+	n = PQntuples(res);
+	LOGDEBUG("%s(): tree build count %d", __func__, n);
+	ok = true;
+	K_WLOCK(payouts_free);
+	for (i = 0; i < n; i++) {
+		item = k_unlink_head(payouts_free);
+		DATA_PAYOUTS(row, item);
+
+		if (everyone_die) {
+			ok = false;
+			break;
+		}
+
+		PQ_GET_FLD(res, i, "payoutid", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("payoutid", field, row->payoutid);
+
+		PQ_GET_FLD(res, i, "height", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_INT("height", field, row->height);
+
+		PQ_GET_FLD(res, i, "blockhash", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("blockhash", field, row->blockhash);
+
+		PQ_GET_FLD(res, i, "minerreward", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("minerreward", field, row->minerreward);
+
+		PQ_GET_FLD(res, i, "workinfoidstart", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("workinfoidstart", field, row->workinfoidstart);
+
+		PQ_GET_FLD(res, i, "workinfoidend", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("workinfoidend", field, row->workinfoidend);
+
+		PQ_GET_FLD(res, i, "elapsed", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BIGINT("elapsed", field, row->elapsed);
+
+		PQ_GET_FLD(res, i, "status", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_STR("status", field, row->status);
+
+		PQ_GET_FLD(res, i, "diffwanted", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_DOUBLE("diffwanted", field, row->diffwanted);
+
+		PQ_GET_FLD(res, i, "diffused", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_DOUBLE("diffused", field, row->diffused);
+
+		PQ_GET_FLD(res, i, "shareacc", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_DOUBLE("shareacc", field, row->shareacc);
+
+		PQ_GET_FLD(res, i, "lastshareacc", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_TV("lastshareacc", field, row->lastshareacc);
+
+		PQ_GET_FLD(res, i, "stats", field, ok);
+		if (!ok)
+			break;
+		TXT_TO_BLOB("stats", field, row->stats);
+
+		HISTORYDATEFLDS(res, i, row, ok);
+		if (!ok)
+			break;
+
+		payouts_root = add_to_ktree(payouts_root, item, cmp_payouts);
+		payouts_id_root = add_to_ktree(payouts_id_root, item, cmp_payouts_id);
+		k_add_head(payouts_store, item);
+
+		tick();
+	}
+	if (!ok)
+		k_add_head(payouts_free, item);
+
+	K_WUNLOCK(payouts_free);
+	PQclear(res);
+
+	if (ok) {
+		LOGDEBUG("%s(): built", __func__);
+		LOGWARNING("%s(): loaded %d payout records", __func__, n);
 	}
 
 	return ok;
@@ -5312,7 +5850,8 @@ bool _workmarkers_process(PGconn *conn, bool already, bool add,
 	bool ok = false, begun = false;
 	int n, par = 0;
 
-	LOGDEBUG("%s(): add", __func__);
+	LOGDEBUG("%s(): add %c already %c", __func__,
+		 add ? 'Y' : 'N', already ? 'Y' : 'N');
 
 	if (markerid == 0) {
 		K_RLOCK(workmarkers_free);
@@ -5324,6 +5863,8 @@ bool _workmarkers_process(PGconn *conn, bool already, bool add,
 		K_RUNLOCK(workmarkers_free);
 	}
 	if (old_wm_item) {
+		LOGDEBUG("%s(): updating old", __func__);
+
 		DATA_WORKMARKERS(oldworkmarkers, old_wm_item);
 		if (!conn) {
 			conn = dbconnect();
@@ -5363,6 +5904,8 @@ bool _workmarkers_process(PGconn *conn, bool already, bool add,
 	}
 
 	if (add) {
+		LOGDEBUG("%s(): adding new", __func__);
+
 		if (poolinstance == NULL || description == NULL ||
 		    status == NULL) {
 			LOGEMERG("%s(): NULL field(s) passed:%s%s%s"
@@ -5639,12 +6182,14 @@ bool _marks_process(PGconn *conn, bool add, char *poolinstance,
 	bool ok = false, begun = false;
 	int n, par = 0;
 
-	LOGDEBUG("%s(): add", __func__);
+	LOGDEBUG("%s(): add %c", __func__, add ? 'Y' : 'N');
 
 	K_RLOCK(marks_free);
 	old_m_item = find_marks(workinfoid);
 	K_RUNLOCK(marks_free);
 	if (old_m_item) {
+		LOGDEBUG("%s(): updating old", __func__);
+
 		DATA_MARKS(oldmarks, old_m_item);
 		if (!conn) {
 			conn = dbconnect();
@@ -5682,6 +6227,8 @@ bool _marks_process(PGconn *conn, bool add, char *poolinstance,
 	}
 
 	if (add) {
+		LOGDEBUG("%s(): adding new", __func__);
+
 		if (poolinstance == NULL || description == NULL ||
 		    extra == NULL || marktype == NULL || status == NULL) {
 			LOGEMERG("%s(): NULL field(s) passed:%s%s%s%s%s"
