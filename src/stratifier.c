@@ -1335,9 +1335,15 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, user_insta
 		client->disconnected_time = time(NULL);
 	} else {
 		if (client->workername) {
-			ASPRINTF(msg, "Client %"PRId64" %s %suser %s worker %s dropped %s",
-				 client->id, client->address, user->throttled ? "throttled " : "",
-				 user->username, client->workername, lazily ? "lazily" : "");
+			if (user) {
+				ASPRINTF(msg, "Client %"PRId64" %s %suser %s worker %s dropped %s",
+					client->id, client->address, user->throttled ? "throttled " : "",
+					user->username, client->workername, lazily ? "lazily" : "");
+			} else {
+				ASPRINTF(msg, "Client %"PRId64" %s no user worker %s dropped %s",
+					client->id, client->address, client->workername,
+					lazily ? "lazily" : "");
+			}
 		} else {
 			ASPRINTF(msg, "Workerless client %"PRId64" %s dropped %s",
 				 client->id, client->address, lazily ? "lazily" : "");
