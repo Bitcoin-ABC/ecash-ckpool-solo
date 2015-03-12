@@ -110,6 +110,8 @@ div.topd {background-color:#cff; border-color: #cff; border-style: solid; border
 .topdat {margin-left: 8px; margin-right: 24px; color:green; font-weight: bold;}
 span.login {float: right; margin-left: 8px; margin-right: 24px;}
 span.hil {color:blue;}
+span.user {color:green;}
+span.addr {color:brown;}
 span.warn {color:orange; font-weight:bold;}
 span.urg {color:red; font-weight:bold;}
 span.err {color:red; font-weight:bold; font-size:120%;}
@@ -161,7 +163,7 @@ h1 {margin-top: 20px; float:middle; font-size: 20px;}
 #
 function pgtop($info, $dotop, $user, $douser)
 {
- global $site_title;
+ global $site_title, $loginfailed;
 
  $phr = '?THs';
  $plb = '?';
@@ -286,6 +288,8 @@ function pgtop($info, $dotop, $user, $douser)
  $top .= " You need to enable javascript to use";
  $top .= " the $site_title web site.</div>";
 
+ if ($loginfailed === true)
+	$top .= '<div class=accwarn>Login Failed</div>';
  if (isset($info['u_nopayaddr']))
 	$top .= '<div class=accwarn>Please set a payout address on your account!</div>';
  if (isset($info['u_noemail']))

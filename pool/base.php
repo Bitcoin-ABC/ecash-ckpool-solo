@@ -63,10 +63,36 @@ function howlongago($sec)
  return $des;
 }
 #
+function howmanyhrs($tot)
+{
+ $sec = round($tot);
+ if ($sec < 60)
+	$des = $sec.'s';
+ else
+ {
+	$min = floor($sec / 60);
+	$sec -= $min * 60;
+	if ($min < 60)
+		$des = $min.'m '.$sec.'s';
+	else
+	{
+		$hr = floor($min / 60);
+		$min -= $hr * 60;
+		$des = $hr.'hr '.$min.'m '.$sec.'s';
+	}
+ }
+ return $des;
+}
+#
 function btcfmt($amt)
 {
  $amt /= 100000000;
  return number_format($amt, 8);
+}
+#
+function utcd($when)
+{
+ return gmdate('Y-m-d H:i:s+00', round($when));
 }
 #
 global $sipre;
@@ -308,7 +334,9 @@ function validUserPass($user, $pass)
 	$key = 'ckp'.rand(1000000,9999999);
 	$_SESSION['ckpkey'] = $key;
 	$_SESSION[$key] = array('who' => $user, 'id' => $user);
+	return true;
  }
+ return false;
 }
 #
 function logout()
@@ -338,6 +366,8 @@ function requestRegister()
 #
 function tryLogInOut()
 {
+ global $loginfailed;
+
  // If already logged in, it will ignore User/Pass
  if (isset($_SESSION['ckpkey']))
  {
@@ -347,21 +377,29 @@ function tryLogInOut()
  }
  else
  {
-	$user = getparam('User', false);
-	if ($user !== NULL)
-		$user = loginStr($user);
-	if (nuem($user))
-		return;
-
-	$pass = getparam('Pass', false);
-	if (nuem($pass))
-		return;
-
 	$login = getparam('Login', false);
 	if (nuem($login))
 		return;
 
-	validUserPass($user, $pass);
+	$user = getparam('User', false);
+	if ($user !== NULL)
+		$user = loginStr($user);
+	if (nuem($user))
+	{
+		$loginfailed = true;
+		return;
+	}
+
+	$pass = getparam('Pass', false);
+	if (nuem($pass))
+	{
+		$loginfailed = true;
+		return;
+	}
+
+	$valid = validUserPass($user, $pass);
+	if (!$valid)
+		$loginfailed = true;
  }
 }
 #

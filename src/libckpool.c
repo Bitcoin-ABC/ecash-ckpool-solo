@@ -337,25 +337,6 @@ void _ck_rlock(cklock_t *lock, const char *file, const char *func, const int lin
 	_mutex_unlock(&lock->mutex, file, func, line);
 }
 
-/* Intermediate variant of cklock - behaves as a read lock but can be promoted
- * to a write lock or demoted to read lock. */
-void _ck_ilock(cklock_t *lock, const char *file, const char *func, const int line)
-{
-	_mutex_lock(&lock->mutex, file, func, line);
-}
-
-/* Unlock intermediate variant without changing to read or write version */
-void _ck_uilock(cklock_t *lock, const char *file, const char *func, const int line)
-{
-	_mutex_unlock(&lock->mutex, file, func, line);
-}
-
-/* Upgrade intermediate variant to a write lock */
-void _ck_ulock(cklock_t *lock, const char *file, const char *func, const int line)
-{
-	_wr_lock(&lock->rwlock, file, func, line);
-}
-
 /* Write lock variant of cklock */
 void _ck_wlock(cklock_t *lock, const char *file, const char *func, const int line)
 {
@@ -375,13 +356,6 @@ void _ck_dwlock(cklock_t *lock, const char *file, const char *func, const int li
 void _ck_dwilock(cklock_t *lock, const char *file, const char *func, const int line)
 {
 	_wr_unlock(&lock->rwlock, file, func, line);
-}
-
-/* Downgrade intermediate variant to a read lock */
-void _ck_dlock(cklock_t *lock, const char *file, const char *func, const int line)
-{
-	_rd_lock(&lock->rwlock, file, func, line);
-	_mutex_unlock(&lock->mutex, file, func, line);
 }
 
 void _ck_runlock(cklock_t *lock, const char *file, const char *func, const int line)

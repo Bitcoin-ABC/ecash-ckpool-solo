@@ -37,6 +37,9 @@
 #include <postgresql/libpq-fe.h>
 #endif
 
+#include <gsl/gsl_math.h>
+#include <gsl/gsl_cdf.h>
+
 #include "ckpool.h"
 #include "libckpool.h"
 
@@ -52,7 +55,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.0"
-#define CKDB_VERSION DB_VERSION"-1.007"
+#define CKDB_VERSION DB_VERSION"-1.023"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -192,6 +195,11 @@ extern POOLSTATUS pool;
 		_dstoff += _srclen; \
 	} while(0)
 
+#define APPEND_REALLOC_RESET(_buf, _off) do { \
+		(_buf)[0] = '\0'; \
+		_off = 0; \
+	} while(0)
+
 enum data_type {
 	TYPE_STR,
 	TYPE_BIGINT,
@@ -274,6 +282,7 @@ extern bool everyone_die;
 extern tv_t last_heartbeat;
 extern tv_t last_workinfo;
 extern tv_t last_share;
+extern tv_t last_share_inv;
 extern tv_t last_auth;
 extern cklock_t last_lock;
 
@@ -341,6 +350,8 @@ enum cmd_values {
 	CMD_PPLNS,
 	CMD_PPLNS2,
 	CMD_PAYOUTS,
+	CMD_MPAYOUTS,
+	CMD_SHIFTS,
 	CMD_USERSTATUS,
 	CMD_MARKS,
 	CMD_END
@@ -1092,6 +1103,26 @@ typedef struct blocks {
 	char statsconfirmed[TXT_FLAG+1];
 	HISTORYDATECONTROLFIELDS;
 	bool ignore; // Non DB field
+
+	// Calculated only when = 0
+	double netdiff;
+
+	/* Non DB fields for the web page
+	 * Calculate them once off/recalc them when required */
+	double blockdiffratio;
+	double blockcdf;
+	double blockluck;
+
+	/* diffacc for range calculations - includes orphans before it
+	 * orphans have this set to 0 so they can't be double counted */
+	double diffcalc;
+
+	/* From the last found block to this one
+	 * Orphans have these set to zero */
+	double diffratio;
+	double diffmean;
+	double cdferl;
+	double luck;
 } BLOCKS;
 
 #define ALLOC_BLOCKS 100
@@ -1131,6 +1162,8 @@ extern const char *blocks_unknown;
 extern K_TREE *blocks_root;
 extern K_LIST *blocks_free;
 extern K_STORE *blocks_store;
+extern tv_t blocks_stats_time;
+extern bool blocks_stats_rebuild;
 
 // MININGPAYOUTS
 typedef struct miningpayouts {
@@ -1190,6 +1223,10 @@ extern cklock_t process_pplns_lock;
 #define PAYOUTS_PROCESSING 'P'
 #define PAYOUTS_PROCESSING_STR "P"
 #define PAYPROCESSING(_status) ((_status)[0] == PAYOUTS_PROCESSING)
+// An orphaned payout must be ignored
+#define PAYOUTS_ORPHAN 'O'
+#define PAYOUTS_ORPHAN_STR "O"
+#define PAYORPHAN(_status) ((_status)[0] == PAYOUTS_ORPHAN)
 
 /*
 // EVENTLOG
@@ -1717,6 +1754,7 @@ extern int32_t _coinbase1height(char *coinbase1, WHERE_FFL_ARGS);
 extern cmp_t _cmp_height(char *coinbase1a, char *coinbase1b, WHERE_FFL_ARGS);
 extern cmp_t cmp_workinfo_height(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_workinfo(int64_t workinfoid, K_TREE_CTX *ctx);
+extern K_ITEM *next_workinfo(int64_t workinfoid, K_TREE_CTX *ctx);
 extern bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 			 char *by, char *code, char *inet, tv_t *cd,
 			 tv_t *ss_first, tv_t *ss_last, int64_t *ss_count,
@@ -1737,6 +1775,8 @@ void _dbhash2btchash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS);
 #define dsp_hash(_hash, _buf, _siz) \
 	_dsp_hash(_hash, _buf, _siz, WHERE_FFL_HERE)
 extern void _dsp_hash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS);
+#define blockhash_diff(_hash) _blockhash_diff(_hash, WHERE_FFL_HERE)
+extern double _blockhash_diff(char *hash, WHERE_FFL_ARGS);
 extern void dsp_blocks(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_blocks(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_blocks(int32_t height, char *blockhash, K_TREE_CTX *ctx);
@@ -1744,6 +1784,7 @@ extern K_ITEM *find_prev_blocks(int32_t height);
 extern const char *blocks_confirmed(char *confirmed);
 extern void zero_on_new_block();
 extern void set_block_share_counters();
+extern bool check_update_blocks_stats(tv_t *stats);
 extern cmp_t cmp_miningpayouts(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_miningpayouts(int64_t payoutid, int64_t userid);
 extern K_ITEM *first_miningpayouts(int64_t payoutid, K_TREE_CTX *ctx);

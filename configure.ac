@@ -38,6 +38,7 @@ AC_CHECK_HEADERS(alloca.h pthread.h stdio.h math.h signal.h sys/prctl.h)
 AC_CHECK_HEADERS(sys/types.h sys/socket.h sys/stat.h linux/un.h netdb.h)
 AC_CHECK_HEADERS(stdint.h netinet/in.h netinet/tcp.h sys/ioctl.h getopt.h)
 AC_CHECK_HEADERS(sys/epoll.h libpq-fe.h postgresql/libpq-fe.h grp.h)
+AC_CHECK_HEADERS(gsl/gsl_math.h gsl/gsl_cdf.h)
 
 PTHREAD_LIBS="-lpthread"
 MATH_LIBS="-lm"
@@ -59,8 +60,12 @@ AC_ARG_WITH([ckdb],
 if test "x$ckdb" != "xno"; then
 	AC_CHECK_LIB([pq], [main],[PQ=-lpq],echo "Error: Required library libpq-dev
 		not found. Install it or disable postgresql support with --without-ckdb" && exit 1)
+	AC_CHECK_LIB([gsl], [main],[GSL=-lgsl],echo "Error: Required library gsl-dev
+		not found. Install it or disable support with --without-ckdb" && exit 1)
+	AC_CHECK_LIB([gslcblas], [main],[GSLCBLAS=-lgslcblas],echo "Error: Required library gslcblas
+		not found. Install it or disable support with --without-ckdb" && exit 1)
 	AC_DEFINE([USE_CKDB], [1], [Defined to 1 if ckdb support required])
-	PQ_LIBS="-lpq"
+	PQ_LIBS="-lpq -lgsl -lgslcblas"
 else
 	PQ_LIBS=""
 fi

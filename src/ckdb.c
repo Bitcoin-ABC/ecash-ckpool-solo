@@ -279,6 +279,7 @@ bool everyone_die = false;
 tv_t last_heartbeat;
 tv_t last_workinfo;
 tv_t last_share;
+tv_t last_share_inv;
 tv_t last_auth;
 cklock_t last_lock;
 
@@ -398,6 +399,8 @@ const char *blocks_unknown = "?Unknown?";
 K_TREE *blocks_root;
 K_LIST *blocks_free;
 K_STORE *blocks_store;
+tv_t blocks_stats_time;
+bool blocks_stats_rebuild = true;
 
 // MININGPAYOUTS
 K_TREE *miningpayouts_root;
@@ -2663,6 +2666,8 @@ static void *socketer(__maybe_unused void *arg)
 					case CMD_PPLNS:
 					case CMD_PPLNS2:
 					case CMD_PAYOUTS:
+					case CMD_MPAYOUTS:
+					case CMD_SHIFTS:
 					case CMD_DSP:
 					case CMD_BLOCKSTATUS:
 						if (!startup_complete) {
@@ -2882,6 +2887,8 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_PPLNS:
 			case CMD_PPLNS2:
 			case CMD_PAYOUTS:
+			case CMD_MPAYOUTS:
+			case CMD_SHIFTS:
 			case CMD_USERSTATUS:
 			case CMD_MARKS:
 				LOGERR("%s() Message line %"PRIu64" '%s' - invalid - ignored",
@@ -3250,6 +3257,7 @@ static void *listener(void *arg)
 		setnow(&last_heartbeat);
 		copy_tv(&last_workinfo, &last_heartbeat);
 		copy_tv(&last_share, &last_heartbeat);
+		copy_tv(&last_share_inv, &last_heartbeat);
 		copy_tv(&last_auth, &last_heartbeat);
 		ck_wunlock(&last_lock);
 

@@ -1,25 +1,44 @@
 <?php
 #
+function sortheight($a, $b)
+{
+ return $b['height'] - $a['height'];
+}
+#
 function dopayments($data, $user)
 {
  $bc = 'https://blockchain.info/address/';
  $addr1 = '1KzFJddTvK9TQWsmWFKYJ9fRx9QeSATyrT';
 
  $pg = '<h1>Payments</h1>';
- $pg .= 'The payout transactions on blockchain are here:';
- $pg .= " <a href='$bc$addr1' target=_blank>BTC</a><br><br>";
+ $pg .= 'The payment transactions on blockchain are here:';
+ $pg .= " <a href='$bc$addr1' target=_blank>BTC</a><br>";
+ $pg .= "The payments below don't yet show when they have been sent.<br><br>";
 
  $ans = getPayments($user);
 
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= "<tr class=title>";
- $pg .= "<td class=dl>Date</td>";
+ $pg .= "<td class=dl>Block</td>";
  $pg .= "<td class=dl>Address</td>";
+ $pg .= "<td class=dl>Status</td>";
  $pg .= "<td class=dr>BTC</td>";
+ $pg .= "<td class=dl></td>";
  $pg .= "</tr>\n";
  if ($ans['STATUS'] == 'ok')
  {
+	$all = array();
 	$count = $ans['rows'];
+	for ($i = 0; $i < $count; $i++)
+	{
+		$all[] = array('payoutid' => $ans['payoutid:'.$i],
+				'height' => $ans['height:'.$i],
+				'payaddress' => $ans['payaddress:'.$i],
+				'amount' => $ans['amount:'.$i],
+				'paydate' => $ans['paydate:'.$i]);
+	}
+	usort($all, 'sortheight');
+	$hasdust = false;
 	for ($i = 0; $i < $count; $i++)
 	{
 		if (($i % 2) == 0)
@@ -28,10 +47,27 @@ function dopayments($data, $user)
 			$row = 'odd';
 
 		$pg .= "<tr class=$row>";
-		$pg .= '<td class=dl>'.$ans['paydate:'.$i].'</td>';
-		$pg .= '<td class=dl>'.$ans['payaddress:'.$i].'</td>';
-		$pg .= '<td class=dr>'.btcfmt($ans['amount:'.$i]).'</td>';
+		$pg .= '<td class=dl>'.$all[$i]['height'].'</td>';
+		$pg .= '<td class=dl>'.$all[$i]['payaddress'].'</td>';
+		$pg .= '<td class=dl>&nbsp;</td>';
+		$amount = $all[$i]['amount'];
+		if ($amount < '10000')
+		{
+			$dust = '<span class=st1>*</span>';
+			$hasdust = true;
+		}
+		else
+			$dust = '&nbsp;';
+		$pg .= '<td class=dr>'.btcfmt($amount).'</td>';
+		$pg .= "<td class=dl>$dust</td>";
 		$pg .= "</tr>\n";
+	}
+	if ($hasdust === true)
+	{
+		$pg .= '<tr><td colspan=5 class=dc>';
+		$pg .= '<font size=-1><span class=st1>*</span> ';
+		$pg .= 'Dust payments are not automatically sent out';
+		$pg .= '</font></td></tr>';
 	}
  }
  $pg .= "</table>\n";

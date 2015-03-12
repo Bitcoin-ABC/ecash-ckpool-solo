@@ -56,6 +56,43 @@ function doblocks($data, $user)
 
  if ($wantcsv === false)
  {
+	if ($ans['STATUS'] == 'ok' and isset($ans['s_rows']) and $ans['s_rows'] > 0)
+	{
+		$pg .= '<h1>Block Statistics</h1>';
+		$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+		$pg .= "<tr class=title>";
+		$pg .= "<td class=dl>Description</td>";
+		$pg .= "<td class=dr>Diff%</td>";
+		$pg .= "<td class=dr>Mean%</td>";
+		$pg .= "<td class=dr>CDF[Erl]</td>";
+		$pg .= "<td class=dr>Luck%</td>";
+		$pg .= "</tr>\n";
+
+		$count = $ans['s_rows'];
+		for ($i = 0; $i < $count; $i++)
+		{
+			if (($i % 2) == 0)
+				$row = 'even';
+			else
+				$row = 'odd';
+
+			$desc = $ans['s_desc:'.$i];
+			$diff = number_format(100 * $ans['s_diffratio:'.$i], 2);
+			$mean = number_format(100 * $ans['s_diffmean:'.$i], 2);
+			$cdferl = number_format($ans['s_cdferl:'.$i], 4);
+			$luck = number_format(100 * $ans['s_luck:'.$i], 2);
+
+			$pg .= "<tr class=$row>";
+			$pg .= "<td class=dl>$desc Blocks</td>";
+			$pg .= "<td class=dr>$diff%</td>";
+			$pg .= "<td class=dr>$mean%</td>";
+			$pg .= "<td class=dr>$cdferl</td>";
+			$pg .= "<td class=dr>$luck%</td>";
+			$pg .= "</tr>\n";
+		}
+		$pg .= "</table>\n";
+	}
+
 	if ($ans['STATUS'] == 'ok')
 	{
 		$count = $ans['rows'];
@@ -70,15 +107,15 @@ function doblocks($data, $user)
 			$s = 's';
 		}
 
-		$pg = "<h1>Last$num Block$s</h1>";
+		$pg .= "<h1>Last$num Block$s</h1>";
 	}
 	else
-		$pg = '<h1>Blocks</h1>';
+		$pg .= '<h1>Blocks</h1>';
 
 	list($fg, $bg) = pctcolour(25.0);
 	$pg .= "<span style='background:$bg; color:$fg;'>";
 	$pg .= "&nbsp;Green&nbsp;</span>&nbsp;";
-	$pg .= 'is good luck. Lower Diff% and bright green is best luck.<br>';
+	$pg .= 'is good luck. Lower Diff% and brighter green is better luck.<br>';
 	list($fg, $bg) = pctcolour(100.0);
 	$pg .= "<span style='background:$bg; color:$fg;'>";
 	$pg .= "&nbsp;100%&nbsp;</span>&nbsp;";
@@ -86,7 +123,7 @@ function doblocks($data, $user)
 	list($fg, $bg) = pctcolour(400.0);
 	$pg .= "<span style='background:$bg; color:$fg;'>";
 	$pg .= "&nbsp;Red&nbsp;</span>&nbsp;";
-	$pg .= 'is bad luck. Higher Diff% and bright red is worse luck.<br><br>';
+	$pg .= 'is bad luck. Higher Diff% and brighter red is worse luck.<br><br>';
 
 	$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
 	$pg .= "<tr class=title>";
@@ -94,7 +131,7 @@ function doblocks($data, $user)
 	$pg .= "<td class=dl>Height</td>";
 	if ($user !== null)
 		$pg .= "<td class=dl>Who</td>";
-	$pg .= "<td class=dr>Reward</td>";
+	$pg .= "<td class=dr>Block Reward</td>";
 	$pg .= "<td class=dc>When</td>";
 	$pg .= "<td class=dr>Status</td>";
 	$pg .= "<td class=dr>Diff</td>";
@@ -109,7 +146,6 @@ function doblocks($data, $user)
  $csv = "Sequence,Height,Status,Timestamp,DiffAcc,NetDiff,Hash\n";
  if ($ans['STATUS'] == 'ok')
  {
-	$tot = $ans['tot'];
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
 	{
@@ -130,7 +166,7 @@ function doblocks($data, $user)
 			$seq = '';
 		}
 		else
-			$seq = $tot--;
+			$seq = $ans['seq:'.$i];
 		if ($stat == '1-Confirm')
 		{
 			if (isset($data['info']['lastheight']))
@@ -143,37 +179,34 @@ function doblocks($data, $user)
 		}
 
 		$stara = '';
-		$starp = '';
-		if (isset($ans['status:'.($i+1)]))
-			if ($ans['status:'.($i+1)] == 'Orphan'
-			&&  $stat != 'Orphan')
-			{
-				$stara = '<span class=st1>*</span>';
-				$starp = '<span class=st0>*</span>';
-			}
+		if ($stat == 'Orphan')
+			$stara = '<span class=st1>*</span>';
 
 		$diffacc = $ans['diffacc:'.$i];
 		$acc = number_format($diffacc, 0);
 
 		$netdiff = $ans['netdiff:'.$i];
-		if ($netdiff > 0)
+		$diffratio = $ans['diffratio:'.$i];
+		$cdf = $ans['cdf:'.$i];
+		$luck = $ans['luck:'.$i];
+
+		if ($diffratio > 0)
 		{
-			$pct = 100.0 * $diffacc / $netdiff;
+			$pct = 100.0 * $diffratio;
 			list($fg, $bg) = pctcolour($pct);
-			$bpct = "<font color=$fg>$starp".number_format($pct, 2).'%</font>';
+			$bpct = "<font color=$fg>".number_format($pct, 2).'%</font>';
 			$bg = " bgcolor=$bg";
 			$blktot += $diffacc;
 			if ($stat != 'Orphan')
 				$nettot += $netdiff;
 
-			$cdfv = 1 - exp(-1 * $diffacc / $netdiff);
-			$cdf = number_format($cdfv, 2);
+			$cdfdsp = number_format($cdf, 2);
 		}
 		else
 		{
 			$bg = '';
 			$bpct = '?';
-			$cdf = '?';
+			$cdfdsp = '?';
 		}
 
 		if ($wantcsv === false)
@@ -184,11 +217,11 @@ function doblocks($data, $user)
 		 if ($user !== null)
 			$pg .= "<td class=dl$ex>".htmlspecialchars($ans['workername:'.$i]).'</td>';
 		 $pg .= "<td class=dr$ex>".btcfmt($ans['reward:'.$i]).'</td>';
-		 $pg .= "<td class=dl$ex>".gmdate('Y-m-d H:i:s+00', $ans['firstcreatedate:'.$i]).'</td>';
+		 $pg .= "<td class=dl$ex>".utcd($ans['firstcreatedate:'.$i]).'</td>';
 		 $pg .= "<td class=dr$ex>".$stat.'</td>';
 		 $pg .= "<td class=dr>$stara$acc</td>";
 		 $pg .= "<td class=dr$bg>$bpct</td>";
-		 $pg .= "<td class=dr>$cdf</td>";
+		 $pg .= "<td class=dr>$cdfdsp</td>";
 		 $pg .= "</tr>\n";
 		}
 		else
@@ -208,39 +241,16 @@ function doblocks($data, $user)
 	echo $csv;
 	exit(0);
  }
- if ($nettot > 0)
+ if ($orph === true)
  {
-	if (($i % 2) == 0)
-		$row = 'even';
-	else
-		$row = 'odd';
-
-	$pct = 100.0 * $blktot / $nettot;
-	list($fg, $bg) = pctcolour($pct);
-	$bpct = "<font color=$fg>".number_format($pct, 2).'%</font>';
-	$bg = " bgcolor=$bg";
-
-	$pg .= "<tr class=$row>";
-	$pg .= '<td colspan=2 class=dr>Total:</td>';
-	$pg .= '<td class=dl colspan=';
+	$pg .= '<tr><td colspan=';
 	if ($user === null)
-		$pg .= '4';
+		$pg .= '7';
 	else
-		$pg .= '5';
-	$pg .= '></td>';
-	$pg .= "<td class=dr$bg>".$bpct.'</td>';
-	$pg .= "<td></td></tr>\n";
-	if ($orph === true)
-	{
-		$pg .= '<tr><td colspan=';
-		if ($user === null)
-			$pg .= '7';
-		else
-			$pg .= '8';
-		$pg .= ' class=dc><font size=-1><span class=st1>*</span>';
-		$pg .= '% total is adjusted to include orphans correctly';
-		$pg .= '</font></td></tr>';
-	}
+		$pg .= '8';
+	$pg .= ' class=dc><font size=-1><span class=st1>*</span>';
+	$pg .= "Orphans count as shares but not as a block in calculations";
+	$pg .= '</font></td></tr>';
  }
  $pg .= "</table>\n";
 

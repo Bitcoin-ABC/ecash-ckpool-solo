@@ -3,6 +3,9 @@
 global $stt;
 $stt = microtime();
 #
+global $loginfailed;
+$loginfailed = false;
+#
 include_once('param.php');
 include_once('base.php');
 #
@@ -67,11 +70,13 @@ function check()
 		'Home' => ''
 	),
 	'Account' => array(
+		'Rewards' => 'mpayouts',
 		'Payments' => 'payments',
 		'Settings' => 'settings',
 		'User Settings' => 'userset'
 	),
 	'Workers' => array(
+		'Shifts ' => 'shifts',
 		'Workers ' => 'workers',
 		'Management' => 'workmgt',
 	),

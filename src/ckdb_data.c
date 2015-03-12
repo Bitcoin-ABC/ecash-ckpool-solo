@@ -1569,6 +1569,34 @@ K_ITEM *find_workinfo(int64_t workinfoid, K_TREE_CTX *ctx)
 	return item;
 }
 
+K_ITEM *next_workinfo(int64_t workinfoid, K_TREE_CTX *ctx)
+{
+	WORKINFO workinfo, *wi;
+	K_TREE_CTX ctx0[1];
+	K_ITEM look, *item;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	workinfo.workinfoid = workinfoid;
+	workinfo.expirydate.tv_sec = default_expiry.tv_sec;
+	workinfo.expirydate.tv_usec = default_expiry.tv_usec;
+
+	INIT_WORKINFO(&look);
+	look.data = (void *)(&workinfo);
+	K_RLOCK(workinfo_free);
+	item = find_after_in_ktree(workinfo_root, &look, cmp_workinfo, ctx);
+	if (item) {
+		DATA_WORKINFO(wi, item);
+		while (item && !CURRENT(&(wi->expirydate))) {
+			item = next_in_ktree(ctx);
+			DATA_WORKINFO_NULL(wi, item);
+		}
+	}
+	K_RUNLOCK(workinfo_free);
+	return item;
+}
+
 bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
 		  char *by, char *code, char *inet, tv_t *cd,
 		  tv_t *ss_first, tv_t *ss_last, int64_t *ss_count,
@@ -2058,6 +2086,27 @@ void _dsp_hash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS)
 	STRNCPYSIZ(buf, ptr, siz);
 }
 
+double _blockhash_diff(char *hash, WHERE_FFL_ARGS)
+{
+	uchar binhash[SHA256SIZHEX >> 1];
+	uchar swap[SHA256SIZHEX >> 1];
+	size_t len;
+
+	len = strlen(hash);
+	// code bug - check this before calling
+	if (len != SHA256SIZHEX) {
+		quitfrom(1, file, func, line,
+			 "%s() invalid hash passed - size %d (%d)",
+			 __func__, (int)len, SHA256SIZHEX);
+	}
+
+	hex2bin(binhash, hash, sizeof(binhash));
+
+	flip_32(swap, binhash);
+
+	return diff_from_target(swap);
+}
+
 void dsp_blocks(K_ITEM *item, FILE *stream)
 {
 	char createdate_buf[DATE_BUFSIZ], expirydate_buf[DATE_BUFSIZ];
@@ -2348,6 +2397,131 @@ void set_block_share_counters()
 	}
 
 	LOGWARNING("%s(): Update block counters complete", __func__);
+}
+
+/* Must be under K_WLOCK(blocks_free) when called
+ * Call this before using the block stats and again check (under lock)
+ *  the blocks_stats_time didn't change after you finish processing
+ * If it has changed, redo the processing from scratch
+ * If return is false, then stats aren't available
+ * TODO: consider storing the partial calculations in the BLOCKS structure
+ *	and only recalc from the last block modified (remembered)
+ *	Will be useful with a large block history */
+bool check_update_blocks_stats(tv_t *stats)
+{
+	static int64_t last_missing_workinfoid = 0;
+	static tv_t last_message = { 0L, 0L };
+	K_TREE_CTX ctx[1];
+	K_ITEM *b_item, *w_item;
+	WORKINFO *workinfo;
+	BLOCKS *blocks;
+	char ndiffbin[TXT_SML+1];
+	double ok, diffacc, netsumm, diffmean, pending;
+	tv_t now;
+
+	/* Wait for startup_complete rather than db_load_complete
+	 * This avoids doing a 'long' lock stats update while reloading */
+	if (!startup_complete)
+		return false;
+
+	if (blocks_stats_rebuild) {
+		/* Have to first work out the diffcalc for each block
+		 * Orphans count towards the next valid block after the orphan
+		 *  so this has to be done in the reverse order of the range
+		 *  calculations */
+		pending = 0.0;
+		b_item = first_in_ktree(blocks_root, ctx);
+		while (b_item) {
+			DATA_BLOCKS(blocks, b_item);
+			if (CURRENT(&(blocks->expirydate))) {
+				pending += blocks->diffacc;
+				if (blocks->confirmed[0] == BLOCKS_ORPHAN)
+					blocks->diffcalc = 0.0;
+				else {
+					blocks->diffcalc = pending;
+					pending = 0.0;
+				}
+			}
+			b_item = next_in_ktree(ctx);
+		}
+		ok = diffacc = netsumm = diffmean = 0.0;
+		b_item = last_in_ktree(blocks_root, ctx);
+		while (b_item) {
+			DATA_BLOCKS(blocks, b_item);
+			if (CURRENT(&(blocks->expirydate))) {
+				if (blocks->netdiff == 0) {
+					// Deadlock alert
+					K_RLOCK(workinfo_free);
+					w_item = find_workinfo(blocks->workinfoid, NULL);
+					K_RUNLOCK(workinfo_free);
+					if (!w_item) {
+						setnow(&now);
+						if (!blocks->workinfoid != last_missing_workinfoid ||
+						    tvdiff(&now, &last_message) >= 5.0) {
+							LOGEMERG("%s(): missing block workinfoid %"
+								 PRId32"/%"PRId64"/%s",
+								 __func__, blocks->height,
+								 blocks->workinfoid,
+								 blocks->confirmed);
+						}
+						last_missing_workinfoid = blocks->workinfoid;
+						copy_tv(&last_message, &now);
+						return false;
+					}
+					DATA_WORKINFO(workinfo, w_item);
+					hex2bin(ndiffbin, workinfo->bits, 4);
+					blocks->netdiff = diff_from_nbits(ndiffbin);
+				}
+				/* Stats for each blocks are independent of
+				 * if they are orphans or not */
+				if (blocks->netdiff == 0.0)
+					blocks->blockdiffratio = 0.0;
+				else
+					blocks->blockdiffratio = blocks->diffacc / blocks->netdiff;
+				blocks->blockcdf = 1.0 - exp(-1.0 * blocks->blockdiffratio);
+				if (blocks->blockdiffratio == 0.0)
+					blocks->blockluck = 0.0;
+				else
+					blocks->blockluck = 1.0 / blocks->blockdiffratio;
+
+				/* Orphans are treated as +diffacc but no block
+				 *  i.e. they simply add shares to the later block
+				 *  and have running stats set to zero */
+				if (blocks->confirmed[0] == BLOCKS_ORPHAN) {
+					blocks->diffratio = 0.0;
+					blocks->diffmean = 0.0;
+					blocks->cdferl = 0.0;
+					blocks->luck = 0.0;
+				} else {
+					ok++;
+					diffacc += blocks->diffcalc;
+					netsumm += blocks->netdiff;
+
+					if (netsumm == 0.0)
+						blocks->diffratio = 0.0;
+					else
+						blocks->diffratio = diffacc / netsumm;
+
+					diffmean = ((diffmean * (ok - 1)) +
+						    (blocks->diffcalc / blocks->netdiff)) / ok;
+					blocks->diffmean = diffmean;
+
+					if (diffmean == 0.0) {
+						blocks->cdferl = 0.0;
+						blocks->luck = 0.0;
+					} else {
+						blocks->cdferl = gsl_cdf_gamma_P(diffmean, ok, 1.0 / ok);
+						blocks->luck = 1.0 / diffmean;
+					}
+				}
+			}
+			b_item = prev_in_ktree(ctx);
+		}
+		setnow(&blocks_stats_time);
+		blocks_stats_rebuild = false;
+	}
+	copy_tv(stats, &blocks_stats_time);
+	return true;
 }
 
 /* order by payoutid asc,userid asc,expirydate asc
