@@ -2183,6 +2183,13 @@ K_ITEM *optioncontrol_item_add(PGconn *conn, K_ITEM *oc_item, tv_t *cd, bool beg
 
 	DATA_OPTIONCONTROL(row, oc_item);
 
+	// Enforce the rule that switch_state isn't date/height controlled
+	if (strcmp(row->optionname, SWITCH_STATE_NAME) == 0) {
+		row->activationdate.tv_sec = date_begin.tv_sec;
+		row->activationdate.tv_usec = date_begin.tv_usec;
+		row->activationheight = OPTIONCONTROL_HEIGHT;
+	}
+
 	INIT_OPTIONCONTROL(&look);
 	look.data = (void *)row;
 	K_RLOCK(optioncontrol_free);
@@ -2282,6 +2289,11 @@ nostart:
 		}
 		optioncontrol_root = add_to_ktree(optioncontrol_root, oc_item, cmp_optioncontrol);
 		k_add_head(optioncontrol_store, oc_item);
+		if (strcmp(row->optionname, SWITCH_STATE_NAME) == 0) {
+			switch_state = atoi(row->optionvalue);
+			LOGWARNING("%s() set switch_state to %d",
+				   __func__, switch_state);
+		}
 	}
 	K_WUNLOCK(optioncontrol_free);
 
@@ -2320,7 +2332,7 @@ K_ITEM *optioncontrol_add(PGconn *conn, char *optionname, char *optionvalue,
 		TXT_TO_INT("activationheight", activationheight,
 			   row->activationheight);
 	} else
-		row->activationheight = 1;
+		row->activationheight = OPTIONCONTROL_HEIGHT;
 
 	HISTORYDATEINIT(row, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, row);
@@ -2406,6 +2418,14 @@ bool optioncontrol_fill(PGconn *conn)
 
 		optioncontrol_root = add_to_ktree(optioncontrol_root, item, cmp_optioncontrol);
 		k_add_head(optioncontrol_store, item);
+
+		// There should only be one CURRENT version of switch_state
+		if (CURRENT(&(row->expirydate)) &&
+		    strcmp(row->optionname, SWITCH_STATE_NAME) == 0) {
+			switch_state = atoi(row->optionvalue);
+			LOGWARNING("%s() set switch_state to %d",
+				   __func__, switch_state);
+		}
 	}
 	if (!ok) {
 		FREENULL(row->optionvalue);
@@ -2418,6 +2438,8 @@ bool optioncontrol_fill(PGconn *conn)
 	if (ok) {
 		LOGDEBUG("%s(): built", __func__);
 		LOGWARNING("%s(): loaded %d optioncontrol records", __func__, n);
+		LOGWARNING("%s() switch_state initially %d",
+			   __func__, switch_state);
 	}
 
 	return ok;

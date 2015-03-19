@@ -1113,6 +1113,26 @@ K_ITEM *find_workers(int64_t userid, char *workername)
 	return find_in_ktree(workers_root, &look, cmp_workers, ctx);
 }
 
+K_ITEM *first_workers(int64_t userid, K_TREE_CTX *ctx)
+{
+	WORKERS workers;
+	K_TREE_CTX ctx0[1];
+	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	workers.userid = userid;
+	workers.workername[0] = '\0';
+	workers.expirydate.tv_sec = 0L;
+	workers.expirydate.tv_usec = 0L;
+
+	INIT_WORKERS(&look);
+	look.data = (void *)(&workers);
+	// Caller needs to check userid/expirydate if the result != NULL
+	return find_after_in_ktree(workers_root, &look, cmp_workers, ctx);
+}
+
 K_ITEM *new_worker(PGconn *conn, bool update, int64_t userid, char *workername,
 		   char *diffdef, char *idlenotificationenabled,
 		   char *idlenotificationtime, char *by,

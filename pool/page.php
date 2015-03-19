@@ -98,6 +98,7 @@ function pghead($script_marker, $name)
  $head .= "window.onpaint=jst();\n</script>\n";
 
  $head .= "<style type='text/css'>
+input {vertical-align: -2px;}
 form {display: inline-block;}
 html, body {height: 100%; font-family:Arial, Verdana, sans-serif; font-size:12pt; background-color:#eeffff; text-align: center; background-repeat: no-repeat; background-position: center;}
 .page {min-height: 100%; height: auto !important; height: 100%; margin: 0 auto -50px; position: relative;}

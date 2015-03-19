@@ -259,7 +259,7 @@ function safetext($txt, $len = 1024)
 #
 function dbd($data, $user)
 {
- return "<span class=alert><br>Web site is currently down</span>";
+ return "<span class=alert><br>Database is reloading, mining is all OK</span>";
 }
 #
 function dbdown()

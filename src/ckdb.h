@@ -55,7 +55,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.0"
-#define CKDB_VERSION DB_VERSION"-1.023"
+#define CKDB_VERSION DB_VERSION"-1.033"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -80,6 +80,27 @@
 
 #define TRUE_CHR 'Y'
 #define FALSE_CHR 'N'
+
+/* Set by cmd_setopts() and used by whatever code needs it
+ * It's loaded during startup but set to SWITCH_STATE_ALL if it's missing,
+ *  meaning all switches are active
+ * The idea is that if you need to manually switch code over from one version
+ *  up to the next version at an indeterminate time then you can do that by
+ *  coding a switch_state test and then externally switch the code over via
+ *  the cmd_setopts() socket interface
+ * It's not for coding runtime options into the code since that can be done
+ *  using optioncontrol directly
+ * It's stored in optioncontrol so that it's value is permanent and
+ *  activationdate and activationheight have their values overridden to
+ *  disable using them
+ * N.B. optioncontrol_item_add() intercepts the change by name and updates
+ *	switch_state but ONLY if the DB update succeeds */
+extern int switch_state;
+#define SWITCH_STATE_NAME "SwitchState"
+/* Each switch state must be higher than all previous
+ * so that future states don't undo old changes */
+#define SWITCH_STATE_AUTHWORKERS 1
+#define SWITCH_STATE_ALL 666666
 
 extern char *EMPTY;
 
@@ -1575,6 +1596,7 @@ extern K_STORE *marks_store;
 #define MARKTYPE_SHIFT_END 'e'
 // 'o' used for manual marks
 #define MARKTYPE_OTHER_BEGIN 'o'
+#define MARKTYPE_OTHER_BEGIN_STR "o"
 // 'f' used for manual marks
 #define MARKTYPE_OTHER_FINISH 'f'
 
@@ -1726,6 +1748,7 @@ extern cmp_t cmp_useratts(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_useratts(int64_t userid, char *attname);
 extern cmp_t cmp_workers(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_workers(int64_t userid, char *workername);
+extern K_ITEM *first_workers(int64_t userid, K_TREE_CTX *ctx);
 extern K_ITEM *new_worker(PGconn *conn, bool update, int64_t userid, char *workername,
 			  char *diffdef, char *idlenotificationenabled,
 			  char *idlenotificationtime, char *by,

@@ -151,6 +151,8 @@ static char *restorefrom;
 // Only accessed in here
 static bool markersummary_auto;
 
+int switch_state = SWITCH_STATE_ALL;
+
 // disallow: '/' '.' '_' and FLDSEP
 const char *userpatt = "^[^/\\._"FLDSEPSTR"]*$";
 const char *mailpatt = "^[A-Za-z0-9_-][A-Za-z0-9_\\.-]*@[A-Za-z0-9][A-Za-z0-9\\.-]*[A-Za-z0-9]$";
@@ -1882,6 +1884,64 @@ static void make_a_shift_mark()
 	bool was_block = false, ok;
 	char cd_buf[DATE_BUFSIZ], cd_buf2[DATE_BUFSIZ];
 	int used_wid;
+
+	/* If there are no CURRENT marks, make the first one by
+	 *  finding the first CURRENT workinfo and use that
+	 *  to create a MARKTYPE_OTHER_BEGIN for the pool
+	 * This will keep being checked when the pool first starts
+	 *  until the first workinfo is created, but once the first
+	 *  marks has been created it will skip over the if code
+	 *  forever after that */
+	K_RLOCK(marks_free);
+	m_item = last_in_ktree(marks_root, m_ctx);
+	K_RUNLOCK(marks_free);
+	DATA_MARKS_NULL(marks, m_item);
+	// Mark sorting means all CURRENT will be on the end
+	if (!m_item || !CURRENT(&(marks->expirydate))) {
+		K_RLOCK(workinfo_free);
+		wi_item = first_in_ktree(workinfo_root, wi_ctx);
+		DATA_WORKINFO_NULL(workinfo, wi_item);
+		if (!wi_item) {
+			K_RUNLOCK(workinfo_free);
+			LOGWARNING("%s() ckdb workinfo:'%s' marks:'%s' ..."
+				   " start ckpool!", __func__,
+				   "none", m_item ? "expired" : "none");
+			return;
+		}
+		while (wi_item && !CURRENT(&(workinfo->expirydate))) {
+			wi_item = next_in_ktree(wi_ctx);
+			DATA_WORKINFO_NULL(workinfo, wi_item);
+		}
+		if (!wi_item) {
+			K_RUNLOCK(workinfo_free);
+			LOGWARNING("%s() ckdb workinfo:'%s' marks:'%s' ..."
+				   " start ckpool!", __func__,
+				   "expired", m_item ? "expired" : "none");
+			return;
+		}
+		K_RUNLOCK(workinfo_free);
+		char description[TXT_BIG+1];
+		tv_t now;
+		ok = marks_description(description, sizeof(description),
+					MARKTYPE_OTHER_BEGIN_STR, 0, NULL,
+					"Pool Start");
+		if (!ok)
+			return;
+
+		setnow(&now);
+		ok = marks_process(NULL, true, EMPTY, workinfo->workinfoid,
+				   description, EMPTY, MARKTYPE_OTHER_BEGIN_STR,
+				   MARK_USED_STR, (char *)by_default,
+				   (char *)__func__, (char *)inet_default,
+				   &now, NULL);
+		if (ok) {
+			LOGWARNING("%s() FIRST mark %"PRId64"/%s/%s/%s/",
+				   __func__, workinfo->workinfoid,
+				   MARKTYPE_OTHER_BEGIN_STR, MARK_USED_STR,
+				   description);
+		}
+		return;
+	}
 
 	/* Find the last !new sharesummary workinfoid
 	 * If the shift needs to go beyond this, then it's not ready yet */

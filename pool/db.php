@@ -5,13 +5,20 @@ include_once('base.php');
 #
 # List of db functions to call and get the results back from ckdb
 # From homeInfo() and the rest after that
-# The result is an array of all ckdb result field names and their values
+# The repDecode() result is an array of all ckdb result field names and
+#  their values
 # Also included:
 #	['ID'] the id sent
 #	['STAMP'] the ckdb reply timestamp
 #	['STATUS'] the ckdb reply status (!'ok' = error)
-#	['ERROR'] if status not 'ok' the error message reply
+#	['ERROR'] if status != 'ok', the error message reply
 # The reply is false if the ckdb return data was corrupt
+# The repData() result is:
+#	['ID'] the id sent
+#	['STAMP'] the ckdb reply timestamp
+#	['STATUS'] the ckdb reply status (!'ok' = error)
+#	['DATA'] the rest of the ckdb reply, or '' on error
+#	['ERROR'] if status not 'ok', the error message reply
 #
 global $send_sep, $fld_sep, $val_sep;
 $send_sep = '.';
@@ -54,6 +61,38 @@ function repDecode($rep)
  $ans['STATUS'] = $major[2];
  if ($major[2] == 'ok')
 	$ans['ERROR'] = null;
+ else
+ {
+	if (isset($major[3]))
+		$ans['ERROR'] = $major[3];
+	else
+		$ans['ERROR'] = 'system error';
+ }
+
+ return $ans;
+}
+#
+function repData($rep)
+{
+ global $send_sep;
+
+ $fix = preg_replace("/[\n\r]*$/",'',$rep);
+ $major = explode($send_sep, $fix, 4);
+ if (count($major) < 3)
+	return false;
+
+ $ans = array();
+
+ $ans['ID'] = $major[0];
+ $ans['STAMP'] = $major[1];
+ $ans['STATUS'] = $major[2];
+ $ans['DATA'] = '';
+ if ($major[2] == 'ok')
+ {
+	$ans['ERROR'] = null;
+	if (isset($major[3]))
+		$ans['DATA'] = $major[3];
+ }
  else
  {
 	if (isset($major[3]))
@@ -280,6 +319,18 @@ function getShifts($user)
  if (!$rep)
 	dbdown();
  return repDecode($rep);
+}
+#
+function getShiftData($user)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array('username' => $user);
+ $msg = msgEncode('shifts', 'shift', $flds, $user);
+ $rep = sendsockreply('getShifts', $msg);
+ if (!$rep)
+	dbdown();
+ return repData($rep);
 }
 #
 function getBlocks($user)

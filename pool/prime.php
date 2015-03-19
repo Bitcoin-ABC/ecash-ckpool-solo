@@ -76,8 +76,9 @@ function check()
 		'User Settings' => 'userset'
 	),
 	'Workers' => array(
-		'Shifts ' => 'shifts',
-		'Workers ' => 'workers',
+		'Shifts' => 'shifts',
+		'Shift Graph' => 'usperf',
+		'Workers' => 'workers',
 		'Management' => 'workmgt',
 	),
 	'Pool' => array(

@@ -137,7 +137,6 @@ struct json_params {
 	json_t *params;
 	json_t *id_val;
 	int64_t client_id;
-	char address[INET6_ADDRSTRLEN];
 };
 
 typedef struct json_params json_params_t;
@@ -146,7 +145,6 @@ typedef struct json_params json_params_t;
 struct smsg {
 	json_t *json_msg;
 	int64_t client_id;
-	char address[INET6_ADDRSTRLEN];
 };
 
 typedef struct smsg smsg_t;
@@ -1395,13 +1393,15 @@ static stratum_instance_t *__recruit_stratum_instance(sdata_t *sdata)
 }
 
 /* Enter with write instance_lock held */
-static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t id, const int server)
+static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t id,
+						  const char *address, const int server)
 {
 	stratum_instance_t *client;
 	sdata_t *sdata = ckp->data;
 
 	client = __recruit_stratum_instance(sdata);
 	client->id = id;
+	strcpy(client->address, address);
 	client->server = server;
 	client->diff = client->old_diff = ckp->startdiff;
 	client->ckp = ckp;
@@ -2279,6 +2279,70 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 
 #define DEFAULT_AUTH_BACKOFF	(3)  /* Set initial backoff to 3 seconds */
 
+static user_instance_t *__create_user(sdata_t *sdata, const char *username)
+{
+	user_instance_t *user = ckzalloc(sizeof(user_instance_t));
+
+	user->auth_backoff = DEFAULT_AUTH_BACKOFF;
+	strcpy(user->username, username);
+	user->id = sdata->user_instance_id++;
+	HASH_ADD_STR(sdata->user_instances, username, user);
+	return user;
+}
+
+/* Find user by username or create one if it doesn't already exist */
+static user_instance_t *get_user(sdata_t *sdata, const char *username)
+{
+	user_instance_t *user;
+
+	ck_wlock(&sdata->instance_lock);
+	HASH_FIND_STR(sdata->user_instances, username, user);
+	if (unlikely(!user))
+		user = __create_user(sdata, username);
+	ck_wunlock(&sdata->instance_lock);
+
+	return user;
+}
+
+static worker_instance_t *__create_worker(user_instance_t *user, const char *workername)
+{
+	worker_instance_t *worker = ckzalloc(sizeof(worker_instance_t));
+
+	worker->workername = strdup(workername);
+	worker->user_instance = user;
+	DL_APPEND(user->worker_instances, worker);
+	worker->start_time = time(NULL);
+	return worker;
+}
+
+static worker_instance_t *__get_worker(user_instance_t *user, const char *workername)
+{
+	worker_instance_t *worker = NULL, *tmp;
+
+	DL_FOREACH(user->worker_instances, tmp) {
+		if (!safecmp(workername, tmp->workername)) {
+			worker = tmp;
+			break;
+		}
+	}
+	return worker;
+}
+
+/* Find worker amongst a user's workers by workername or create one if it
+ * doesn't yet exist. */
+static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, const char *workername)
+{
+	worker_instance_t *worker;
+
+	ck_wlock(&sdata->instance_lock);
+	worker = __get_worker(user, workername);
+	if (!worker)
+		worker = __create_worker(user, workername);
+	ck_wunlock(&sdata->instance_lock);
+
+	return worker;
+}
+
 /* This simply strips off the first part of the workername and matches it to a
  * user or creates a new one. Needs to be entered with client holding a ref
  * count. */
@@ -2288,7 +2352,6 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	char *base_username = strdupa(workername), *username;
 	bool new_user = false, new_worker = false;
 	sdata_t *sdata = ckp->data;
-	worker_instance_t *tmp;
 	user_instance_t *user;
 	int len;
 
@@ -2303,31 +2366,16 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	HASH_FIND_STR(sdata->user_instances, username, user);
 	if (!user) {
 		/* New user instance. Secondary user id will be NULL */
-		user = ckzalloc(sizeof(user_instance_t));
-		user->auth_backoff = DEFAULT_AUTH_BACKOFF;
-		strcpy(user->username, username);
+		user = __create_user(sdata, username);
 		new_user = true;
-		user->id = sdata->user_instance_id++;
-		HASH_ADD_STR(sdata->user_instances, username, user);
 	}
 	client->user_instance = user;
-	DL_FOREACH(user->worker_instances, tmp) {
-		if (!safecmp(workername, tmp->workername)) {
-			client->worker_instance = tmp;
-			break;
-		}
-	}
+	client->worker_instance = __get_worker(user, workername);
 	/* Create one worker instance for combined data from workers of the
 	 * same name */
 	if (!client->worker_instance) {
-		worker_instance_t *worker = ckzalloc(sizeof(worker_instance_t));
-
-		worker->workername = strdup(workername);
-		worker->user_instance = user;
-		DL_APPEND(user->worker_instances, worker);
+		client->worker_instance = __create_worker(user, workername);
 		new_worker = true;
-		worker->start_time = time(NULL);
-		client->worker_instance = worker;
 	}
 	DL_APPEND(user->clients, client);
 	__inc_worker(sdata,user);
@@ -2352,6 +2400,22 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	return user;
 }
 
+static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff);
+
+static void parse_worker_diffs(ckpool_t *ckp, json_t *worker_array)
+{
+	json_t *worker_entry;
+	char *workername;
+	size_t index;
+	int mindiff;
+
+	json_array_foreach(worker_array, index, worker_entry) {
+		json_get_string(&workername, worker_entry, "workername");
+		json_get_int(&mindiff, worker_entry, "difficultydefault");
+		set_worker_mindiff(ckp, workername, mindiff);
+	}
+}
+
 /* Send this to the database and parse the response to authorise a user
  * and get SUID parameters back. We don't add these requests to the sdata->ckdbqueue
  * since we have to wait for the response but this is done from the authoriser
@@ -2364,6 +2428,7 @@ static int send_recv_auth(stratum_instance_t *client)
 	sdata_t *sdata = ckp->data;
 	char *buf = NULL, *json_msg;
 	bool contended = false;
+	size_t responselen = 0;
 	char cdfield[64];
 	int ret = 1;
 	json_t *val;
@@ -2403,14 +2468,18 @@ static int send_recv_auth(stratum_instance_t *client)
 		contended = true;
 
 	free(json_msg);
-	if (likely(buf)) {
+	/* Leave ample room for response based on buf length */
+	if (likely(buf))
+		responselen = strlen(buf);
+	if (likely(responselen > 0)) {
+		char *cmd = NULL, *secondaryuserid = NULL, *response;
 		worker_instance_t *worker = client->worker_instance;
-		char *cmd = NULL, *secondaryuserid = NULL;
-		char response[PAGESIZE] = {};
 		json_error_t err_val;
 		json_t *val = NULL;
 
 		LOGINFO("Got ckdb response: %s", buf);
+		response = alloca(responselen);
+		memset(response, 0, responselen);
 		if (unlikely(sscanf(buf, "id.%*d.%s", response) < 1 || strlen(response) < 1 || !strchr(response, '='))) {
 			if (cmdmatch(response, "failed"))
 				goto out;
@@ -2426,8 +2495,10 @@ static int send_recv_auth(stratum_instance_t *client)
 		if (unlikely(!val))
 			LOGWARNING("AUTH JSON decode failed(%d): %s", err_val.line, err_val.text);
 		else {
+			json_t *worker_array = json_object_get(val, "workers");
+
 			json_get_string(&secondaryuserid, val, "secondaryuserid");
-			json_get_int(&worker->mindiff, val, "difficultydefault");
+			parse_worker_diffs(ckp, worker_array);
 			client->suggest_diff = worker->mindiff;
 			if (!user->auth_time)
 				user->auth_time = time(NULL);
@@ -2446,8 +2517,12 @@ static int send_recv_auth(stratum_instance_t *client)
 	}
 	if (contended)
 		LOGWARNING("Prolonged lock contention for ckdb while trying to authorise");
-	else
-		LOGWARNING("Got no auth response from ckdb :(");
+	else {
+		if (!sdata->ckdb_offline)
+			LOGWARNING("Got no auth response from ckdb :(");
+		else
+			LOGNOTICE("No auth response for %s from offline ckdb", user->username);
+	}
 out_fail:
 	ret = -1;
 out:
@@ -2498,8 +2573,8 @@ static void __update_solo_client(sdata_t *sdata, stratum_instance_t *client, use
 }
 
 /* Needs to be entered with client holding a ref count. */
-static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_val, json_t **err_val,
-			       const char *address, int *errnum)
+static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_val,
+			       json_t **err_val, int *errnum)
 {
 	user_instance_t *user;
 	ckpool_t *ckp = client->ckp;
@@ -2542,7 +2617,6 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 	client->user_id = user->id;
 	ts_realtime(&now);
 	client->start_time = now.tv_sec;
-	strcpy(client->address, address);
 	/* NOTE workername is NULL prior to this so should not be used in code
 	 * till after this point */
 	client->workername = strdup(buf);
@@ -3373,7 +3447,7 @@ static void update_client(sdata_t *sdata, const stratum_instance_t *client, cons
 
 static json_params_t
 *create_json_params(const int64_t client_id, const json_t *method, const json_t *params,
-		    const json_t *id_val, const char *address)
+		    const json_t *id_val)
 {
 	json_params_t *jp = ckalloc(sizeof(json_params_t));
 
@@ -3381,47 +3455,25 @@ static json_params_t
 	jp->params = json_deep_copy(params);
 	jp->id_val = json_deep_copy(id_val);
 	jp->client_id = client_id;
-	strcpy(jp->address, address);
 	return jp;
 }
 
 static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff)
 {
-	worker_instance_t *worker = NULL, *tmp;
 	char *username = strdupa(workername), *ignore;
-	user_instance_t *user = NULL;
 	stratum_instance_t *client;
 	sdata_t *sdata = ckp->data;
+	worker_instance_t *worker;
+	user_instance_t *user;
 
 	ignore = username;
 	strsep(&ignore, "._");
 
 	/* Find the user first */
-	ck_rlock(&sdata->instance_lock);
-	HASH_FIND_STR(sdata->user_instances, username, user);
-	ck_runlock(&sdata->instance_lock);
-
-	/* They may just have not connected yet */
-	if (!user) {
-		LOGINFO("Failed to find user %s in set_worker_mindiff", username);
-		return;
-	}
+	user = get_user(sdata, username);
 
 	/* Then find the matching worker user */
-	ck_rlock(&sdata->instance_lock);
-	DL_FOREACH(user->worker_instances, tmp) {
-		if (!safecmp(workername, tmp->workername)) {
-			worker = tmp;
-			break;
-		}
-	}
-	ck_runlock(&sdata->instance_lock);
-
-	/* They may just not be connected at the moment */
-	if (!worker) {
-		LOGINFO("Failed to find worker %s in set_worker_mindiff", workername);
-		return;
-	}
+	worker = get_worker(sdata, user, workername);
 
 	if (mindiff < 1) {
 		LOGINFO("Worker %s requested invalid diff %d", worker->workername, mindiff);
@@ -3485,7 +3537,7 @@ static void suggest_diff(stratum_instance_t *client, const char *method, const j
 
 /* Enter with client holding ref count */
 static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64_t client_id,
-			 json_t *id_val, json_t *method_val, json_t *params_val, const char *address)
+			 json_t *id_val, json_t *method_val, json_t *params_val)
 {
 	const char *method;
 	char buf[256];
@@ -3495,7 +3547,7 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 	 * most common messages will be shares so look for those first */
 	method = json_string_value(method_val);
 	if (likely(cmdmatch(method, "mining.submit") && client->authorised)) {
-		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val, address);
+		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val);
 
 		ckmsgq_add(sdata->sshareq, jp);
 		return;
@@ -3553,7 +3605,7 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 				  client_id, client->address);
 			return;
 		}
-		jp = create_json_params(client_id, method_val, params_val, id_val, address);
+		jp = create_json_params(client_id, method_val, params_val, id_val);
 		ckmsgq_add(sdata->sauthq, jp);
 		return;
 	}
@@ -3576,7 +3628,7 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 
 	/* Covers both get_transactions and get_txnhashes */
 	if (cmdmatch(method, "mining.get")) {
-		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val, address);
+		json_params_t *jp = create_json_params(client_id, method_val, params_val, id_val);
 
 		ckmsgq_add(sdata->stxnq, jp);
 		return;
@@ -3637,7 +3689,7 @@ static void parse_instance_msg(sdata_t *sdata, smsg_t *msg, stratum_instance_t *
 		send_json_err(sdata, client_id, id_val, "-1:params not found");
 		goto out;
 	}
-	parse_method(sdata, client, client_id, id_val, method, params, msg->address);
+	parse_method(sdata, client, client_id, id_val, method, params);
 out:
 	free_smsg(msg);
 }
@@ -3645,6 +3697,7 @@ out:
 static void srecv_process(ckpool_t *ckp, char *buf)
 {
 	bool noid = false, dropped = false;
+	char address[INET6_ADDRSTRLEN];
 	sdata_t *sdata = ckp->data;
 	stratum_instance_t *client;
 	smsg_t *msg;
@@ -3676,7 +3729,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 		free(msg);
 		goto out;
 	}
-	strcpy(msg->address, json_string_value(val));
+	strcpy(address, json_string_value(val));
 	json_object_clear(val);
 
 	val = json_object_get(msg->json_msg, "server");
@@ -3696,7 +3749,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	if (unlikely(!client)) {
 		if (likely(!__dropped_instance(sdata, msg->client_id))) {
 			noid = true;
-			client = __stratum_add_instance(ckp, msg->client_id, server);
+			client = __stratum_add_instance(ckp, msg->client_id, address, server);
 		} else
 			dropped = true;
 	} else if (unlikely(client->dropped))
@@ -3815,7 +3868,7 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 		goto out;
 	}
 
-	result_val = parse_authorise(client, jp->params, &err_val, jp->address, &errnum);
+	result_val = parse_authorise(client, jp->params, &err_val, &errnum);
 	if (json_is_true(result_val)) {
 		char *buf;
 
@@ -3906,6 +3959,7 @@ static bool test_and_clear(bool *val, mutex_t *lock)
 static void ckdbq_process(ckpool_t *ckp, char *msg)
 {
 	sdata_t *sdata = ckp->data;
+	size_t responselen = 0;
 	char *buf = NULL;
 
 	while (!buf) {
@@ -3925,9 +3979,12 @@ static void ckdbq_process(ckpool_t *ckp, char *msg)
 
 	/* Process any requests from ckdb that are heartbeat responses with
 	 * specific requests. */
-	if (likely(buf)) {
-		char response[PAGESIZE] = {};
+	if (likely(buf))
+		responselen = strlen(buf);
+	if (likely(responselen > 0)) {
+		char *response = alloca(responselen);
 
+		memset(response, 0, responselen);
 		sscanf(buf, "id.%*d.%s", response);
 		if (safecmp(response, "ok")) {
 			char *cmd;
