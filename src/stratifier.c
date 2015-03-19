@@ -340,6 +340,7 @@ struct stratifier_data {
 
 	int stratum_generated;
 	int disconnected_generated;
+	int userwbs_generated;
 
 	user_instance_t *user_instances;
 
@@ -736,7 +737,7 @@ static void send_ageworkinfo(ckpool_t *ckp, const int64_t id)
 }
 
 /* Entered with instance_lock held, make sure wb can't be pulled from us */
-static void __generate_userwb(workbase_t *wb, user_instance_t *user)
+static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *user)
 {
 	struct userwb *userwb;
 	int64_t id = wb->id;
@@ -746,6 +747,7 @@ static void __generate_userwb(workbase_t *wb, user_instance_t *user)
 	if (unlikely(userwb))
 		return;
 
+	sdata->userwbs_generated++;
 	userwb = ckzalloc(sizeof(struct userwb));
 	userwb->id = id;
 	userwb->coinb2bin = ckalloc(wb->coinb2len);
@@ -763,7 +765,7 @@ static void generate_userwbs(sdata_t *sdata, workbase_t *wb)
 	HASH_ITER(hh, sdata->user_instances, instance, tmp) {
 		if (!instance->btcaddress)
 			continue;
-		__generate_userwb(wb, instance);
+		__generate_userwb(sdata, wb, instance);
 	}
 	ck_wunlock(&sdata->instance_lock);
 }
@@ -1758,6 +1760,22 @@ static char *stratifier_stats(ckpool_t *ckp, sdata_t *sdata)
 	json_set_object(val, "workbases", subval);
 
 	ck_rlock(&sdata->instance_lock);
+	if (ckp->btcsolo) {
+		user_instance_t *user, *tmpuser;
+		int subobjects;
+
+		objects = 0;
+		memsize = 0;
+		HASH_ITER(hh, sdata->user_instances, user, tmpuser) {
+			subobjects = HASH_COUNT(user->userwbs);
+			objects += subobjects;
+			memsize += SAFE_HASH_OVERHEAD(user->userwbs) + sizeof(struct userwb) * subobjects;
+		}
+		generated = sdata->userwbs_generated;
+		JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+		json_set_object(val, "userwbs", subval);
+	}
+
 	objects = HASH_COUNT(sdata->user_instances);
 	memsize = SAFE_HASH_OVERHEAD(sdata->user_instances) + sizeof(stratum_instance_t) * objects;
 	JSON_CPACK(subval, "{si,si}", "count", objects, "memory", memsize);
@@ -2681,7 +2699,7 @@ out:
 		/* recursive lock, grab instance first then workbase */
 		ck_wlock(&sdata->instance_lock);
 		ck_rlock(&sdata->workbase_lock);
-		__generate_userwb(sdata->current_workbase, user);
+		__generate_userwb(sdata, sdata->current_workbase, user);
 		__update_solo_client(sdata, client, user);
 		ck_runlock(&sdata->workbase_lock);
 		ck_wunlock(&sdata->instance_lock);
