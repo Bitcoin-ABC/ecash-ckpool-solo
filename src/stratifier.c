@@ -4351,6 +4351,7 @@ static void *statsupdate(void *arg)
 				char_t = ckalloc(sizeof(char_entry_t));
 				s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 				ASPRINTF(&char_t->buf, "User %s:%s", user->username, s);
+				dealloc(s);
 				DL_APPEND(char_list, char_t);
 			}
 			json_decref(val);
