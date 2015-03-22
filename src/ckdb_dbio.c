@@ -3313,6 +3313,11 @@ flail:
 	return ok;
 }
 
+/* Keep some simple stats on how often shares are out of order
+ *  and how often they produce a WARNING due to OOOLIMIT */
+static int64_t ooof0, ooof, oool0, oool;
+#define OOOLIMIT -2.0
+
 bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITEM *ss_item,
 				char *by, char *code, char *inet, tv_t *cd, WHERE_FFL_ARGS)
 {
@@ -3438,13 +3443,25 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 		if (!new) {
 			double td;
 			td = tvdiff(sharecreatedate, &(row->firstshare));
-			// don't LOGERR '=' in case shares come from ckpool with the same timestamp
+			// don't LOG '=' in case shares come from ckpool with the same timestamp
 			if (td < 0.0) {
 				char *tmp1, *tmp2;
-				LOGERR("%s(): %s createdate (%s) is < summary firstshare (%s)",
+				int level;
+				// DEBUG only for shares out of order up to OOOLIMIT seconds
+				if (td < OOOLIMIT) {
+					level = LOG_WARNING;
+					ooof++;
+				} else {
+					level = LOG_DEBUG;
+					ooof0++;
+				}
+				LOGMSG(level, "%s(): OoO %s createdate (%s) is < summary"
+					" firstshare (%s) (F%"PRId64":%"PRId64
+					"/L%"PRId64":%"PRId64"/%.1f)",
 					__func__, s_row ? "shares" : "shareerrors",
 					(tmp1 = ctv_to_buf(sharecreatedate, NULL, 0)),
-					(tmp2 = ctv_to_buf(&(row->firstshare), NULL, 0)));
+					(tmp2 = ctv_to_buf(&(row->firstshare), NULL, 0)),
+					ooof, ooof0, oool, oool0, OOOLIMIT);
 				free(tmp2);
 				free(tmp1);
 				row->firstshare.tv_sec = sharecreatedate->tv_sec;
@@ -3452,17 +3469,29 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 				// Don't change lastdiffacc
 			}
 			td = tvdiff(sharecreatedate, &(row->lastshare));
-			// don't LOGERR '=' in case shares come from ckpool with the same timestamp
+			// don't LOG '=' in case shares come from ckpool with the same timestamp
 			if (td >= 0.0) {
 				row->lastshare.tv_sec = sharecreatedate->tv_sec;
 				row->lastshare.tv_usec = sharecreatedate->tv_usec;
 				row->lastdiffacc = diff;
 			} else {
 				char *tmp1, *tmp2;
-				LOGERR("%s(): %s createdate (%s) is < summary lastshare (%s)",
+				int level;
+				// DEBUG only for shares out of order up to OOOLIMIT seconds
+				if (td < OOOLIMIT) {
+					level = LOG_WARNING;
+					oool++;
+				} else {
+					level = LOG_DEBUG;
+					oool0++;
+				}
+				LOGMSG(level, "%s(): OoO %s createdate (%s) is < summary"
+					" lastshare (%s) (F%"PRId64":%"PRId64
+					"/L%"PRId64":%"PRId64"/%.1f)",
 					__func__, s_row ? "shares" : "shareerrors",
 					(tmp1 = ctv_to_buf(sharecreatedate, NULL, 0)),
-					(tmp2 = ctv_to_buf(&(row->lastshare), NULL, 0)));
+					(tmp2 = ctv_to_buf(&(row->lastshare), NULL, 0)),
+					ooof, ooof0, oool, oool0, OOOLIMIT);
 				free(tmp2);
 				free(tmp1);
 			}

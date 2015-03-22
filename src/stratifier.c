@@ -1055,7 +1055,7 @@ static void __disconnect_session(sdata_t *sdata, const stratum_instance_t *clien
 		}
 	}
 
-	if (!client->enonce1_64)
+	if (!client->enonce1_64 || !client->user_instance || !client->authorised)
 		return;
 	HASH_FIND_INT(sdata->disconnected_sessions, &client->session_id, session);
 	if (session)
