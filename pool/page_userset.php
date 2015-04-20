@@ -8,6 +8,9 @@ function uset($data, $user, $api, $err)
 	$pg .= "<span class=err>$err<br><br></span>";
 
  $pg .= '<table cellpadding=20 cellspacing=0 border=1>';
+ $pg .= '<tr class=dc><td><span class=nb>';
+ $pg .= "<input type=checkbox id=minicb onclick='md(this)'>";
+ $pg .= 'mini header</span></td></tr>';
  $pg .= '<tr class=dc><td><center>';
 
  $pg .= makeForm('userset');

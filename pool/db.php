@@ -110,6 +110,18 @@ function zeip()
  return $_SERVER['REMOTE_ADDR'];
 }
 #
+# user administration overrided
+function adm($user, &$msg)
+{
+ global $fld_sep, $val_sep;
+ if ($user == 'Kano')
+ {
+	$admin = getparam('admin', true);
+	if (!nuem($admin))
+		$msg .= $fld_sep . 'admin' . $val_sep . $admin;
+ }
+}
+#
 function fldEncode($flds, $name, $first)
 {
  global $fld_sep, $val_sep;
@@ -134,6 +146,7 @@ function msgEncode($cmd, $id, $fields, $user)
  $msg .= 'createcode' . $val_sep . 'php' . $fld_sep;
  $msg .= 'createby' . $val_sep . $user . $fld_sep;
  $msg .= 'createinet' . $val_sep . zeip();
+ adm($user, $msg);
  return $msg;
 }
 #
@@ -309,11 +322,13 @@ function getMPayouts($user)
  return repDecode($rep);
 }
 #
-function getShifts($user)
+function getShifts($user, $workers = null)
 {
  if ($user == false)
 	showIndex();
  $flds = array('username' => $user);
+ if ($workers !== null)
+	$flds['select'] = $workers;
  $msg = msgEncode('shifts', 'shift', $flds, $user);
  $rep = sendsockreply('getShifts', $msg);
  if (!$rep)
@@ -321,13 +336,39 @@ function getShifts($user)
  return repDecode($rep);
 }
 #
-function getShiftData($user)
+function getShiftData($user, $workers = null)
 {
  if ($user == false)
 	showIndex();
  $flds = array('username' => $user);
+ if ($workers !== null)
+	$flds['select'] = $workers;
  $msg = msgEncode('shifts', 'shift', $flds, $user);
  $rep = sendsockreply('getShifts', $msg);
+ if (!$rep)
+	dbdown();
+ return repData($rep);
+}
+#
+function getPShifts($user)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array('username' => $user);
+ $msg = msgEncode('pshift', 'pshift', $flds, $user);
+ $rep = sendsockreply('getPShifts', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
+function getPShiftData($user)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array('username' => $user);
+ $msg = msgEncode('pshift', 'pshift', $flds, $user);
+ $rep = sendsockreply('getPShifts', $msg);
  if (!$rep)
 	dbdown();
  return repData($rep);

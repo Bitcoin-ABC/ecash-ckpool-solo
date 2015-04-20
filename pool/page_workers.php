@@ -22,7 +22,8 @@ function workhashorder($a, $b)
 #
 function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 			&$totinvalid, &$totrate, &$blockacc,
-			&$blockreward, $old = false, $srt = false)
+			&$blockreward, $old = false, $srt = false,
+			 $one = false, &$title)
 {
  $ans = getWorkers($user);
 
@@ -33,6 +34,13 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 		$blockacc = $ans['blockacc'];
 	if (isset($ans['blockreward']))
 		$blockreward = $ans['blockreward'];
+	if ($one === true && isset($ans['oldworkers']))
+	{
+		$days = intval($ans['oldworkers']);
+		if ($days != 0)
+			$title = '&nbsp;(active during the last '.$days.' day'.
+				 (($days==1)?'':'s').')';
+	}
 	$all = array();
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
@@ -151,9 +159,9 @@ function worktotal($offset, $totshare, $totdiff, $totinvalid, $totrate, $blockac
 #
 function doworker($data, $user)
 {
- $pg = '<h1>Workers</h1>';
+ $title = '';
 
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg = "<table callpadding=0 cellspacing=0 border=0>\n";
 
  $totshare = 0;
  $totdiff = 0;
@@ -165,11 +173,12 @@ function doworker($data, $user)
 
  $pg .= worktitle($data, $user);
  $pg .= workuser($data, $user, $offset, $totshare, $totdiff, $totinvalid,
-			$totrate, $blockacc, $blockreward, false, true);
+			$totrate, $blockacc, $blockreward, false, true, true,
+			$title);
  $pg .= worktotal($offset, $totshare, $totdiff, $totinvalid, $totrate,
 			$blockacc, $blockreward);
 
- if ($blockacc > 0 && $blockreward > 0)
+ if (false && $blockacc > 0 && $blockreward > 0)
  {
 	$btc = btcfmt($totdiff / $blockacc * $blockreward);
 	$pg .= '<tr><td colspan=8 class=dc>';
@@ -179,7 +188,7 @@ function doworker($data, $user)
 
  $pg .= "</table>\n";
 
- return $pg;
+ return "<h1>Workers$title</h1>".$pg;
 }
 #
 function doworkers($data, $user)

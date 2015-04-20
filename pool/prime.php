@@ -1,7 +1,7 @@
 <?php
 #
 global $stt;
-$stt = microtime();
+$stt = microtime(true);
 #
 global $loginfailed;
 $loginfailed = false;
@@ -79,11 +79,12 @@ function check()
 		'Shifts' => 'shifts',
 		'Shift Graph' => 'usperf',
 		'Workers' => 'workers',
-		'Management' => 'workmgt',
+		'Management' => 'workmgt'
 	),
 	'Pool' => array(
 		'Stats' => 'stats',
-		'Blocks' => 'blocks'
+		'Blocks' => 'blocks',
+		'Graph' => 'psperf'
 	),
 	'Admin' => NULL,
 	'gap' => array( # options not shown

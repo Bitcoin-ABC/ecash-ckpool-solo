@@ -7,14 +7,27 @@ function workmgtuser($data, $user, $err)
  if ($err != '')
 	$pg .= "<span class=err>$err<br><br></span>";
 
+ $ans = getWorkers($user, 'N');
+
+ if ($ans['STATUS'] == 'ok')
+ {
+	if (isset($ans['oldworkers']) && $ans['oldworkers'] == '0')
+		$chk = '';
+	else
+		$chk = ' checked';
+	$pg .= makeForm('workmgt');
+	$pg .= '<span>Active workers (7 days)';
+	$pg .= "<input type=checkbox name=seven$chk>";
+	$pg .= '<input type=submit name=S value=Update>';
+	$pg .= '</span></form><br><br>';
+ }
+
  $pg .= makeForm('workmgt');
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<tr class=title>';
  $pg .= '<td class=dl>Worker Name</td>';
  $pg .= '<td class=dr>Minimum Diff</td>';
  $pg .= '</tr>';
-
- $ans = getWorkers($user, 'N');
 
  $offset = 0;
  if ($ans['STATUS'] == 'ok')
@@ -58,26 +71,42 @@ function workmgtuser($data, $user, $err)
 function doworkmgt($data, $user)
 {
  $err = '';
- $OK = getparam('OK', false);
- $count = getparam('rows', false);
- if ($OK == 'OK' && !nuem($count))
+ $S = getparam('S', false);
+ $chk = getparam('seven', false);
+ if ($S == 'Update')
  {
-	if ($count > 0 && $count < 9999)
+	$settings = array();
+	if ($chk == 'on')
+		$settings['oldworkers'] = '7';
+	else
+		$settings['oldworkers'] = '0';
+	$ans = workerSet($user, $settings);
+	if ($ans['STATUS'] != 'ok')
+		$err = $ans['ERROR'];
+ }
+ else
+ {
+	$OK = getparam('OK', false);
+	$count = getparam('rows', false);
+	if ($OK == 'OK' && !nuem($count))
 	{
-		$settings = array();
-		for ($i = 0; $i < $count; $i++)
+		if ($count > 0 && $count < 9999)
 		{
-			$wn = urldecode(getparam('workername:'.$i, false));
-			$md = getparam('difficultydefault:'.$i, false);
-			if (!nuem($wn) && !nuem($md))
+			$settings = array();
+			for ($i = 0; $i < $count; $i++)
 			{
-				$settings['workername:'.$i] = $wn;
-				$settings['difficultydefault:'.$i] = $md;
+				$wn = urldecode(getparam('workername:'.$i, false));
+				$md = getparam('difficultydefault:'.$i, false);
+				if (!nuem($wn) && !nuem($md))
+				{
+					$settings['workername:'.$i] = $wn;
+					$settings['difficultydefault:'.$i] = $md;
+				}
 			}
+			$ans = workerSet($user, $settings);
+			if ($ans['STATUS'] != 'ok')
+				$err = $ans['ERROR'];
 		}
-		$ans = workerSet($user, $settings);
-		if ($ans['STATUS'] != 'ok')
-			$err = $ans['ERROR'];
 	}
  }
 

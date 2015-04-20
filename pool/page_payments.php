@@ -9,10 +9,12 @@ function dopayments($data, $user)
 {
  $bc = 'https://blockchain.info/address/';
  $addr1 = '1KzFJddTvK9TQWsmWFKYJ9fRx9QeSATyrT';
+ $addr2 = '16dRhawxuR3BmdmkzdzUdgEfGAQszgmtbc';
 
  $pg = '<h1>Payments</h1>';
  $pg .= 'The payment transactions on blockchain are here:';
- $pg .= " <a href='$bc$addr1' target=_blank>BTC</a><br>";
+ $pg .= " <a href='$bc$addr1' target=_blank>BTCa</a> and";
+ $pg .= " <a href='$bc$addr2' target=_blank>BTCb</a><br>";
  $pg .= "The payments below don't yet show when they have been sent.<br><br>";
 
  $ans = getPayments($user);

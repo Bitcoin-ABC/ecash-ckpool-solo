@@ -539,6 +539,7 @@ K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 	K_WUNLOCK(users_free);
 
 	DATA_USERS(row, item);
+	bzero(row, sizeof(*row));
 
 	STRNCPY(row->username, username);
 	username_trim(row);
@@ -682,6 +683,7 @@ bool users_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(users_free);
 		DATA_USERS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -883,6 +885,7 @@ K_ITEM *useratts_add(PGconn *conn, char *username, char *attname,
 	USERATTS *row;
 	USERS *users;
 	bool ok = false;
+	char *st = NULL;
 
 	LOGDEBUG("%s(): add", __func__);
 
@@ -890,16 +893,16 @@ K_ITEM *useratts_add(PGconn *conn, char *username, char *attname,
 	item = k_unlink_head(useratts_free);
 	K_WUNLOCK(useratts_free);
 	DATA_USERATTS(row, item);
+	bzero(row, sizeof(*row));
 
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
 	if (!u_item) {
-		char *txt;
 		LOGERR("%s(): unknown user '%s'",
 			__func__,
-			txt = safe_text(username));
-		free(txt);
+			st = safe_text(username));
+		FREENULL(st);
 		goto unitem;
 	}
 	DATA_USERS(users, u_item);
@@ -1061,6 +1064,7 @@ bool useratts_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(useratts_free);
 		DATA_USERATTS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -1436,6 +1440,7 @@ bool workers_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(workers_free);
 		DATA_WORKERS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -1787,6 +1792,7 @@ bool paymentaddresses_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(paymentaddresses_free);
 		DATA_PAYMENTADDRESSES(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -2022,6 +2028,7 @@ bool payments_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(payments_free);
 		DATA_PAYMENTS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -2318,6 +2325,7 @@ K_ITEM *optioncontrol_add(PGconn *conn, char *optionname, char *optionvalue,
 	K_WUNLOCK(optioncontrol_free);
 
 	DATA_OPTIONCONTROL(row, item);
+	bzero(row, sizeof(*row));
 
 	STRNCPY(row->optionname, optionname);
 	row->optionvalue = strdup(optionvalue);
@@ -2386,6 +2394,7 @@ bool optioncontrol_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(optioncontrol_free);
 		DATA_OPTIONCONTROL(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -2401,6 +2410,7 @@ bool optioncontrol_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_BLOB("optionvalue", field, row->optionvalue);
+		LIST_MEM_ADD(optioncontrol_free, row->optionvalue);
 
 		PQ_GET_FLD(res, i, "activationdate", field, ok);
 		if (!ok)
@@ -2472,15 +2482,18 @@ int64_t workinfo_add(PGconn *conn, char *workinfoidstr, char *poolinstance,
 	K_WUNLOCK(workinfo_free);
 
 	DATA_WORKINFO(row, item);
+	bzero(row, sizeof(*row));
 
 	TXT_TO_BIGINT("workinfoid", workinfoidstr, row->workinfoid);
 	STRNCPY(row->poolinstance, poolinstance);
 	row->transactiontree = strdup(transactiontree);
 	if (!(row->transactiontree))
 		quithere(1, "malloc (%d) OOM", (int)strlen(transactiontree));
+	LIST_MEM_ADD(workinfo_free, row->transactiontree);
 	row->merklehash = strdup(merklehash);
 	if (!(row->merklehash))
 		quithere(1, "malloc (%d) OOM", (int)strlen(merklehash));
+	LIST_MEM_ADD(workinfo_free, row->merklehash);
 	STRNCPY(row->prevhash, prevhash);
 	STRNCPY(row->coinbase1, coinbase1);
 	STRNCPY(row->coinbase2, coinbase2);
@@ -2495,7 +2508,9 @@ int64_t workinfo_add(PGconn *conn, char *workinfoidstr, char *poolinstance,
 
 	K_WLOCK(workinfo_free);
 	if (find_in_ktree(workinfo_root, item, cmp_workinfo, ctx)) {
+		LIST_MEM_SUB(workinfo_free, row->transactiontree);
 		FREENULL(row->transactiontree);
+		LIST_MEM_SUB(workinfo_free, row->merklehash);
 		FREENULL(row->merklehash);
 		workinfoid = row->workinfoid;
 		k_add_head(workinfo_free, item);
@@ -2558,14 +2573,18 @@ unparam:
 
 	K_WLOCK(workinfo_free);
 	if (workinfoid == -1) {
+		LIST_MEM_SUB(workinfo_free, row->transactiontree);
 		FREENULL(row->transactiontree);
+		LIST_MEM_SUB(workinfo_free, row->merklehash);
 		FREENULL(row->merklehash);
 		k_add_head(workinfo_free, item);
 	} else {
 		if (row->transactiontree && *(row->transactiontree)) {
 			// Not currently needed in RAM
+			LIST_MEM_SUB(workinfo_free, row->transactiontree);
 			free(row->transactiontree);
 			row->transactiontree = strdup(EMPTY);
+			LIST_MEM_ADD(workinfo_free, row->transactiontree);
 		}
 
 		hex2bin(ndiffbin, row->bits, 4);
@@ -2660,10 +2679,11 @@ bool workinfo_fill(PGconn *conn)
 	n = PQntuples(res);
 	LOGDEBUG("%s(): tree build count %d", __func__, n);
 	ok = true;
-	K_WLOCK(workinfo_free);
+	//K_WLOCK(workinfo_free);
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(workinfo_free);
 		DATA_WORKINFO(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -2687,11 +2707,13 @@ bool workinfo_fill(PGconn *conn)
 		TXT_TO_BLOB("transactiontree", field, row->transactiontree);
 */
 		row->transactiontree = strdup(EMPTY);
+		LIST_MEM_ADD(workinfo_free, row->transactiontree);
 
 		PQ_GET_FLD(res, i, "merklehash", field, ok);
 		if (!ok)
 			break;
 		TXT_TO_BLOB("merklehash", field, row->merklehash);
+		LIST_MEM_ADD(workinfo_free, row->merklehash);
 
 		PQ_GET_FLD(res, i, "prevhash", field, ok);
 		if (!ok)
@@ -2743,10 +2765,13 @@ bool workinfo_fill(PGconn *conn)
 
 		tick();
 	}
-	if (!ok)
+	if (!ok) {
+		//FREENULL(row->transactiontree);
+		FREENULL(row->merklehash);
 		k_add_head(workinfo_free, item);
+	}
 
-	K_WUNLOCK(workinfo_free);
+	//K_WUNLOCK(workinfo_free);
 	PQclear(res);
 
 	if (ok) {
@@ -2757,38 +2782,230 @@ bool workinfo_fill(PGconn *conn)
 	return ok;
 }
 
+static bool shares_process(PGconn *conn, SHARES *shares, K_TREE *trf_root)
+{
+	K_ITEM *w_item, *wm_item, *ss_item;
+	SHARESUMMARY *sharesummary;
+	char *st = NULL;
+
+	LOGDEBUG("%s() add", __func__);
+
+	w_item = new_default_worker(conn, false, shares->userid,
+				    shares->workername, shares->createby,
+				    shares->createcode, shares->createinet,
+				    &(shares->createdate), trf_root);
+	if (!w_item) {
+		LOGDEBUG("%s(): new_default_worker failed %"PRId64"/%s/%ld,%ld",
+			 __func__, shares->userid,
+			 st = safe_text(shares->workername),
+			 shares->createdate.tv_sec, shares->createdate.tv_usec);
+		FREENULL(st);
+		return false;
+	}
+
+	if (reloading && !confirm_sharesummary) {
+		// We only need to know if the workmarker is processed
+		wm_item = find_workmarkers(shares->workinfoid, false,
+					   MARKER_PROCESSED);
+		if (wm_item) {
+			LOGDEBUG("%s(): workmarker exists for wid %"PRId64
+				 " %"PRId64"/%s/%ld,%ld",
+				 __func__, shares->workinfoid, shares->userid,
+				 st = safe_text(shares->workername),
+				 shares->createdate.tv_sec,
+				 shares->createdate.tv_usec);
+			FREENULL(st);
+			return false;
+		}
+
+		ss_item = find_sharesummary(shares->userid, shares->workername,
+					    shares->workinfoid);
+		if (ss_item) {
+			DATA_SHARESUMMARY(sharesummary, ss_item);
+			if (sharesummary->complete[0] != SUMMARY_NEW) {
+				LOGDEBUG("%s(): '%s' sharesummary exists "
+					 "%"PRId64" %"PRId64"/%s/%ld,%ld",
+					 __func__, sharesummary->complete,
+					 shares->workinfoid, shares->userid,
+					 st = safe_text(shares->workername),
+					 shares->createdate.tv_sec,
+					 shares->createdate.tv_usec);
+				FREENULL(st);
+				// Reloading a share already summarised
+				return true;
+			}
+
+			if (!sharesummary->reset) {
+				zero_sharesummary(sharesummary,
+						  &(shares->createdate),
+						  shares->diff);
+				sharesummary->reset = true;
+			}
+		}
+	}
+
+	if (!confirm_sharesummary)
+		workerstatus_update(NULL, shares, NULL);
+
+	sharesummary_update(conn, shares, NULL, NULL, shares->createby,
+			    shares->createcode, shares->createinet,
+			    &(shares->createdate));
+
+	return true;
+}
+
+// If it exists and it can be processed, process the oldest early share
+static void shares_process_early(PGconn *conn, int64_t good_wid, tv_t *good_cd,
+				 K_TREE *trf_root)
+{
+	K_TREE_CTX ctx[1];
+	K_ITEM *es_item, *wi_item;
+	SHARES *early_shares;
+	char cd_buf[DATE_BUFSIZ];
+	char *why = EMPTY;
+	char *st = NULL;
+	char tmp[1024];
+	double delta;
+	bool ok;
+
+	LOGDEBUG("%s() add", __func__);
+
+	K_WLOCK(shares_free);
+	if (shares_early_store->count == 0) {
+		K_WUNLOCK(shares_free);
+		// None
+		return;
+	}
+	es_item = last_in_ktree(shares_early_root, ctx);
+	if (es_item) {
+		shares_early_root = remove_from_ktree(shares_early_root,
+						      es_item,
+						      cmp_shares);
+		k_unlink_item(shares_early_store, es_item);
+	}
+	K_WUNLOCK(shares_free);
+	if (es_item) {
+		DATA_SHARES(early_shares, es_item);
+		/* If the last (oldest) is newer than the
+		 *  current workinfo, leave it til later */
+		if (early_shares->workinfoid > good_wid)
+			goto redo;
+
+		/* If it matches the 'ok' share we just processed,
+		 *  we don't need to check the workinfoid */
+		if (early_shares->workinfoid == good_wid) {
+			ok = shares_process(conn, early_shares, trf_root);
+			if (ok)
+				goto keep;
+			else
+				goto discard;
+		} else {
+			wi_item = find_workinfo(early_shares->workinfoid, NULL);
+			if (!wi_item) {
+				// good_cd is 'now'
+				delta = tvdiff(good_cd,
+						&(early_shares->createdate));
+				if (early_shares->oldcount > 0) {
+					snprintf(tmp, sizeof(tmp),
+						 " too old (%.1fs/%"PRId32")",
+						 delta,
+						 early_shares->oldcount);
+					why = tmp;
+					goto discard;
+				}
+				if (delta > EARLYSHARESLIMIT)
+					early_shares->oldcount++;
+				early_shares->redo++;
+				goto redo;
+			} else {
+				ok = shares_process(conn, early_shares, trf_root);
+				if (ok)
+					goto keep;
+				else
+					goto discard;
+			}
+		}
+	}
+	return;
+redo:
+	K_WLOCK(shares_free);
+	shares_early_root = add_to_ktree(shares_early_root, es_item, cmp_shares);
+	k_add_tail(shares_early_store, es_item);
+	K_WUNLOCK(shares_free);
+	return;
+keep:
+	btv_to_buf(&(early_shares->createdate), cd_buf, sizeof(cd_buf));
+	LOGERR("%s() %"PRId64"/%s/%ld,%ld %s/%"PRId32"/%"PRId32
+		" Early share procured",
+		__func__, early_shares->workinfoid,
+		st = safe_text(early_shares->workername),
+		early_shares->createdate.tv_sec,
+		early_shares->createdate.tv_usec, cd_buf,
+		early_shares->oldcount, early_shares->redo);
+	FREENULL(st);
+	K_WLOCK(shares_free);
+	shares_root = add_to_ktree(shares_root, es_item, cmp_shares);
+	k_add_head(shares_store, es_item);
+	K_WUNLOCK(shares_free);
+	return;
+discard:
+	btv_to_buf(&(early_shares->createdate), cd_buf, sizeof(cd_buf));
+	LOGERR("%s() %"PRId64"/%s/%ld,%ld %s/%"PRId32"/%"PRId32
+		" Early share discarded!%s",
+		__func__, early_shares->workinfoid,
+		st = safe_text(early_shares->workername),
+		early_shares->createdate.tv_sec,
+		early_shares->createdate.tv_usec, cd_buf,
+		early_shares->oldcount, early_shares->redo, why);
+	FREENULL(st);
+	K_WLOCK(shares_free);
+	k_add_head(shares_free, es_item);
+	K_WUNLOCK(shares_free);
+	return;
+}
+
+static void shareerrors_process_early(PGconn *conn, int64_t good_wid,
+				      tv_t *good_cd, K_TREE *trf_root);
+
 // Memory (and log file) only
 bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername,
 		char *clientid, char *errn, char *enonce1, char *nonce2,
 		char *nonce, char *diff, char *sdiff, char *secondaryuserid,
 		char *by, char *code, char *inet, tv_t *cd, K_TREE *trf_root)
 {
-	K_ITEM *s_item, *u_item, *wi_item, *w_item, *wm_item, *ss_item;
+	K_ITEM *s_item = NULL, *u_item, *wi_item;
 	char cd_buf[DATE_BUFSIZ];
-	SHARESUMMARY *sharesummary;
-	SHARES *shares;
+	SHARES *shares = NULL;
 	USERS *users;
 	bool ok = false;
+	char *st = NULL;
 
-	LOGDEBUG("%s(): add", __func__);
+	LOGDEBUG("%s(): %s/%s/%s/%s/%ld,%ld",
+		 __func__,
+		 workinfoid, st = safe_text(workername), nonce,
+		 errn, cd->tv_sec, cd->tv_usec);
+	FREENULL(st);
 
 	K_WLOCK(shares_free);
 	s_item = k_unlink_head(shares_free);
 	K_WUNLOCK(shares_free);
 
 	DATA_SHARES(shares, s_item);
+	bzero(shares, sizeof(*shares));
 
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
 	if (!u_item) {
-		char *txt;
-		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
-		LOGERR("%s() %s/%ld,%ld %.19s no user! Share discarded!",
-			__func__, txt = safe_text(username),
+		btv_to_buf(cd, cd_buf, sizeof(cd_buf));
+		/* This should never happen unless there's a bug in ckpool
+		    or the authentication information got to ckdb after
+		    the shares ... which shouldn't ever happen */
+		LOGERR("%s() %s/%ld,%ld %s no user! Share discarded!",
+			__func__, st = safe_text(username),
 			cd->tv_sec, cd->tv_usec, cd_buf);
-		free(txt);
-		goto unitem;
+		FREENULL(st);
+		goto tisbad;
 	}
 	DATA_USERS(users, u_item);
 
@@ -2809,11 +3026,12 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 		STRNCPY(shares->secondaryuserid, users->secondaryuserid);
 		if (!tv_newer(&missing_secuser_min, cd) ||
 		    !tv_newer(cd, &missing_secuser_max)) {
-			tv_to_buf(cd, cd_buf, sizeof(cd_buf));
-			LOGERR("%s() %s/%ld,%ld %.19s missing secondaryuserid! "
+			btv_to_buf(cd, cd_buf, sizeof(cd_buf));
+			LOGERR("%s() %s/%ld,%ld %s missing secondaryuserid! "
 				"Share corrected",
-				__func__, username,
+				__func__, st = safe_text(username),
 				cd->tv_sec, cd->tv_usec, cd_buf);
+			FREENULL(st);
 		}
 	}
 
@@ -2822,98 +3040,277 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 
 	wi_item = find_workinfo(shares->workinfoid, NULL);
 	if (!wi_item) {
-		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
-		// TODO: store it for a few workinfoid changes
-		LOGERR("%s() %"PRId64"/%s/%ld,%ld %.19s no workinfo! Share discarded!",
-			__func__, shares->workinfoid, workername,
+		btv_to_buf(cd, cd_buf, sizeof(cd_buf));
+		LOGERR("%s() %"PRId64"/%s/%ld,%ld %s no workinfo! "
+			"Early share queued!",
+			__func__, shares->workinfoid,
+			st = safe_text(workername),
 			cd->tv_sec, cd->tv_usec, cd_buf);
-		goto unitem;
+		FREENULL(st);
+		shares->redo = 0;
+		shares->oldcount = 0;
+		K_WLOCK(shares_free);
+		// They need to be sorted by workinfoid
+		shares_early_root = add_to_ktree(shares_early_root, s_item,
+						 cmp_shares);
+		k_add_head(shares_early_store, s_item);
+		K_WUNLOCK(shares_free);
+		/* It was all OK except the missing workinfoid
+		 *  and it was queued, so most likely OK */
+		return true;
 	}
 
-	w_item = new_default_worker(conn, false, shares->userid, shares->workername,
-					by, code, inet, cd, trf_root);
-	if (!w_item)
-		goto unitem;
+	ok = shares_process(conn, shares, trf_root);
+	if (ok) {
+		K_WLOCK(shares_free);
+		shares_root = add_to_ktree(shares_root, s_item, cmp_shares);
+		k_add_head(shares_store, s_item);
+		K_WUNLOCK(shares_free);
+
+		shares_process_early(conn, shares->workinfoid,
+				     &(shares->createdate), trf_root);
+		// Call both since shareerrors may be rare
+		shareerrors_process_early(conn, shares->workinfoid,
+					  &(shares->createdate), trf_root);
+
+		// The original share was ok
+		return true;
+	}
+
+tisbad:
+	K_WLOCK(shares_free);
+	k_add_head(shares_free, s_item);
+	K_WUNLOCK(shares_free);
+	return false;
+}
+
+static bool shareerrors_process(PGconn *conn, SHAREERRORS *shareerrors,
+				K_TREE *trf_root)
+{
+	K_ITEM *w_item, *wm_item, *ss_item;
+	SHARESUMMARY *sharesummary;
+	char *st = NULL;
+
+	LOGDEBUG("%s() add", __func__);
+
+	w_item = new_default_worker(conn, false, shareerrors->userid,
+				    shareerrors->workername,
+				    shareerrors->createby,
+				    shareerrors->createcode,
+				    shareerrors->createinet,
+				    &(shareerrors->createdate), trf_root);
+	if (!w_item) {
+		LOGDEBUG("%s(): new_default_worker failed %"PRId64"/%s/%ld,%ld",
+			 __func__, shareerrors->userid,
+			 st = safe_text(shareerrors->workername),
+			 shareerrors->createdate.tv_sec,
+			 shareerrors->createdate.tv_usec);
+		FREENULL(st);
+		return false;
+	}
 
 	if (reloading && !confirm_sharesummary) {
 		// We only need to know if the workmarker is processed
-		wm_item = find_workmarkers(shares->workinfoid, false,
+		wm_item = find_workmarkers(shareerrors->workinfoid, false,
 					   MARKER_PROCESSED);
 		if (wm_item) {
-			K_WLOCK(shares_free);
-			k_add_head(shares_free, s_item);
-			K_WUNLOCK(shares_free);
-			return true;
+			LOGDEBUG("%s(): workmarker exists for wid %"PRId64
+				 " %"PRId64"/%s/%ld,%ld",
+				 __func__, shareerrors->workinfoid,
+				 shareerrors->userid,
+				 st = safe_text(shareerrors->workername),
+				 shareerrors->createdate.tv_sec,
+				 shareerrors->createdate.tv_usec);
+			FREENULL(st);
+			return false;
 		}
-		ss_item = find_sharesummary(shares->userid, shares->workername, shares->workinfoid);
+
+		ss_item = find_sharesummary(shareerrors->userid,
+					    shareerrors->workername,
+					    shareerrors->workinfoid);
 		if (ss_item) {
 			DATA_SHARESUMMARY(sharesummary, ss_item);
 			if (sharesummary->complete[0] != SUMMARY_NEW) {
-				K_WLOCK(shares_free);
-				k_add_head(shares_free, s_item);
-				K_WUNLOCK(shares_free);
-				return true;
+				LOGDEBUG("%s(): '%s' sharesummary exists "
+					 "%"PRId64" %"PRId64"/%s/%ld,%ld",
+					 __func__, sharesummary->complete,
+					 shareerrors->workinfoid,
+					 shareerrors->userid,
+					 st = safe_text(shareerrors->workername),
+					 shareerrors->createdate.tv_sec,
+					 shareerrors->createdate.tv_usec);
+				FREENULL(st);
+				return false;
 			}
 
 			if (!sharesummary->reset) {
-				zero_sharesummary(sharesummary, cd, shares->diff);
+				zero_sharesummary(sharesummary,
+						  &(shareerrors->createdate),
+						  0.0);
 				sharesummary->reset = true;
 			}
 		}
 	}
 
-	if (!confirm_sharesummary)
-		workerstatus_update(NULL, shares, NULL);
+	sharesummary_update(conn, NULL, shareerrors, NULL,
+			    shareerrors->createby,
+			    shareerrors->createcode,
+			    shareerrors->createinet,
+			    &(shareerrors->createdate));
 
-	sharesummary_update(conn, shares, NULL, NULL, by, code, inet, cd);
+	return true;
+}
 
-	ok = true;
-unitem:
-	K_WLOCK(shares_free);
-	if (!ok)
-		k_add_head(shares_free, s_item);
-	else {
-		shares_root = add_to_ktree(shares_root, s_item, cmp_shares);
-		k_add_head(shares_store, s_item);
+// If it exists and it can be processed, process the oldest early shareerror
+static void shareerrors_process_early(PGconn *conn, int64_t good_wid,
+				      tv_t *good_cd, K_TREE *trf_root)
+{
+	K_TREE_CTX ctx[1];
+	K_ITEM *es_item, *wi_item;
+	SHAREERRORS *early_shareerrors;
+	char cd_buf[DATE_BUFSIZ];
+	char *why = EMPTY;
+	char *st = NULL;
+	char tmp[1024];
+	double delta;
+	bool ok;
+
+	LOGDEBUG("%s() add", __func__);
+
+	K_WLOCK(shareerrors_free);
+	if (shareerrors_early_store->count == 0) {
+		K_WUNLOCK(shareerrors_free);
+		// None
+		return;
 	}
-	K_WUNLOCK(shares_free);
+	es_item = last_in_ktree(shareerrors_early_root, ctx);
+	if (es_item) {
+		shareerrors_early_root = remove_from_ktree(shareerrors_early_root,
+							   es_item,
+							   cmp_shareerrors);
+		k_unlink_item(shareerrors_early_store, es_item);
+	}
+	K_WUNLOCK(shareerrors_free);
+	if (es_item) {
+		DATA_SHAREERRORS(early_shareerrors, es_item);
+		/* If the last (oldest) is newer than the
+		 *  current workinfo, leave it til later */
+		if (early_shareerrors->workinfoid > good_wid)
+			goto redo;
 
-	return ok;
+		/* If it matches the 'ok' share/shareerror we just processed,
+		 *  we don't need to check the workinfoid */
+		if (early_shareerrors->workinfoid == good_wid) {
+			ok = shareerrors_process(conn, early_shareerrors,
+						 trf_root);
+			if (ok)
+				goto keep;
+			else
+				goto discard;
+		} else {
+			wi_item = find_workinfo(early_shareerrors->workinfoid, NULL);
+			if (!wi_item) {
+				// good_cd is 'now'
+				delta = tvdiff(good_cd,
+						&(early_shareerrors->createdate));
+				if (early_shareerrors->oldcount > 0) {
+					snprintf(tmp, sizeof(tmp),
+						 " too old (%.1fs/%"PRId32")",
+						 delta,
+						 early_shareerrors->oldcount);
+					why = tmp;
+					goto discard;
+				}
+				if (delta > EARLYSHARESLIMIT)
+					early_shareerrors->oldcount++;
+				early_shareerrors->redo++;
+				goto redo;
+			} else {
+				ok = shareerrors_process(conn,
+							 early_shareerrors,
+							 trf_root);
+				if (ok)
+					goto keep;
+				else
+					goto discard;
+			}
+		}
+	}
+	return;
+redo:
+	K_WLOCK(shareerrors_free);
+	shareerrors_early_root = add_to_ktree(shareerrors_early_root, es_item,
+					      cmp_shareerrors);
+	k_add_tail(shareerrors_early_store, es_item);
+	K_WUNLOCK(shareerrors_free);
+	return;
+keep:
+	btv_to_buf(&(early_shareerrors->createdate), cd_buf, sizeof(cd_buf));
+	LOGERR("%s() %"PRId64"/%s/%ld,%ld %s/%"PRId32"/%"PRId32
+		" Early share procured",
+		__func__, early_shareerrors->workinfoid,
+		st = safe_text(early_shareerrors->workername),
+		early_shareerrors->createdate.tv_sec,
+		early_shareerrors->createdate.tv_usec, cd_buf,
+		early_shareerrors->oldcount, early_shareerrors->redo);
+	FREENULL(st);
+	K_WLOCK(shareerrors_free);
+	shareerrors_root = add_to_ktree(shareerrors_root, es_item, cmp_shareerrors);
+	k_add_head(shareerrors_store, es_item);
+	K_WUNLOCK(shareerrors_free);
+	return;
+discard:
+	btv_to_buf(&(early_shareerrors->createdate), cd_buf, sizeof(cd_buf));
+	LOGERR("%s() %"PRId64"/%s/%ld,%ld %s/%"PRId32"/%"PRId32
+		" Early share discarded!%s",
+		__func__, early_shareerrors->workinfoid,
+		st = safe_text(early_shareerrors->workername),
+		early_shareerrors->createdate.tv_sec,
+		early_shareerrors->createdate.tv_usec, cd_buf,
+		early_shareerrors->oldcount, early_shareerrors->redo, why);
+	FREENULL(st);
+	K_WLOCK(shareerrors_free);
+	k_add_head(shareerrors_free, es_item);
+	K_WUNLOCK(shareerrors_free);
+	return;
 }
 
 // Memory (and log file) only
-// TODO: handle shareerrors that appear after a workinfoid is aged or doesn't exist?
 bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 			char *workername, char *clientid, char *errn,
 			char *error, char *secondaryuserid, char *by,
 			char *code, char *inet, tv_t *cd, K_TREE *trf_root)
 {
-	K_ITEM *s_item, *u_item, *wi_item, *w_item, *wm_item, *ss_item;
+	K_ITEM *s_item = NULL, *u_item, *wi_item;
 	char cd_buf[DATE_BUFSIZ];
-	SHARESUMMARY *sharesummary;
-	SHAREERRORS *shareerrors;
+	SHAREERRORS *shareerrors = NULL;
 	USERS *users;
 	bool ok = false;
+	char *st = NULL;
 
-	LOGDEBUG("%s(): add", __func__);
+	LOGDEBUG("%s(): %s/%s/%s/%s/%ld,%ld",
+		 __func__,
+		 workinfoid, st = safe_text(workername), errn,
+		 error, cd->tv_sec, cd->tv_usec);
+	FREENULL(st);
 
 	K_WLOCK(shareerrors_free);
 	s_item = k_unlink_head(shareerrors_free);
 	K_WUNLOCK(shareerrors_free);
 
 	DATA_SHAREERRORS(shareerrors, s_item);
+	bzero(shareerrors, sizeof(*shareerrors));
 
 	K_RLOCK(users_free);
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
 	if (!u_item) {
-		char *txt;
-		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
-		LOGERR("%s() %s/%ld,%ld %.19s no user! Shareerror discarded!",
-			__func__, txt = safe_text(username),
+		btv_to_buf(cd, cd_buf, sizeof(cd_buf));
+		LOGERR("%s() %s/%ld,%ld %s no user! Shareerror discarded!",
+			__func__, st = safe_text(username),
 			cd->tv_sec, cd->tv_usec, cd_buf);
-		free(txt);
-		goto unitem;
+		FREENULL(st);
+		goto tisbad;
 	}
 	DATA_USERS(users, u_item);
 
@@ -2930,11 +3327,12 @@ bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 		STRNCPY(shareerrors->secondaryuserid, users->secondaryuserid);
 		if (!tv_newer(&missing_secuser_min, cd) ||
 		    !tv_newer(cd, &missing_secuser_max)) {
-			tv_to_buf(cd, cd_buf, sizeof(cd_buf));
-			LOGERR("%s() %s/%ld,%ld %.19s missing secondaryuserid! "
+			btv_to_buf(cd, cd_buf, sizeof(cd_buf));
+			LOGERR("%s() %s/%ld,%ld %s missing secondaryuserid! "
 				"Sharerror corrected",
-				__func__, username,
+				__func__, st = safe_text(username),
 				cd->tv_sec, cd->tv_usec, cd_buf);
+			FREENULL(st);
 		}
 	}
 
@@ -2943,64 +3341,80 @@ bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 
 	wi_item = find_workinfo(shareerrors->workinfoid, NULL);
 	if (!wi_item) {
-		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
-		LOGERR("%s() %"PRId64"/%s/%ld,%ld %.19s no workinfo! Shareerror discarded!",
-			__func__, shareerrors->workinfoid, workername,
+		btv_to_buf(cd, cd_buf, sizeof(cd_buf));
+		LOGERR("%s() %"PRId64"/%s/%ld,%ld %s no workinfo! "
+			"Early shareerror queued!",
+			__func__, shareerrors->workinfoid,
+			st = safe_text(workername),
 			cd->tv_sec, cd->tv_usec, cd_buf);
-		goto unitem;
+		FREENULL(st);
+		shareerrors->redo = 0;
+		shareerrors->oldcount = 0;
+		K_WLOCK(shareerrors_free);
+		// They need to be sorted by workinfoid
+		shareerrors_early_root = add_to_ktree(shareerrors_early_root,
+						      s_item,
+						      cmp_shareerrors);
+		k_add_head(shareerrors_early_store, s_item);
+		K_WUNLOCK(shareerrors_free);
+		/* It was all OK except the missing workinfoid
+		 *  and it was queued, so most likely OK */
+		return true;
 	}
 
-	w_item = new_default_worker(NULL, false, shareerrors->userid, shareerrors->workername,
-					by, code, inet, cd, trf_root);
-	if (!w_item)
-		goto unitem;
-
-	if (reloading && !confirm_sharesummary) {
-		// We only need to know if the workmarker is processed
-		wm_item = find_workmarkers(shareerrors->workinfoid, false,
-					   MARKER_PROCESSED);
-		if (wm_item) {
-			K_WLOCK(shareerrors_free);
-			k_add_head(shareerrors_free, s_item);
-			K_WUNLOCK(shareerrors_free);
-			return true;
-		}
-		ss_item = find_sharesummary(shareerrors->userid, shareerrors->workername, shareerrors->workinfoid);
-		if (ss_item) {
-			DATA_SHARESUMMARY(sharesummary, ss_item);
-			if (sharesummary->complete[0] != SUMMARY_NEW) {
-				K_WLOCK(shareerrors_free);
-				k_add_head(shareerrors_free, s_item);
-				K_WUNLOCK(shareerrors_free);
-				return true;
-			}
-
-			if (!sharesummary->reset) {
-				zero_sharesummary(sharesummary, cd, 0.0);
-				sharesummary->reset = true;
-			}
-		}
-	}
-
-	sharesummary_update(conn, NULL, shareerrors, NULL, by, code, inet, cd);
-
-	ok = true;
-unitem:
-	K_WLOCK(shareerrors_free);
-	if (!ok)
-		k_add_head(shareerrors_free, s_item);
-	else {
-		shareerrors_root = add_to_ktree(shareerrors_root, s_item, cmp_shareerrors);
+	ok = shareerrors_process(conn, shareerrors, trf_root);
+	if (ok) {
+		K_WLOCK(shareerrors_free);
+		shareerrors_root = add_to_ktree(shareerrors_root, s_item,
+						cmp_shareerrors);
 		k_add_head(shareerrors_store, s_item);
-	}
-	K_WUNLOCK(shareerrors_free);
+		K_WUNLOCK(shareerrors_free);
 
-	return ok;
+		shareerrors_process_early(conn, shareerrors->workinfoid,
+					  &(shareerrors->createdate),
+					  trf_root);
+		// Call both in case we are only getting errors on bad work
+		shares_process_early(conn, shareerrors->workinfoid,
+				     &(shareerrors->createdate), trf_root);
+
+		// The original share was ok
+		return true;
+	}
+
+tisbad:
+	K_WLOCK(shareerrors_free);
+	k_add_head(shareerrors_free, s_item);
+	K_WUNLOCK(shareerrors_free);
+	return false;
 }
 
 bool shareerrors_fill()
 {
 	return true;
+}
+
+static void markersummary_to_pool(MARKERSUMMARY *p_row, MARKERSUMMARY *row)
+{
+	p_row->diffacc += row->diffacc;
+	p_row->diffsta += row->diffsta;
+	p_row->diffdup += row->diffdup;
+	p_row->diffhi += row->diffhi;
+	p_row->diffrej += row->diffrej;
+	p_row->shareacc += row->shareacc;
+	p_row->sharesta += row->sharesta;
+	p_row->sharedup += row->sharedup;
+	p_row->sharehi += row->sharehi;
+	p_row->sharerej += row->sharerej;
+	p_row->sharecount += row->sharecount;
+	p_row->errorcount += row->errorcount;
+	if (!p_row->firstshare.tv_sec ||
+	     !tv_newer(&(p_row->firstshare), &(row->firstshare))) {
+		copy_tv(&(p_row->firstshare), &(row->firstshare));
+	}
+	if (tv_newer(&(p_row->lastshare), &(row->lastshare))) {
+		copy_tv(&(p_row->lastshare), &(row->lastshare));
+		p_row->lastdiffacc = row->lastdiffacc;
+	}
 }
 
 /* TODO: what to do about a failure?
@@ -3022,14 +3436,16 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 	PGresult *res;
 	K_TREE_CTX ss_ctx[1], ms_ctx[1];
 	SHARESUMMARY *sharesummary, looksharesummary;
-	MARKERSUMMARY *markersummary, lookmarkersummary;
+	MARKERSUMMARY *markersummary, lookmarkersummary, *p_markersummary;
 	K_ITEM *ss_item, *ss_prev, ss_look, *ms_item, ms_look;
+	K_ITEM *p_ss_item, *p_ms_item;
 	bool ok = false, conned = false;
 	int64_t diffacc, shareacc;
 	char *reason = NULL, *tuples = NULL;
 	char *params[2];
 	int n, par = 0, deleted = -7;
 	int ss_count, ms_count;
+	char *st = NULL;
 	char *del;
 
 	LOGWARNING("%s() Processing: workmarkers %"PRId64"/%s/"
@@ -3120,7 +3536,8 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 				LOGDEBUG("%s() new ms %"PRId64"/%"PRId64"/%s",
 					 shortname, markersummary->markerid,
 					 markersummary->userid,
-					 markersummary->workername);
+					 st = safe_text(markersummary->workername));
+				FREENULL(st);
 			} else {
 				DATA_MARKERSUMMARY(markersummary, ms_item);
 			}
@@ -3266,13 +3683,31 @@ flail:
 		K_WLOCK(markersummary_free);
 		ms_item = new_markersummary_store->head;
 		while (ms_item) {
-			// Move the new markersummaries into the trees/stores
+			// move the new markersummaries into the trees/stores
 			markersummary_root = add_to_ktree(markersummary_root,
 							  ms_item,
 							  cmp_markersummary);
 			markersummary_userid_root = add_to_ktree(markersummary_userid_root,
 								 ms_item,
 								 cmp_markersummary_userid);
+
+			// create/update the pool markersummaries
+			DATA_MARKERSUMMARY(markersummary, ms_item);
+			p_ms_item = find_markersummary_p(markersummary->markerid);
+			if (!p_ms_item) {
+				p_ms_item = k_unlink_head(markersummary_free);
+				DATA_MARKERSUMMARY(p_markersummary, p_ms_item);
+				bzero(p_markersummary, sizeof(*p_markersummary));
+				p_markersummary->markerid = markersummary->markerid;
+				POOL_MS(p_markersummary);
+				LIST_MEM_ADD(markersummary_free, p_markersummary->workername);
+				markersummary_pool_root = add_to_ktree(markersummary_pool_root,
+								       p_ms_item,
+								       cmp_markersummary);
+				k_add_head(markersummary_pool_store, p_ms_item);
+			}
+			markersummary_to_pool(p_markersummary, markersummary);
+
 			ms_item = ms_item->next;
 		}
 		k_list_transfer_to_head(new_markersummary_store, markersummary_store);
@@ -3288,8 +3723,20 @@ flail:
 			sharesummary_workinfoid_root = remove_from_ktree(sharesummary_workinfoid_root,
 									 ss_item,
 									 cmp_sharesummary_workinfoid);
-			free_sharesummary_data(ss_item);
 
+			// remove the pool sharesummaries
+			DATA_SHARESUMMARY(sharesummary, ss_item);
+			p_ss_item = find_sharesummary_p(sharesummary->workinfoid);
+			if (p_ss_item) {
+				sharesummary_pool_root = remove_from_ktree(sharesummary_pool_root,
+									   p_ss_item,
+									   cmp_sharesummary);
+				k_unlink_item(sharesummary_pool_store, p_ss_item);
+				free_sharesummary_data(p_ss_item);
+				k_add_head(sharesummary_free, p_ss_item);
+			}
+
+			free_sharesummary_data(ss_item);
 			ss_item = ss_item->next;
 		}
 		k_list_transfer_to_head(old_sharesummary_store, sharesummary_free);
@@ -3313,10 +3760,103 @@ flail:
 	return ok;
 }
 
+static void sharesummary_to_pool(SHARESUMMARY *p_row, SHARESUMMARY *row)
+{
+	p_row->diffacc += row->diffacc;
+	p_row->diffsta += row->diffsta;
+	p_row->diffdup += row->diffdup;
+	p_row->diffhi += row->diffhi;
+	p_row->diffrej += row->diffrej;
+	p_row->shareacc += row->shareacc;
+	p_row->sharesta += row->sharesta;
+	p_row->sharedup += row->sharedup;
+	p_row->sharehi += row->sharehi;
+	p_row->sharerej += row->sharerej;
+	p_row->sharecount += row->sharecount;
+	p_row->errorcount += row->errorcount;
+	if (!p_row->firstshare.tv_sec ||
+	     !tv_newer(&(p_row->firstshare), &(row->firstshare))) {
+		copy_tv(&(p_row->firstshare), &(row->firstshare));
+	}
+	if (tv_newer(&(p_row->lastshare), &(row->lastshare))) {
+		copy_tv(&(p_row->lastshare), &(row->lastshare));
+		p_row->lastdiffacc = row->lastdiffacc;
+	}
+}
+
+static void set_sharesummary_stats(SHARESUMMARY *row, SHARES *s_row,
+				   SHAREERRORS *e_row, bool new,
+				   double *tdf, double *tdl)
+{
+	tv_t *createdate;
+	double diff;
+
+	if (s_row) {
+		createdate = &(s_row->createdate);
+		diff = s_row->diff;
+	} else {
+		createdate = &(e_row->createdate);
+		diff = 0;
+	}
+
+	if (new)
+		zero_sharesummary(row, createdate, diff);
+
+	if (s_row) {
+		row->sharecount += 1;
+		switch (s_row->errn) {
+			case SE_NONE:
+				row->diffacc += s_row->diff;
+				row->shareacc++;
+				break;
+			case SE_STALE:
+				row->diffsta += s_row->diff;
+				row->sharesta++;
+				break;
+			case SE_DUPE:
+				row->diffdup += s_row->diff;
+				row->sharedup++;
+				break;
+			case SE_HIGH_DIFF:
+				row->diffhi += s_row->diff;
+				row->sharehi++;
+				break;
+			default:
+				row->diffrej += s_row->diff;
+				row->sharerej++;
+				break;
+		}
+	} else
+		row->errorcount += 1;
+
+	if (!new) {
+		*tdf = tvdiff(createdate, &(row->firstshare));
+		if (*tdf < 0.0)
+			copy_tv(&(row->firstshare), createdate);
+		*tdl = tvdiff(createdate, &(row->lastshare));
+		if (*tdl >= 0.0) {
+			copy_tv(&(row->lastshare), createdate);
+			row->lastdiffacc = diff;
+		}
+	}
+}
+
 /* Keep some simple stats on how often shares are out of order
  *  and how often they produce a WARNING due to OOOLIMIT */
 static int64_t ooof0, ooof, oool0, oool;
 #define OOOLIMIT -2.0
+
+/* This isn't locked so it is possible - but very unlikely -
+ *  to get an invalid set of numbers if any ooo variables change
+ *  during the snprintf, but that will simply display a wrong number */
+char *ooo_status(char *buf, size_t siz)
+{
+	snprintf(buf, siz,
+		 "F%"PRId64":%"PRId64"/L%"PRId64":%"PRId64"/%.1f/T%"PRId64,
+		 ooof, ooof0, oool, oool0, OOOLIMIT,
+		 ooof + ooof0 + oool + oool0);
+	return buf;
+}
 
 bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITEM *ss_item,
 				char *by, char *code, char *inet, tv_t *cd, WHERE_FFL_ARGS)
@@ -3324,27 +3864,29 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 	ExecStatusType rescode;
 	PGresult *res = NULL;
 	WORKMARKERS *wm;
-	SHARESUMMARY *row;
-	K_ITEM *item, *wm_item;
+	SHARESUMMARY *row, *p_row;
+	K_ITEM *item, *wm_item, *p_item;
 	char *ins, *upd;
-	bool ok = false, new;
+	bool ok = false, new = false, p_new = false;
 	char *params[19 + MODIFYDATECOUNT];
 	int n, par = 0;
 	int64_t userid, workinfoid;
 	char *workername;
-	tv_t *sharecreatedate;
+	tv_t *createdate;
 	bool must_update = false, conned = false;
-	double diff = 0;
+	char *st = NULL, *db = NULL;
+	char ooo_buf[256];
+	double tdf, tdl;
 
 	LOGDEBUG("%s(): update", __func__);
 
+	// this will never be a pool_ summary
 	if (ss_item) {
 		if (s_row || e_row) {
 			quithere(1, "ERR: only one of s_row, e_row and "
 				    "ss_item allowed" WHERE_FFL,
 				    WHERE_FFL_PASS);
 		}
-		new = false;
 		item = ss_item;
 		DATA_SHARESUMMARY(row, item);
 		must_update = true;
@@ -3360,8 +3902,7 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 			userid = s_row->userid;
 			workername = s_row->workername;
 			workinfoid = s_row->workinfoid;
-			diff = s_row->diff;
-			sharecreatedate = &(s_row->createdate);
+			createdate = &(s_row->createdate);
 		} else {
 			if (!e_row) {
 				quithere(1, "ERR: all s_row, e_row and "
@@ -3371,31 +3912,32 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 			userid = e_row->userid;
 			workername = e_row->workername;
 			workinfoid = e_row->workinfoid;
-			sharecreatedate = &(e_row->createdate);
+			createdate = &(e_row->createdate);
 		}
 
 		K_RLOCK(workmarkers_free);
 		wm_item = find_workmarkers(workinfoid, false, MARKER_PROCESSED);
 		K_RUNLOCK(workmarkers_free);
 		if (wm_item) {
-			char *tmp;
 			DATA_WORKMARKERS(wm, wm_item);
 			LOGERR("%s(): attempt to update sharesummary "
 			       "with %s %"PRId64"/%"PRId64"/%s createdate %s"
 			       " but processed workmarkers %"PRId64" exists",
 				__func__, s_row ? "shares" : "shareerrors",
-				workinfoid, userid, workername,
-				(tmp = ctv_to_buf(sharecreatedate, NULL, 0)),
-				wm->markerid);
-			free(tmp);
-			return false;
+				workinfoid, userid, st = safe_text(workername),
+					db = ctv_to_buf(createdate, NULL, 0),
+					wm->markerid);
+				FREENULL(st);
+				FREENULL(db);
+				return false;
 		}
 
 		K_RLOCK(sharesummary_free);
 		item = find_sharesummary(userid, workername, workinfoid);
+		p_item = find_sharesummary_p(workinfoid);
 		K_RUNLOCK(sharesummary_free);
+
 		if (item) {
-			new = false;
 			DATA_SHARESUMMARY(row, item);
 		} else {
 			new = true;
@@ -3403,104 +3945,87 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 			item = k_unlink_head(sharesummary_free);
 			K_WUNLOCK(sharesummary_free);
 			DATA_SHARESUMMARY(row, item);
+			bzero(row, sizeof(*row));
 			row->userid = userid;
 			row->workername = strdup(workername);
 			LIST_MEM_ADD(sharesummary_free, row->workername);
 			row->workinfoid = workinfoid;
-			zero_sharesummary(row, sharecreatedate, diff);
 			row->inserted = false;
 			row->saveaged = false;
 		}
 
-		if (e_row)
-			row->errorcount += 1;
-		else {
-			row->sharecount += 1;
-			switch (s_row->errn) {
-				case SE_NONE:
-					row->diffacc += s_row->diff;
-					row->shareacc++;
-					break;
-				case SE_STALE:
-					row->diffsta += s_row->diff;
-					row->sharesta++;
-					break;
-				case SE_DUPE:
-					row->diffdup += s_row->diff;
-					row->sharedup++;
-					break;
-				case SE_HIGH_DIFF:
-					row->diffhi += s_row->diff;
-					row->sharehi++;
-					break;
-				default:
-					row->diffrej += s_row->diff;
-					row->sharerej++;
-					break;
+		// N.B. this directly updates the non-key data
+		set_sharesummary_stats(row, s_row, e_row, new, &tdf, &tdl);
+
+		if (!new) {
+			// don't LOG '=' in case shares come from ckpool with the same timestamp
+			if (tdf < 0.0) {
+				char *tmp1, *tmp2;
+				int level = LOG_DEBUG;
+				// WARNING for shares exceeding the OOOLIMIT but not during startup
+				if (tdf < OOOLIMIT) {
+					ooof++;
+					if (startup_complete)
+						level = LOG_WARNING;
+				} else
+					ooof0++;
+				LOGMSG(level, "%s(): OoO %s createdate (%s) is < summary"
+					" firstshare (%s) (%s)",
+					__func__, s_row ? "shares" : "shareerrors",
+					(tmp1 = ctv_to_buf(createdate, NULL, 0)),
+					(tmp2 = ctv_to_buf(&(row->firstshare), NULL, 0)),
+					ooo_status(ooo_buf, sizeof(ooo_buf)));
+				free(tmp2);
+				free(tmp1);
+			}
+
+			// don't LOG '=' in case shares come from ckpool with the same timestamp
+			if (tdl < 0.0) {
+				char *tmp1, *tmp2;
+				int level = LOG_DEBUG;
+				// WARNING for shares exceeding the OOOLIMIT but not during startup
+				if (tdl < OOOLIMIT) {
+					oool++;
+					if (startup_complete)
+						level = LOG_WARNING;
+				} else
+					oool0++;
+				LOGMSG(level, "%s(): OoO %s createdate (%s) is < summary"
+					" lastshare (%s) (%s)",
+					__func__, s_row ? "shares" : "shareerrors",
+					(tmp1 = ctv_to_buf(createdate, NULL, 0)),
+					(tmp2 = ctv_to_buf(&(row->lastshare), NULL, 0)),
+					ooo_status(ooo_buf, sizeof(ooo_buf)));
+				free(tmp2);
+				free(tmp1);
+			}
+
+			if (row->complete[0] != SUMMARY_NEW) {
+				LOGDEBUG("%s(): updating sharesummary not '%c'"
+					 " %"PRId64"/%s/%"PRId64"/%s",
+					__func__, SUMMARY_NEW, row->userid,
+					st = safe_text(row->workername),
+					row->workinfoid, row->complete);
+				FREENULL(st);
 			}
 		}
 
-		if (!new) {
-			double td;
-			td = tvdiff(sharecreatedate, &(row->firstshare));
-			// don't LOG '=' in case shares come from ckpool with the same timestamp
-			if (td < 0.0) {
-				char *tmp1, *tmp2;
-				int level;
-				// DEBUG only for shares out of order up to OOOLIMIT seconds
-				if (td < OOOLIMIT) {
-					level = LOG_WARNING;
-					ooof++;
-				} else {
-					level = LOG_DEBUG;
-					ooof0++;
-				}
-				LOGMSG(level, "%s(): OoO %s createdate (%s) is < summary"
-					" firstshare (%s) (F%"PRId64":%"PRId64
-					"/L%"PRId64":%"PRId64"/%.1f)",
-					__func__, s_row ? "shares" : "shareerrors",
-					(tmp1 = ctv_to_buf(sharecreatedate, NULL, 0)),
-					(tmp2 = ctv_to_buf(&(row->firstshare), NULL, 0)),
-					ooof, ooof0, oool, oool0, OOOLIMIT);
-				free(tmp2);
-				free(tmp1);
-				row->firstshare.tv_sec = sharecreatedate->tv_sec;
-				row->firstshare.tv_usec = sharecreatedate->tv_usec;
-				// Don't change lastdiffacc
-			}
-			td = tvdiff(sharecreatedate, &(row->lastshare));
-			// don't LOG '=' in case shares come from ckpool with the same timestamp
-			if (td >= 0.0) {
-				row->lastshare.tv_sec = sharecreatedate->tv_sec;
-				row->lastshare.tv_usec = sharecreatedate->tv_usec;
-				row->lastdiffacc = diff;
-			} else {
-				char *tmp1, *tmp2;
-				int level;
-				// DEBUG only for shares out of order up to OOOLIMIT seconds
-				if (td < OOOLIMIT) {
-					level = LOG_WARNING;
-					oool++;
-				} else {
-					level = LOG_DEBUG;
-					oool0++;
-				}
-				LOGMSG(level, "%s(): OoO %s createdate (%s) is < summary"
-					" lastshare (%s) (F%"PRId64":%"PRId64
-					"/L%"PRId64":%"PRId64"/%.1f)",
-					__func__, s_row ? "shares" : "shareerrors",
-					(tmp1 = ctv_to_buf(sharecreatedate, NULL, 0)),
-					(tmp2 = ctv_to_buf(&(row->lastshare), NULL, 0)),
-					ooof, ooof0, oool, oool0, OOOLIMIT);
-				free(tmp2);
-				free(tmp1);
-			}
-			if (row->complete[0] != SUMMARY_NEW) {
-				LOGDEBUG("%s(): updating sharesummary not '%c' %"PRId64"/%s/%"PRId64"/%s",
-					__func__, SUMMARY_NEW, row->userid, row->workername,
-					row->workinfoid, row->complete);
-			}
+		// p_items are ram only
+		if (p_item) {
+			DATA_SHARESUMMARY(p_row, p_item);
+		} else {
+			p_new = true;
+			K_WLOCK(sharesummary_free);
+			p_item = k_unlink_head(sharesummary_free);
+			K_WUNLOCK(sharesummary_free);
+			DATA_SHARESUMMARY(p_row, p_item);
+			bzero(p_row, sizeof(*p_row));
+			POOL_SS(p_row);
+			LIST_MEM_ADD(sharesummary_free, p_row->workername);
+			p_row->workinfoid = workinfoid;
 		}
+
+		set_sharesummary_stats(p_row, s_row, e_row, p_new, &tdf, &tdl);
 	}
 
 	// During startup, don't save 'new' sharesummaries, to reduce DB I/O
@@ -3658,13 +4183,21 @@ late:
 		PQfinish(conn);
 
 	// We keep the new item no matter what 'ok' is, since it will be inserted later
-	if (new) {
+	if (new || p_new) {
 		K_WLOCK(sharesummary_free);
-		sharesummary_root = add_to_ktree(sharesummary_root, item, cmp_sharesummary);
-		sharesummary_workinfoid_root = add_to_ktree(sharesummary_workinfoid_root,
-							    item,
-							    cmp_sharesummary_workinfoid);
-		k_add_head(sharesummary_store, item);
+		if (new) {
+			sharesummary_root = add_to_ktree(sharesummary_root, item, cmp_sharesummary);
+			sharesummary_workinfoid_root = add_to_ktree(sharesummary_workinfoid_root,
+								    item,
+								    cmp_sharesummary_workinfoid);
+			k_add_head(sharesummary_store, item);
+		}
+		if (p_new) {
+			sharesummary_pool_root = add_to_ktree(sharesummary_pool_root,
+							      p_item,
+							      cmp_sharesummary);
+			k_add_head(sharesummary_pool_store, p_item);
+		}
 		K_WUNLOCK(sharesummary_free);
 	}
 
@@ -3676,9 +4209,9 @@ bool sharesummary_fill(PGconn *conn)
 	ExecStatusType rescode;
 	PGresult *res;
 	K_TREE_CTX ctx[1];
-	K_ITEM *item, *m_item;
-	int n, i, par = 0;
-	SHARESUMMARY *row;
+	K_ITEM *item, *m_item, *p_item;
+	int n, i, par = 0, p_n;
+	SHARESUMMARY *row, *p_row;
 	MARKS *marks;
 	char *params[2];
 	char *field;
@@ -3714,7 +4247,6 @@ bool sharesummary_fill(PGconn *conn)
 			   "and pplns calculations may be wrong");
 	}
 
-	// TODO: limit how far back
 	sel = "select "
 		"userid,workername,workinfoid,diffacc,diffsta,diffdup,diffhi,"
 		"diffrej,shareacc,sharesta,sharedup,sharehi,sharerej,"
@@ -3745,10 +4277,11 @@ bool sharesummary_fill(PGconn *conn)
 	n = PQntuples(res);
 	LOGDEBUG("%s(): tree build count %d", __func__, n);
 	ok = true;
+	//K_WLOCK(sharesummary_free);
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(sharesummary_free);
 		DATA_SHARESUMMARY(row, item);
-		row->workername = NULL;
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -3765,7 +4298,7 @@ bool sharesummary_fill(PGconn *conn)
 		PQ_GET_FLD(res, i, "workername", field, ok);
 		if (!ok)
 			break;
-		row->workername = strdup(field);
+		TXT_TO_PTR("workername", field, row->workername);
 		LIST_MEM_ADD(sharesummary_free, row->workername);
 
 		PQ_GET_FLD(res, i, "workinfoid", field, ok);
@@ -3891,22 +4424,39 @@ bool sharesummary_fill(PGconn *conn)
 			}
 		}
 
+		p_item = find_sharesummary_p(row->workinfoid);
+		if (!p_item) {
+			p_item = k_unlink_head(sharesummary_free);
+			DATA_SHARESUMMARY(p_row, p_item);
+			bzero(p_row, sizeof(*p_row));
+			POOL_SS(p_row);
+			LIST_MEM_ADD(sharesummary_free, p_row->workername);
+			p_row->workinfoid = row->workinfoid;
+			sharesummary_pool_root = add_to_ktree(sharesummary_pool_root,
+							      p_item,
+							      cmp_sharesummary);
+			k_add_head(sharesummary_pool_store, p_item);
+		} else {
+			DATA_SHARESUMMARY(p_row, p_item);
+		}
+
+		sharesummary_to_pool(p_row, row);
+
 		tick();
 	}
 	if (!ok) {
-		DATA_SHARESUMMARY(row, item);
-		if (row->workername) {
-			LIST_MEM_SUB(sharesummary_free, row->workername);
-			FREENULL(row->workername);
-		}
+		FREENULL(row->workername);
 		k_add_head(sharesummary_free, item);
 	}
 
+	p_n = sharesummary_pool_store->count;
+	//K_WUNLOCK(sharesummary_free);
 	PQclear(res);
 
 	if (ok) {
 		LOGDEBUG("%s(): built", __func__);
 		LOGWARNING("%s(): loaded %d sharesummary records", __func__, n);
+		LOGWARNING("%s(): created %d sharesummary pool records", __func__, p_n);
 	}
 
 	return ok;
@@ -4081,6 +4631,7 @@ bool blocks_add(PGconn *conn, char *height, char *blockhash,
 	bool ok = false, update_old = false;
 	int n, par = 0;
 	char want = '?';
+	char *st = NULL;
 
 	LOGDEBUG("%s(): add", __func__);
 
@@ -4089,6 +4640,7 @@ bool blocks_add(PGconn *conn, char *height, char *blockhash,
 	K_WUNLOCK(blocks_free);
 
 	DATA_BLOCKS(row, b_item);
+	bzero(row, sizeof(*row));
 
 	TXT_TO_INT("height", height, row->height);
 	STRNCPY(row->blockhash, blockhash);
@@ -4404,8 +4956,9 @@ flail:
 				snprintf(tmp, sizeof(tmp),
 					 " Reward: %f, Worker: %s, ShareEst: %.1f %s%s%% UTC:%s",
 					 BTC_TO_D(row->reward),
-					 row->workername,
+					 st = safe_text(row->workername),
 					 pool.diffacc, est, pct, cd_buf);
+				FREENULL(st);
 				if (pool.workinfoid < row->workinfoid) {
 					pool.workinfoid = row->workinfoid;
 					pool.height = row->height;
@@ -4468,9 +5021,11 @@ bool blocks_fill(PGconn *conn)
 	n = PQntuples(res);
 	LOGDEBUG("%s(): tree build count %d", __func__, n);
 	ok = true;
+	K_WLOCK(blocks_free);
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(blocks_free);
 		DATA_BLOCKS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -4580,6 +5135,7 @@ bool blocks_fill(PGconn *conn)
 	if (!ok)
 		k_add_head(blocks_free, item);
 
+	K_WUNLOCK(blocks_free);
 	PQclear(res);
 
 	if (ok) {
@@ -4757,6 +5313,7 @@ bool miningpayouts_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(miningpayouts_free);
 		DATA_MININGPAYOUTS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -4997,6 +5554,7 @@ bool payouts_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(payouts_free);
 		DATA_PAYOUTS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -5067,6 +5625,7 @@ bool payouts_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_BLOB("stats", field, row->stats);
+		LIST_MEM_ADD(payouts_free, row->stats);
 
 		HISTORYDATEFLDS(res, i, row, ok);
 		if (!ok)
@@ -5078,8 +5637,10 @@ bool payouts_fill(PGconn *conn)
 
 		tick();
 	}
-	if (!ok)
+	if (!ok) {
+		FREENULL(row->stats);
 		k_add_head(payouts_free, item);
+	}
 
 	K_WUNLOCK(payouts_free);
 	PQclear(res);
@@ -5104,6 +5665,7 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 	char cd_buf[DATE_BUFSIZ];
 	AUTHS *row;
 	bool ok = false;
+	char *st = NULL;
 
 	LOGDEBUG("%s(): add", __func__);
 
@@ -5112,6 +5674,7 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 	K_WUNLOCK(auths_free);
 
 	DATA_AUTHS(row, a_item);
+	bzero(row, sizeof(*row));
 
 	K_RLOCK(users_free);
 	u_item = find_users(username);
@@ -5121,11 +5684,10 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 			u_item = users_add(conn, username, EMPTY, EMPTY,
 					   by, code, inet, cd, trf_root);
 		} else {
-			char *txt;
 			LOGDEBUG("%s(): unknown user '%s'",
 				 __func__,
-				 txt = safe_text(username));
-			free(txt);
+				 st = safe_text(username));
+			FREENULL(st);
 		}
 		if (!u_item)
 			goto unitem;
@@ -5165,7 +5727,9 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 		// Shouldn't actually be possible unless twice in the logs
 		tv_to_buf(cd, cd_buf, sizeof(cd_buf));
 		LOGERR("%s(): Duplicate auths ignored %s/%s/%s",
-			__func__, poolinstance, workername, cd_buf);
+			__func__, poolinstance, st = safe_text(workername),
+			cd_buf);
+		FREENULL(st);
 
 		/* Let them mine, that's what matters :)
 		 *  though this would normally only be during a reload */
@@ -5223,6 +5787,7 @@ bool poolstats_add(PGconn *conn, bool store, char *poolinstance,
 	K_WUNLOCK(poolstats_free);
 
 	DATA_POOLSTATS(row, p_item);
+	bzero(row, sizeof(*row));
 
 	row->stored = false;
 
@@ -5385,6 +5950,7 @@ bool poolstats_fill(PGconn *conn)
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(poolstats_free);
 		DATA_POOLSTATS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -5471,6 +6037,7 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 	USERSTATS *row, *match, *next;
 	USERS *users;
 	K_TREE_CTX ctx[1];
+	char *st = NULL;
 
 	LOGDEBUG("%s(): add", __func__);
 
@@ -5479,6 +6046,7 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 	K_WUNLOCK(userstats_free);
 
 	DATA_USERSTATS(row, us_item);
+	bzero(row, sizeof(*row));
 
 	STRNCPY(row->poolinstance, poolinstance);
 	TXT_TO_BIGINT("elapsed", elapsed, row->elapsed);
@@ -5486,11 +6054,10 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
 	if (!u_item) {
-		char *txt;
 		LOGERR("%s(): unknown user '%s'",
 			__func__,
-			txt = safe_text(username));
-		free(txt);
+			st = safe_text(username));
+		FREENULL(st);
 		return false;
 	}
 	DATA_USERS(users, u_item);
@@ -5588,6 +6155,7 @@ bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 	K_WUNLOCK(userstats_free);
 
 	DATA_USERSTATS(row, us_item);
+	bzero(row, sizeof(*row));
 
 	STRNCPY(row->poolinstance, poolinstance);
 	TXT_TO_BIGINT("elapsed", elapsed, row->elapsed);
@@ -5595,13 +6163,13 @@ bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 	u_item = find_users(username);
 	K_RUNLOCK(users_free);
 	if (!u_item) {
-		char *usr, *wrk;
+		char *usr = NULL, *wrk = NULL;
 		LOGERR("%s(): unknown user '%s' (worker=%s)",
 			__func__,
 			usr = safe_text(username),
 			wrk = safe_text(workername));
-		free(usr);
-		free(wrk);
+		FREENULL(usr);
+		FREENULL(wrk);
 		return false;
 	}
 	DATA_USERS(users, u_item);
@@ -5654,6 +6222,7 @@ bool markersummary_add(PGconn *conn, K_ITEM *ms_item, char *by, char *code,
 	int n, par = 0;
 	char *ins;
 	bool ok = false;
+	char *st = NULL;
 
 	LOGDEBUG("%s(): add", __func__);
 
@@ -5691,8 +6260,10 @@ bool markersummary_add(PGconn *conn, K_ITEM *ms_item, char *by, char *code,
 		MODIFYDATECONTROL ") values (" PQPARAM26 ")";
 
 	LOGDEBUG("%s() adding ms %"PRId64"/%"PRId64"/%s/%.0f",
-		 __func__, row->markerid, row->userid, row->workername,
+		 __func__, row->markerid, row->userid,
+		 st = safe_text(row->workername),
 		 row->diffacc);
+	FREENULL(st);
 
 	if (!conn) {
 		conn = dbconnect();
@@ -5723,9 +6294,9 @@ bool markersummary_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
 	PGresult *res;
-	K_ITEM *item;
-	int n, i;
-	MARKERSUMMARY *row;
+	K_ITEM *item, *p_item;
+	int n, i, p_n;
+	MARKERSUMMARY *row, *p_row;
 	char *field;
 	char *sel;
 	int fields = 18;
@@ -5760,9 +6331,11 @@ bool markersummary_fill(PGconn *conn)
 	n = PQntuples(res);
 	LOGDEBUG("%s(): tree build count %d", __func__, n);
 	ok = true;
+	//K_WLOCK(markersummary_free);
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(markersummary_free);
 		DATA_MARKERSUMMARY(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -5783,6 +6356,7 @@ bool markersummary_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_PTR("workername", field, row->workername);
+		LIST_MEM_ADD(markersummary_free, row->workername);
 
 		PQ_GET_FLD(res, i, "diffacc", field, ok);
 		if (!ok)
@@ -5867,16 +6441,41 @@ bool markersummary_fill(PGconn *conn)
 		markersummary_userid_root = add_to_ktree(markersummary_userid_root, item, cmp_markersummary_userid);
 		k_add_head(markersummary_store, item);
 
+		p_item = find_markersummary_p(row->markerid);
+		if (!p_item) {
+			/* N.B. this could be false due to the markerid
+			 *  having the wrong status TODO: deal with that? */
+			p_item = k_unlink_head(markersummary_free);
+			DATA_MARKERSUMMARY(p_row, p_item);
+			bzero(p_row, sizeof(*p_row));
+			p_row->markerid = row->markerid;
+			POOL_MS(p_row);
+			LIST_MEM_ADD(markersummary_free, p_row->workername);
+			markersummary_pool_root = add_to_ktree(markersummary_pool_root,
+							       p_item,
+							       cmp_markersummary);
+			k_add_head(markersummary_pool_store, p_item);
+		} else {
+			DATA_MARKERSUMMARY(p_row, p_item);
+		}
+
+		markersummary_to_pool(p_row, row);
+
 		tick();
 	}
-	if (!ok)
+	if (!ok) {
+		FREENULL(row->workername);
 		k_add_head(markersummary_free, item);
+	}
 
+	p_n = markersummary_pool_store->count;
+	//K_WUNLOCK(markersummary_free);
 	PQclear(res);
 
 	if (ok) {
 		LOGDEBUG("%s(): built", __func__);
 		LOGWARNING("%s(): loaded %d markersummary records", __func__, n);
+		LOGWARNING("%s(): created %d markersummary pool records", __func__, p_n);
 	}
 
 	return ok;
@@ -6164,9 +6763,11 @@ bool workmarkers_fill(PGconn *conn)
 	n = PQntuples(res);
 	LOGDEBUG("%s(): tree build count %d", __func__, n);
 	ok = true;
+	K_WLOCK(workmarkers_free);
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(workmarkers_free);
 		DATA_WORKMARKERS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -6182,6 +6783,7 @@ bool workmarkers_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_PTR("poolinstance", field, row->poolinstance);
+		LIST_MEM_ADD(workmarkers_free, row->poolinstance);
 
 		PQ_GET_FLD(res, i, "workinfoidend", field, ok);
 		if (!ok)
@@ -6197,6 +6799,7 @@ bool workmarkers_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_PTR("description", field, row->description);
+		LIST_MEM_ADD(workmarkers_free, row->description);
 
 		PQ_GET_FLD(res, i, "status", field, ok);
 		if (!ok)
@@ -6217,6 +6820,7 @@ bool workmarkers_fill(PGconn *conn)
 	if (!ok)
 		k_add_head(workmarkers_free, item);
 
+	K_WUNLOCK(workmarkers_free);
 	PQclear(res);
 
 	if (ok) {
@@ -6463,9 +7067,11 @@ bool marks_fill(PGconn *conn)
 	n = PQntuples(res);
 	LOGDEBUG("%s(): tree build count %d", __func__, n);
 	ok = true;
+	K_WLOCK(marks_free);
 	for (i = 0; i < n; i++) {
 		item = k_unlink_head(marks_free);
 		DATA_MARKS(row, item);
+		bzero(row, sizeof(*row));
 
 		if (everyone_die) {
 			ok = false;
@@ -6476,6 +7082,7 @@ bool marks_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_PTR("poolinstance", field, row->poolinstance);
+		LIST_MEM_ADD(marks_free, row->poolinstance);
 
 		PQ_GET_FLD(res, i, "workinfoid", field, ok);
 		if (!ok)
@@ -6486,11 +7093,13 @@ bool marks_fill(PGconn *conn)
 		if (!ok)
 			break;
 		TXT_TO_PTR("description", field, row->description);
+		LIST_MEM_ADD(marks_free, row->description);
 
 		PQ_GET_FLD(res, i, "extra", field, ok);
 		if (!ok)
 			break;
 		TXT_TO_PTR("extra", field, row->extra);
+		LIST_MEM_ADD(marks_free, row->extra);
 
 		PQ_GET_FLD(res, i, "marktype", field, ok);
 		if (!ok)
@@ -6514,6 +7123,7 @@ bool marks_fill(PGconn *conn)
 	if (!ok)
 		k_add_head(marks_free, item);
 
+	K_WUNLOCK(marks_free);
 	PQclear(res);
 
 	if (ok) {

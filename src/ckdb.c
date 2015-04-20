@@ -153,8 +153,8 @@ static bool markersummary_auto;
 
 int switch_state = SWITCH_STATE_ALL;
 
-// disallow: '/' '.' '_' and FLDSEP
-const char *userpatt = "^[^/\\._"FLDSEPSTR"]*$";
+// disallow: '/' WORKSEP1 WORKSEP2 and FLDSEP
+const char *userpatt = "^[^/"WORKSEP1PATT WORKSEP2STR FLDSEPSTR"]*$";
 const char *mailpatt = "^[A-Za-z0-9_-][A-Za-z0-9_\\.-]*@[A-Za-z0-9][A-Za-z0-9\\.-]*[A-Za-z0-9]$";
 const char *idpatt = "^[_A-Za-z][_A-Za-z0-9]*$";
 const char *intpatt = "^[0-9][0-9]*$";
@@ -214,6 +214,9 @@ bool confirm_sharesummary;
 
 /* Optional workinfoid range -Y to supply when confirming sharesummaries
  * N.B. if you specify -Y it will enable -y, so -y isn't also required
+ *
+ * TODO: update to include markersummaries
+ *	-Y/-y isn't currently usable since it won't work without the update
  *
  * Default (NULL) is to confirm all aged sharesummaries
  * Default should normally be used every time
@@ -379,17 +382,24 @@ double current_ndiff;
 K_TREE *shares_root;
 K_LIST *shares_free;
 K_STORE *shares_store;
+K_TREE *shares_early_root;
+K_STORE *shares_early_store;
 
 // SHAREERRORS shareerrors.id.json={...}
 K_TREE *shareerrors_root;
 K_LIST *shareerrors_free;
 K_STORE *shareerrors_store;
+K_TREE *shareerrors_early_root;
+K_STORE *shareerrors_early_store;
 
 // SHARESUMMARY
 K_TREE *sharesummary_root;
 K_TREE *sharesummary_workinfoid_root;
 K_LIST *sharesummary_free;
 K_STORE *sharesummary_store;
+// Pool total sharesummary stats
+K_TREE *sharesummary_pool_root;
+K_STORE *sharesummary_pool_store;
 
 // BLOCKS block.id.json={...}
 const char *blocks_new = "New";
@@ -450,6 +460,9 @@ K_TREE *markersummary_root;
 K_TREE *markersummary_userid_root;
 K_LIST *markersummary_free;
 K_STORE *markersummary_store;
+// Pool total markersummary stats
+K_TREE *markersummary_pool_root;
+K_STORE *markersummary_pool_store;
 
 // WORKMARKERS
 K_TREE *workmarkers_root;
@@ -995,12 +1008,16 @@ static void alloc_storage()
 	shares_free = k_new_list("Shares", sizeof(SHARES),
 					ALLOC_SHARES, LIMIT_SHARES, true);
 	shares_store = k_new_store(shares_free);
+	shares_early_store = k_new_store(shares_free);
 	shares_root = new_ktree();
+	shares_early_root = new_ktree();
 
 	shareerrors_free = k_new_list("ShareErrors", sizeof(SHAREERRORS),
 					ALLOC_SHAREERRORS, LIMIT_SHAREERRORS, true);
 	shareerrors_store = k_new_store(shareerrors_free);
+	shareerrors_early_store = k_new_store(shareerrors_free);
 	shareerrors_root = new_ktree();
+	shareerrors_early_root = new_ktree();
 
 	sharesummary_free = k_new_list("ShareSummary", sizeof(SHARESUMMARY),
 					ALLOC_SHARESUMMARY, LIMIT_SHARESUMMARY, true);
@@ -1008,6 +1025,8 @@ static void alloc_storage()
 	sharesummary_root = new_ktree();
 	sharesummary_workinfoid_root = new_ktree();
 	sharesummary_free->dsp_func = dsp_sharesummary;
+	sharesummary_pool_store = k_new_store(sharesummary_free);
+	sharesummary_pool_root = new_ktree();
 
 	blocks_free = k_new_list("Blocks", sizeof(BLOCKS),
 					ALLOC_BLOCKS, LIMIT_BLOCKS, true);
@@ -1054,6 +1073,8 @@ static void alloc_storage()
 	markersummary_root = new_ktree();
 	markersummary_userid_root = new_ktree();
 	markersummary_free->dsp_func = dsp_markersummary;
+	markersummary_pool_store = k_new_store(markersummary_free);
+	markersummary_pool_root = new_ktree();
 
 	workmarkers_free = k_new_list("WorkMarkers", sizeof(WORKMARKERS),
 					ALLOC_WORKMARKERS, LIMIT_WORKMARKERS, true);
@@ -1106,6 +1127,11 @@ static void alloc_storage()
 
 static void dealloc_storage()
 {
+	SHAREERRORS *shareerrors;
+	SHARES *shares;
+	K_ITEM *s_item;
+	char *st = NULL;
+
 	LOGWARNING("%s() logqueue ...", __func__);
 
 	FREE_LISTS(logqueue);
@@ -1121,6 +1147,9 @@ static void dealloc_storage()
 
 	LOGWARNING("%s() markersummary ...", __func__);
 
+	FREE_TREE(markersummary_pool);
+	k_list_transfer_to_tail(markersummary_pool_store, markersummary_store);
+	FREE_STORE(markersummary_pool);
 	FREE_TREE(markersummary_userid);
 	FREE_TREE(markersummary);
 	FREE_STORE_DATA(markersummary);
@@ -1146,12 +1175,55 @@ static void dealloc_storage()
 
 	LOGWARNING("%s() sharesummary ...", __func__);
 
+	FREE_TREE(sharesummary_pool);
+	k_list_transfer_to_tail(sharesummary_pool_store, sharesummary_store);
+	FREE_STORE(sharesummary_pool);
 	FREE_TREE(sharesummary_workinfoid);
 	FREE_TREE(sharesummary);
 	FREE_STORE_DATA(sharesummary);
 	FREE_LIST_DATA(sharesummary);
 
+	if (shareerrors_early_store->count > 0) {
+		LOGERR("%s() *** shareerrors_early count %d ***",
+			__func__, shareerrors_early_store->count);
+		s_item = shareerrors_early_store->head;
+		while (s_item) {
+			DATA_SHAREERRORS(shareerrors, s_item);
+			LOGERR("%s(): %"PRId64"/%s/%"PRId32"/%s/%ld,%ld",
+				__func__,
+				shareerrors->workinfoid,
+				st = safe_text(shareerrors->workername),
+				shareerrors->errn,
+				shareerrors->error,
+				shareerrors->createdate.tv_sec,
+				shareerrors->createdate.tv_usec);
+			FREENULL(st);
+			s_item = s_item->next;
+		}
+	}
+	FREE_TREE(shareerrors_early);
+	FREE_STORE(shareerrors_early);
 	FREE_ALL(shareerrors);
+	if (shares_early_store->count > 0) {
+		LOGERR("%s() *** shares_early count %d ***",
+			__func__, shares_early_store->count);
+		s_item = shares_early_store->head;
+		while (s_item) {
+			DATA_SHARES(shares, s_item);
+			LOGERR("%s(): %"PRId64"/%s/%s/%"PRId32"/%ld,%ld",
+				__func__,
+				shares->workinfoid,
+				st = safe_text(shares->workername),
+				shares->nonce,
+				shares->errn,
+				shares->createdate.tv_sec,
+				shares->createdate.tv_usec);
+			FREENULL(st);
+			s_item = s_item->next;
+		}
+	}
+	FREE_TREE(shares_early);
+	FREE_STORE(shares_early);
 	FREE_ALL(shares);
 
 	LOGWARNING("%s() workinfo ...", __func__);
@@ -1192,6 +1264,8 @@ static bool setup_data()
 	K_TREE_CTX ctx[1];
 	K_ITEM look, *found;
 	WORKINFO wi, *wic, *wif;
+	tv_t db_stt, db_fin, rel_stt, rel_fin;
+	double min, sec;
 
 	cklock_init(&fpm_lock);
 	cksem_init(&socketer_sem);
@@ -1199,6 +1273,8 @@ static bool setup_data()
 	cond_init(&wq_waitcond);
 
 	alloc_storage();
+
+	setnow(&db_stt);
 
 	if (!getdata1() || everyone_die)
 		return false;
@@ -1219,10 +1295,24 @@ static bool setup_data()
 	if (!getdata3() || everyone_die)
 		return false;
 
+	setnow(&db_fin);
+	sec = tvdiff(&db_fin, &db_stt);
+	min = floor(sec / 60.0);
+	sec -= min * 60.0;
+	LOGWARNING("dbload complete %.0fm %.3fs", min, sec);
+
 	db_load_complete = true;
+
+	setnow(&rel_stt);
 
 	if (!reload() || everyone_die)
 		return false;
+
+	setnow(&rel_fin);
+	sec = tvdiff(&rel_fin, &rel_stt);
+	min = floor(sec / 60.0);
+	sec -= min * 60.0;
+	LOGWARNING("reload complete %.0fm %.3fs", min, sec);
 
 	set_block_share_counters();
 
@@ -2582,8 +2672,8 @@ static void *socketer(__maybe_unused void *arg)
 						snprintf(reply, sizeof(reply), "%s.%ld.?.", id, now.tv_sec);
 						send_unix_msg(sockd, reply);
 						break;
-					case CMD_SHUTDOWN:
-						LOGWARNING("Listener received shutdown message, terminating ckdb");
+					case CMD_TERMINATE:
+						LOGWARNING("Listener received terminate message, terminating ckdb");
 						snprintf(reply, sizeof(reply), "%s.%ld.ok.exiting", id, now.tv_sec);
 						send_unix_msg(sockd, reply);
 						everyone_die = true;
@@ -2728,6 +2818,7 @@ static void *socketer(__maybe_unused void *arg)
 					case CMD_PAYOUTS:
 					case CMD_MPAYOUTS:
 					case CMD_SHIFTS:
+					case CMD_PSHIFT:
 					case CMD_DSP:
 					case CMD_BLOCKSTATUS:
 						if (!startup_complete) {
@@ -2919,7 +3010,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_REPLY:
 				break;
 			// Shouldn't be there
-			case CMD_SHUTDOWN:
+			case CMD_TERMINATE:
 			case CMD_PING:
 			case CMD_VERSION:
 			case CMD_LOGLEVEL:
@@ -2951,6 +3042,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_SHIFTS:
 			case CMD_USERSTATUS:
 			case CMD_MARKS:
+			case CMD_PSHIFT:
 				LOGERR("%s() Message line %"PRIu64" '%s' - invalid - ignored",
 					__func__, count, cmd);
 				break;
@@ -2969,8 +3061,7 @@ static bool reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 								 (char *)__func__,
 								 inet_default,
 								 &cd, trf_root);
-				if (ans)
-					free(ans);
+				FREENULL(ans);
 				break;
 			default:
 				// Force this switch to be updated if new cmds are added
@@ -3128,7 +3219,7 @@ static bool reload_from(tv_t *start)
 
 		LOGWARNING("%s(): %sread %"PRIu64" line%s from %s",
 			   __func__,
-			   everyone_die ? "Shutdown, aborting - " : "",
+			   everyone_die ? "Terminate, aborting - " : "",
 			   count, count == 1 ? "" : "s",
 			   filename);
 		total += count;
@@ -3239,7 +3330,7 @@ static void process_queued(PGconn *conn, K_ITEM *wq_item)
 							    &(workqueue->now), workqueue->by,
 							    workqueue->code, workqueue->inet,
 							    &(workqueue->cd), workqueue->trf_root);
-		free(ans);
+		FREENULL(ans);
 	}
 
 	if (last_buf)
@@ -3278,6 +3369,10 @@ static void *listener(void *arg)
 	K_ITEM *wq_item;
 	time_t now;
 	int wqcount, wqgot;
+	char ooo_buf[256];
+	tv_t wq_stt, wq_fin;
+	double min, sec;
+	int left;
 
 	logqueue_free = k_new_list("LogQueue", sizeof(LOGQUEUE),
 					ALLOC_LOGQUEUE, LIMIT_LOGQUEUE, true);
@@ -3308,6 +3403,8 @@ static void *listener(void *arg)
 		wqcount = workqueue_store->count;
 		K_RUNLOCK(workqueue_store);
 
+		LOGWARNING("reload shares OoO %s", ooo_status(ooo_buf, sizeof(ooo_buf)));
+
 		LOGWARNING("%s(): ckdb ready, queue %d", __func__, wqcount);
 
 		/* Until startup_complete, the values should be ignored
@@ -3322,16 +3419,22 @@ static void *listener(void *arg)
 		ck_wunlock(&last_lock);
 
 		startup_complete = true;
+
+		setnow(&wq_stt);
+		conn = dbconnect();
+		now = time(NULL);
+		wqgot = 0;
 	}
 
 	// Process queued work
-	conn = dbconnect();
-	now = time(NULL);
-	wqgot = 0;
 	while (!everyone_die) {
 		K_WLOCK(workqueue_store);
 		wq_item = k_unlink_head(workqueue_store);
+		left = workqueue_store->count;
 		K_WUNLOCK(workqueue_store);
+
+		if (left == 0 && wq_stt.tv_sec != 0L)
+			setnow(&wq_fin);
 
 		/* Don't keep a connection for more than ~10s or ~10000 items
 		 *  but always have a connection open */
@@ -3346,7 +3449,19 @@ static void *listener(void *arg)
 			wqgot++;
 			process_queued(conn, wq_item);
 			tick();
-		} else {
+		}
+
+		if (left == 0 && wq_stt.tv_sec != 0L) {
+			sec = tvdiff(&wq_fin, &wq_stt);
+			min = floor(sec / 60.0);
+			sec -= min * 60.0;
+			LOGWARNING("reload queue completed %.0fm %.3fs", min, sec);
+			// Used as the flag to display the message once
+			wq_stt.tv_sec = 0L;
+		}
+
+
+		if (!wq_item) {
 			const ts_t tsdiff = {0, 420000000};
 			tv_t now;
 			ts_t abs;
@@ -4190,7 +4305,7 @@ int main(int argc, char **argv)
 		sigaction(SIGTERM, &handler, NULL);
 		sigaction(SIGINT, &handler, NULL);
 
-		/* Shutdown from here if the listener is sent a shutdown message */
+		/* Terminate from here if the listener is sent a terminate message */
 		join_pthread(ckp.pth_listener);
 	}
 
@@ -4205,9 +4320,9 @@ int main(int argc, char **argv)
 		curr = time(NULL);
 		if (curr - start > 4) {
 			if (curr - trigger > 4) {
-				msg = "Shutdown initial delay";
+				msg = "Terminate initial delay";
 			} else if (curr - trigger > 2) {
-				msg = "Shutdown delay";
+				msg = "Terminate delay";
 			}
 		}
 		if (msg) {

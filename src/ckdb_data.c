@@ -417,6 +417,14 @@ char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz, WHERE_
 					   tm.tm_sec,
 					   (((tv_t *)data)->tv_usec));
 			break;
+		case TYPE_BTV:
+			gmtime_r(&(((tv_t *)data)->tv_sec), &tm);
+			snprintf(buf, siz, "%02d %02d:%02d:%02d",
+					   tm.tm_mday,
+					   tm.tm_hour,
+					   tm.tm_min,
+					   tm.tm_sec);
+			break;
 		case TYPE_CTV:
 			snprintf(buf, siz, "%ld,%ld",
 					   (((tv_t *)data)->tv_sec),
@@ -474,6 +482,12 @@ char *_ftv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
 char *_tvs_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
 {
 	return _data_to_buf(TYPE_TVS, (void *)data, buf, siz, WHERE_FFL_PASS);
+}
+
+// Convert tv to (brief) DD HH:MM:SS
+char *_btv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
+{
+	return _data_to_buf(TYPE_BTV, (void *)data, buf, siz, WHERE_FFL_PASS);
 }
 
 /* unused yet
@@ -695,8 +709,10 @@ K_ITEM *get_workerstatus(int64_t userid, char *workername)
 
 /* Worker loading/creation calls this with create = true
  * All others with create = false since the workerstatus should exist
- * Failure is a code bug and a reported error, but handled anyway
+ * If it is missing, it will check for and create the worker if needed
+ *  and create a new workerstatus and return it
  * This has 2 sets of file/func/line to allow 2 levels of traceback
+ *  to see why it happened
  */
 K_ITEM *_find_create_workerstatus(int64_t userid, char *workername,
 				  bool create, const char *file2,
@@ -704,90 +720,83 @@ K_ITEM *_find_create_workerstatus(int64_t userid, char *workername,
 				  WHERE_FFL_ARGS)
 {
 	WORKERSTATUS *row;
-	K_ITEM *item;
+	K_ITEM *ws_item, *w_item = NULL;
+	bool ws_err = false, w_err = false;
+	tv_t now;
 
-	item = get_workerstatus(userid, workername);
-	if (!item) {
+	ws_item = get_workerstatus(userid, workername);
+	if (!ws_item) {
 		if (!create) {
-			LOGEMERG("%s(): Missing workerstatus %"PRId64"/%s"
-				 WHERE_FFL WHERE_FFL,
-				 __func__, userid, workername,
-				 file2, func2, line2, WHERE_FFL_PASS);
-			return NULL;
+			ws_err = true;
+
+			w_item = find_workers(userid, workername);
+			if (!w_item) {
+				w_err = true;
+				setnow(&now);
+				w_item = workers_add(NULL, userid, workername,
+						     NULL, NULL, NULL,
+						     by_default,
+						     (char *)__func__,
+						     (char *)inet_default,
+						     &now, NULL);
+			}
 		}
 
 		K_WLOCK(workerstatus_free);
-		item = k_unlink_head(workerstatus_free);
+		ws_item = k_unlink_head(workerstatus_free);
 
-		DATA_WORKERSTATUS(row, item);
+		DATA_WORKERSTATUS(row, ws_item);
 
 		bzero(row, sizeof(*row));
 		row->userid = userid;
 		STRNCPY(row->workername, workername);
 
-		workerstatus_root = add_to_ktree(workerstatus_root, item, cmp_workerstatus);
-		k_add_head(workerstatus_store, item);
+		workerstatus_root = add_to_ktree(workerstatus_root, ws_item, cmp_workerstatus);
+		k_add_head(workerstatus_store, ws_item);
 		K_WUNLOCK(workerstatus_free);
+
+		if (ws_err) {
+			LOGERR("%s(): CREATED Missing workerstatus %"PRId64"/%s"
+				WHERE_FFL WHERE_FFL,
+				__func__, userid, workername,
+				file2, func2, line2, WHERE_FFL_PASS);
+			if (w_err) {
+				LOGERR("%s(): %s Missing worker %"PRId64"/%s",
+					__func__,
+					w_item ? "CREATED" : "FAILED TO CREATE",
+					userid, workername);
+			}
+		}
 	}
-	return item;
+	return ws_item;
 }
 
 /* All data is loaded, now update workerstatus fields
    TODO: combine set_block_share_counters() with this? */
 void workerstatus_ready()
 {
-	K_TREE_CTX ws_ctx[1], ss_ctx[1], ms_ctx[1];
-	K_ITEM *ws_item, us_look, ss_look, *us_item, *ss_item;
-	K_ITEM *ms_item, ms_look, *wm_item;
-	USERSTATS *userstats;
-	SHARESUMMARY looksharesummary, *sharesummary;
-	MARKERSUMMARY *markersummary;
+	K_TREE_CTX ws_ctx[1];
+	K_ITEM *ws_item, *ms_item, *ss_item;
 	WORKERSTATUS *workerstatus;
+	MARKERSUMMARY *markersummary;
+	SHARESUMMARY *sharesummary;
 
 	LOGWARNING("%s(): Updating workerstatus...", __func__);
 
-	INIT_USERSTATS(&us_look);
-	INIT_MARKERSUMMARY(&ms_look);
-	INIT_SHARESUMMARY(&ss_look);
 	ws_item = first_in_ktree(workerstatus_root, ws_ctx);
 	while (ws_item) {
 		DATA_WORKERSTATUS(workerstatus, ws_item);
 
-		// Zero or one
-		K_RLOCK(userstats_free);
-		us_item = find_userstats(workerstatus->userid,
-					 workerstatus->workername);
-		K_RUNLOCK(userstats_free);
-		if (us_item) {
-			DATA_USERSTATS(userstats, us_item);
-			if (userstats->idle) {
-				if (tv_newer(&(workerstatus->last_idle),
-					     &(userstats->statsdate))) {
-					copy_tv(&(workerstatus->last_idle),
-						&(userstats->statsdate));
-				}
-			} else {
-				if (tv_newer(&(workerstatus->last_stats),
-					     &(userstats->statsdate))) {
-					copy_tv(&(workerstatus->last_stats),
-						&(userstats->statsdate));
-				}
-			}
-		}
-
 		K_RLOCK(markersummary_free);
-		// This is the last one
+		// This is the last share datestamp
 		ms_item = find_markersummary_userid(workerstatus->userid,
-						    workerstatus->workername, ms_ctx);
+						    workerstatus->workername,
+						    NULL);
 		K_RUNLOCK(markersummary_free);
 		if (ms_item) {
 			DATA_MARKERSUMMARY(markersummary, ms_item);
-			K_RLOCK(workmarkers_free);
-			wm_item = find_workmarkerid(markersummary->markerid,
-						    false, MARKER_PROCESSED);
-			K_RUNLOCK(workmarkers_free);
-			if (wm_item &&
-			    tv_newer(&(workerstatus->last_share), &(markersummary->lastshare))) {
+			if (tv_newer(&(workerstatus->last_share),
+				     &(markersummary->lastshare))) {
 				copy_tv(&(workerstatus->last_share),
 					&(markersummary->lastshare));
 				workerstatus->last_diff =
@@ -795,14 +804,9 @@ void workerstatus_ready()
 			}
 		}
 
-		// The last one
-		looksharesummary.userid = workerstatus->userid;
-		looksharesummary.workername = workerstatus->workername;
-		looksharesummary.workinfoid = MAXID;
-		ss_look.data = (void *)(&looksharesummary);
 		K_RLOCK(sharesummary_free);
-		ss_item = find_before_in_ktree(sharesummary_root, &ss_look,
-					       cmp_sharesummary, ss_ctx);
+		ss_item = find_last_sharesummary(workerstatus->userid,
+						 workerstatus->workername);
 		K_RUNLOCK(sharesummary_free);
 		if (ss_item) {
 			DATA_SHARESUMMARY(sharesummary, ss_item);
@@ -1512,6 +1516,43 @@ K_ITEM *find_optioncontrol(char *optionname, tv_t *now, int32_t height)
 	return best;
 }
 
+/*
+ * Get a setting value for the given setting name
+ * First check if there is a USERATTS attnum value != 0
+ * If not, check if there is an OPTIONCONTROL record (can be any value)
+ * If not, return the default
+ * WARNING OPTIONCONTROL is time dependent,
+ *  i.e. ensure now and pool.height are correct (e.g. during a reload)
+ */
+int64_t user_sys_setting(int64_t userid, char *setting_name,
+			 int64_t setting_default, tv_t *now)
+{
+	OPTIONCONTROL *optioncontrol;
+	K_ITEM *ua_item, *oc_item;
+	USERATTS *useratts;
+
+	if (userid != 0) {
+		K_RLOCK(useratts_free);
+		ua_item = find_useratts(userid, setting_name);
+		K_RUNLOCK(useratts_free);
+		if (ua_item) {
+			DATA_USERATTS(useratts, ua_item);
+			if (useratts->attnum != 0)
+				return useratts->attnum;
+		}
+	}
+
+	K_RLOCK(optioncontrol_free);
+	oc_item = find_optioncontrol(setting_name, now, pool.height);
+	K_RUNLOCK(optioncontrol_free);
+	if (oc_item) {
+		DATA_OPTIONCONTROL(optioncontrol, oc_item);
+		return (int64_t)atol(optioncontrol->optionvalue);
+	}
+
+	return setting_default;
+}
+
 // order by workinfoid asc,expirydate asc
 cmp_t cmp_workinfo(K_ITEM *a, K_ITEM *b)
 {
@@ -1902,7 +1943,7 @@ void zero_sharesummary(SHARESUMMARY *row, tv_t *cd, double diff)
 	row->complete[1] = '\0';
 }
 
-K_ITEM *find_sharesummary(int64_t userid, char *workername, int64_t workinfoid)
+K_ITEM *_find_sharesummary(int64_t userid, char *workername, int64_t workinfoid, bool pool)
 {
 	SHARESUMMARY sharesummary;
 	K_TREE_CTX ctx[1];
@@ -1914,7 +1955,35 @@ K_ITEM *find_sharesummary(int64_t userid, char *workername, int64_t workinfoid)
 
 	INIT_SHARESUMMARY(&look);
 	look.data = (void *)(&sharesummary);
-	return find_in_ktree(sharesummary_root, &look, cmp_sharesummary, ctx);
+	if (pool) {
+		return find_in_ktree(sharesummary_pool_root, &look,
+				     cmp_sharesummary, ctx);
+	} else {
+		return find_in_ktree(sharesummary_root, &look,
+				     cmp_sharesummary, ctx);
+	}
+}
+
+K_ITEM *find_last_sharesummary(int64_t userid, char *workername)
+{
+	SHARESUMMARY look_sharesummary, *sharesummary;
+	K_TREE_CTX ctx[1];
+	K_ITEM look, *item;
+
+	look_sharesummary.userid = userid;
+	look_sharesummary.workername = workername;
+	look_sharesummary.workinfoid = MAXID;
+
+	INIT_SHARESUMMARY(&look);
+	look.data = (void *)(&look_sharesummary);
+	item = find_before_in_ktree(sharesummary_root, &look, cmp_sharesummary, ctx);
+	if (item) {
+		DATA_SHARESUMMARY(sharesummary, item);
+		if (sharesummary->userid != userid ||
+		    strcmp(sharesummary->workername, workername) != 0)
+			item = NULL;
+	}
+	return item;
 }
 
 /* TODO: markersummary checking?
@@ -2695,7 +2764,7 @@ K_ITEM *find_last_payouts()
 			return p_item;
 		p_item = prev_in_ktree(ctx);
 	}
-	return p_item;
+	return NULL;
 }
 
 K_ITEM *find_payoutid(int64_t payoutid)
@@ -2711,6 +2780,43 @@ K_ITEM *find_payoutid(int64_t payoutid)
 	INIT_PAYOUTS(&look);
 	look.data = (void *)(&payouts);
 	return find_in_ktree(payouts_id_root, &look, cmp_payouts_id, ctx);
+}
+
+/* Values from payout stats, returns -1 if statname isn't found
+ * If code needs a value then it probably really should be a new payouts field
+ *  rather than stored in the stats passed to the pplns2 web page
+ *  but anyway ... */
+double payout_stats(PAYOUTS *payouts, char *statname)
+{
+	char buf[1024]; // If a number is bigger than this ... bad luck
+	double ret = -1.0;
+	size_t numlen, len = strlen(statname);
+	char *pos, *tab;
+
+	pos = payouts->stats;
+	while (pos && *pos) {
+		if (strncmp(pos, statname, len) == 0 && pos[len] == '=') {
+			pos += len+1;
+			// They should only contain +ve numbers
+			if (*pos && isdigit(*pos)) {
+				tab = strchr(pos, '\t');
+				if (!tab)
+					numlen = strlen(pos);
+				else
+					numlen = tab - pos;
+				if (numlen >= sizeof(buf))
+					numlen = sizeof(buf) - 1;
+				STRNCPYSIZ(buf, pos, numlen+1);
+				// ctv will only return the seconds
+				ret = atof(buf);
+			}
+			break;
+		}
+		pos = strchr(pos, '\t');
+		if (pos)
+			pos++;
+	}
+	return ret;
 }
 
 /* Find the block_workinfoid of the block requested
@@ -3563,7 +3669,7 @@ void dsp_markersummary(K_ITEM *item, FILE *stream)
 	}
 }
 
-// order by markerid asc,userid asc,workername asc
+// order by markerid asc,userid asc,workername asc (has no expirydate)
 cmp_t cmp_markersummary(K_ITEM *a, K_ITEM *b)
 {
 	MARKERSUMMARY *ma, *mb;
@@ -3578,7 +3684,7 @@ cmp_t cmp_markersummary(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
-// order by userid asc,workername asc,lastshare asc
+// order by userid asc,workername asc,lastshare asc (has no expirydate)
 cmp_t cmp_markersummary_userid(K_ITEM *a, K_ITEM *b)
 {
 	MARKERSUMMARY *ma, *mb;
@@ -3593,11 +3699,16 @@ cmp_t cmp_markersummary_userid(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
-// Finds the last markersummary for the worker but also returns the CTX
-K_ITEM *find_markersummary_userid(int64_t userid, char *workername, K_TREE_CTX *ctx)
+// Finds the last markersummary for the worker and optionally return the CTX
+K_ITEM *find_markersummary_userid(int64_t userid, char *workername,
+				  K_TREE_CTX *ctx)
 {
+	K_TREE_CTX ctx0[1];
 	K_ITEM look, *ms_item = NULL;
 	MARKERSUMMARY markersummary, *ms;
+
+	if (ctx == NULL)
+		ctx = ctx0;
 
 	markersummary.userid = userid;
 	markersummary.workername = workername;
@@ -3614,23 +3725,40 @@ K_ITEM *find_markersummary_userid(int64_t userid, char *workername, K_TREE_CTX *
 	return ms_item;
 }
 
-K_ITEM *find_markersummary(int64_t workinfoid, int64_t userid, char *workername)
+K_ITEM *_find_markersummary(int64_t markerid, int64_t workinfoid,
+			    int64_t userid, char *workername, bool pool)
 {
 	K_ITEM look, *wm_item, *ms_item = NULL;
 	MARKERSUMMARY markersummary;
 	WORKMARKERS *wm;
 	K_TREE_CTX ctx[1];
 
-	wm_item = find_workmarkers(workinfoid, false, MARKER_PROCESSED);
-	if (wm_item) {
-		DATA_WORKMARKERS(wm, wm_item);
-		markersummary.markerid = wm->markerid;
+	if (markerid == 0) {
+		wm_item = find_workmarkers(workinfoid, false, MARKER_PROCESSED);
+		if (wm_item) {
+			DATA_WORKMARKERS(wm, wm_item);
+			markerid = wm->markerid;
+		}
+	} else {
+		wm_item = find_workmarkerid(markerid, false, MARKER_PROCESSED);
+		if (!wm_item)
+			markerid = 0;
+	}
+
+	if (markerid != 0) {
+		markersummary.markerid = markerid;
 		markersummary.userid = userid;
 		markersummary.workername = workername;
 
 		INIT_MARKERSUMMARY(&look);
 		look.data = (void *)(&markersummary);
-		ms_item = find_in_ktree(markersummary_root, &look, cmp_markersummary, ctx);
+		if (pool) {
+			ms_item = find_in_ktree(markersummary_pool_root, &look,
+						cmp_markersummary, ctx);
+		} else {
+			ms_item = find_in_ktree(markersummary_root, &look,
+						cmp_markersummary, ctx);
+		}
 	}
 
 	return ms_item;

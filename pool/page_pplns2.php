@@ -222,13 +222,6 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 		$pg .= str_replace(' ', '&nbsp;', $msg)."</span><br>\n";
 	}
 
-	if (strlen($ans['share_status']) > 0)
-	{
-		$pg .= '<br><span class=err>';
-		$msg = $ans['share_status']." - Can't be paid out yet";
-		$pg .= str_replace(' ', '&nbsp;', $msg)."</span><br>\n";
-	}
-
 	$pg .= "<br><table callpadding=0 cellspacing=0 border=0>\n";
 	$pg .= '<tr class=title>';
 	$pg .= '<td class=dl>Name</td>';

@@ -14,10 +14,13 @@ function doshifts($data, $user)
  $pg .= "<td class=dr>Shares</td>";
  $pg .= "<td class=dr>Avg Share</td>";
  $pg .= "</tr>\n";
- if ($ans['STATUS'] != 'ok')
+
+ if (($ans['STATUS'] != 'ok') || !isset($ans['prefix_all']))
 	$pg = '<h1>Shifts</h1>'.$pg;
  else
  {
+	$pre = $ans['prefix_all'];
+
 	$count = $ans['rows'];
 	$pg = '<h1>Last '.($count+1).' Shifts</h1>'.$pg;
 	for ($i = 0; $i < $count; $i++)
@@ -49,11 +52,11 @@ function doshifts($data, $user)
 		$nd = $ans['end:'.$i];
 		$elapsed = $nd - $start;
 		$pg .= '<td class=dr>'.howmanyhrs($elapsed).'</td>';
-		$diffacc = $ans['diffacc:'.$i];
+		$diffacc = $ans[$pre.'diffacc:'.$i];
 		$pg .= '<td class=dr>'.difffmt($diffacc).'</td>';
 		$hr = $diffacc * pow(2,32) / $elapsed;
 		$pg .= '<td class=dr>'.dsprate($hr).'</td>';
-		$shareacc = $ans['shareacc:'.$i];
+		$shareacc = $ans[$pre.'shareacc:'.$i];
 		$pg .= '<td class=dr>'.difffmt($shareacc).'</td>';
 		if ($shareacc > 0)
 			$avgsh = $diffacc / $shareacc;

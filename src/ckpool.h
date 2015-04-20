@@ -30,6 +30,15 @@ struct ckmsg {
 
 typedef struct ckmsg ckmsg_t;
 
+typedef struct unix_msg unix_msg_t;
+
+struct unix_msg {
+	unix_msg_t *next;
+	unix_msg_t *prev;
+	int sockd;
+	char *buf;
+};
+
 struct ckmsgq {
 	ckpool_t *ckp;
 	char name[16];
@@ -51,6 +60,11 @@ struct proc_instance {
 	int pid;
 	int oldpid;
 	int (*process)(proc_instance_t *);
+
+	/* Linked list of received messages, locking and conditional */
+	unix_msg_t *unix_msgs;
+	mutex_t rmsg_lock;
+	pthread_cond_t rmsg_cond;
 };
 
 struct connsock {
@@ -99,6 +113,10 @@ struct server_instance {
 typedef struct server_instance server_instance_t;
 
 struct ckpool_instance {
+	/* Start time */
+	time_t starttime;
+	/* Start pid */
+	pid_t startpid;
 	/* The initial command line arguments */
 	char **initial_args;
 	/* Number of arguments */
@@ -218,6 +236,8 @@ ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func);
 ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, const int count);
 void ckmsgq_add(ckmsgq_t *ckmsgq, void *data);
 bool ckmsgq_empty(ckmsgq_t *ckmsgq);
+unix_msg_t *get_unix_msg(proc_instance_t *pi);
+void create_unix_receiver(proc_instance_t *pi);
 
 ckpool_t *global_ckp;
 

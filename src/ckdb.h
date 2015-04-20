@@ -55,7 +55,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.0"
-#define CKDB_VERSION DB_VERSION"-1.035"
+#define CKDB_VERSION DB_VERSION"-1.066"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -176,6 +176,12 @@ extern POOLSTATUS pool;
 #define FLDSEP 0x09
 #define FLDSEPSTR "\011"
 
+#define WORKSEP1 '.'
+#define WORKSEP1STR "."
+#define WORKSEP1PATT "\\."
+#define WORKSEP2 '_'
+#define WORKSEP2STR "_"
+
 #define MAXID 0x7fffffffffffffffLL
 
 /* N.B. STRNCPY() truncates, whereas txt_to_str() aborts ckdb if src > trg
@@ -226,6 +232,7 @@ enum data_type {
 	TYPE_BIGINT,
 	TYPE_INT,
 	TYPE_TV,
+	TYPE_BTV,
 	TYPE_TVS,
 	TYPE_CTV,
 	TYPE_FTV,
@@ -336,7 +343,7 @@ extern char *id_default;
 enum cmd_values {
 	CMD_UNSET,
 	CMD_REPLY, // Means something was wrong - send back reply
-	CMD_SHUTDOWN,
+	CMD_TERMINATE,
 	CMD_PING,
 	CMD_VERSION,
 	CMD_LOGLEVEL,
@@ -375,6 +382,7 @@ enum cmd_values {
 	CMD_SHIFTS,
 	CMD_USERSTATUS,
 	CMD_MARKS,
+	CMD_PSHIFT,
 	CMD_END
 };
 
@@ -721,7 +729,7 @@ typedef struct transfer {
 // Suggest malloc use MMAP - 1913 = largest under 2MB
 #define ALLOC_TRANSFER 1913
 #define LIMIT_TRANSFER 0
-#define CULL_TRANSFER 16
+#define CULL_TRANSFER 64
 #define INIT_TRANSFER(_item) INIT_GENERIC(_item, transfer)
 #define DATA_TRANSFER(_var, _item) DATA_GENERIC(_var, _item, transfer, true)
 
@@ -747,7 +755,7 @@ extern tv_t missing_secuser_max;
 typedef struct users {
 	int64_t userid;
 	char username[TXT_BIG+1];
-	char usertrim[TXT_BIG+1]; // Non DB field
+	char usertrim[TXT_BIG+1]; // non-DB field
 	// Anything in 'status' fails mining authentication
 	char status[TXT_BIG+1];
 	char emailaddress[TXT_BIG+1];
@@ -800,6 +808,8 @@ extern K_STORE *useratts_store;
 
 // This att means the user uses multiple % based payout addresses
 #define USER_MULTI_PAYOUT "PayAddresses"
+#define USER_OLD_WORKERS "OldWorkersDays"
+#define USER_OLD_WORKERS_DEFAULT 7
 
 // WORKERS
 typedef struct workers {
@@ -836,6 +846,16 @@ extern K_STORE *workers_store;
 #define IDLENOTIFICATIONTIME_DEF 0
 #define IDLENOTIFICATIONTIME_DEF_STR STRINT(IDLENOTIFICATIONTIME_DEF)
 
+#define WORKERS_SEL_SEP ','
+#define WORKERS_SEL_SEP_STR ","
+/* There are 2 special select workernames
+ * A DB workername can't accidentally match them
+ *  when including the WORKSEPx at the front of the workername,
+ *  since these 2 don't start with WORKSEP1 or WORKSEP2 */
+#define WORKERS_ALL "all"
+// Empty has a value rather than "", so that "" means nothing selected
+#define WORKERS_EMPTY "noname"
+
 // PAYMENTADDRESSES
 typedef struct paymentaddresses {
 	int64_t paymentaddressid;
@@ -843,7 +863,7 @@ typedef struct paymentaddresses {
 	char payaddress[TXT_BIG+1];
 	int32_t payratio;
 	HISTORYDATECONTROLFIELDS;
-	bool match; // Non-db field
+	bool match; // non-DB field
 } PAYMENTADDRESSES;
 
 #define ALLOC_PAYMENTADDRESSES 1024
@@ -873,7 +893,7 @@ typedef struct payments {
 	char committxn[TXT_BIG+1];
 	char commitblockhash[TXT_BIG+1];
 	HISTORYDATECONTROLFIELDS;
-	K_ITEM *old_item; // Non-db field
+	K_ITEM *old_item; // non-DB field
 } PAYMENTS;
 
 #define ALLOC_PAYMENTS 1024
@@ -1024,6 +1044,8 @@ typedef struct shares {
 	char error[TXT_SML+1];
 	char secondaryuserid[TXT_SML+1];
 	HISTORYDATECONTROLFIELDS;
+	int32_t redo; // non-DB field
+	int32_t oldcount; // non-DB field
 } SHARES;
 
 #define ALLOC_SHARES 10000
@@ -1034,6 +1056,13 @@ typedef struct shares {
 extern K_TREE *shares_root;
 extern K_LIST *shares_free;
 extern K_STORE *shares_store;
+// shares unexpectedly before the workinfo
+extern K_TREE *shares_early_root;
+extern K_STORE *shares_early_store;
+
+/* Once a share is this old, it can only once more be
+    check for it's workinfoid and then be discarded */
+#define EARLYSHARESLIMIT 60.0
 
 // SHAREERRORS shareerrors.id.json={...}
 typedef struct shareerrors {
@@ -1045,9 +1074,11 @@ typedef struct shareerrors {
 	char error[TXT_SML+1];
 	char secondaryuserid[TXT_SML+1];
 	HISTORYDATECONTROLFIELDS;
+	int32_t redo; // non-DB field
+	int32_t oldcount; // non-DB field
 } SHAREERRORS;
 
-#define ALLOC_SHAREERRORS 10000
+#define ALLOC_SHAREERRORS 1000
 #define LIMIT_SHAREERRORS 0
 #define INIT_SHAREERRORS(_item) INIT_GENERIC(_item, shareerrors)
 #define DATA_SHAREERRORS(_var, _item) DATA_GENERIC(_var, _item, shareerrors, true)
@@ -1055,6 +1086,9 @@ typedef struct shareerrors {
 extern K_TREE *shareerrors_root;
 extern K_LIST *shareerrors_free;
 extern K_STORE *shareerrors_store;
+// shareerrors unexpectedly before the workinfo
+extern K_TREE *shareerrors_early_root;
+extern K_STORE *shareerrors_early_store;
 
 // SHARESUMMARY
 typedef struct sharesummary {
@@ -1102,6 +1136,9 @@ extern K_TREE *sharesummary_root;
 extern K_TREE *sharesummary_workinfoid_root;
 extern K_LIST *sharesummary_free;
 extern K_STORE *sharesummary_store;
+// Pool total sharesummary stats
+extern K_TREE *sharesummary_pool_root;
+extern K_STORE *sharesummary_pool_store;
 
 // BLOCKS block.id.json={...}
 typedef struct blocks {
@@ -1123,12 +1160,12 @@ typedef struct blocks {
 	int64_t elapsed;
 	char statsconfirmed[TXT_FLAG+1];
 	HISTORYDATECONTROLFIELDS;
-	bool ignore; // Non DB field
+	bool ignore; // non-DB field
 
 	// Calculated only when = 0
 	double netdiff;
 
-	/* Non DB fields for the web page
+	/* non-DB fields for the web page
 	 * Calculate them once off/recalc them when required */
 	double blockdiffratio;
 	double blockcdf;
@@ -1193,7 +1230,7 @@ typedef struct miningpayouts {
 	double diffacc;
 	int64_t amount;
 	HISTORYDATECONTROLFIELDS;
-	K_ITEM *old_item; // Non-db field
+	K_ITEM *old_item; // non-DB field
 } MININGPAYOUTS;
 
 #define ALLOC_MININGPAYOUTS 1000
@@ -1248,6 +1285,12 @@ extern cklock_t process_pplns_lock;
 #define PAYOUTS_ORPHAN 'O'
 #define PAYOUTS_ORPHAN_STR "O"
 #define PAYORPHAN(_status) ((_status)[0] == PAYOUTS_ORPHAN)
+
+// Default number of shifts (payouts) to display on web
+#define SHIFTS_DEFAULT 99
+/* OptionControl can override it
+ * UserAtts can also at the user level */
+#define SHIFTS_SETTING_NAME "ShiftsPageSize"
 
 /*
 // EVENTLOG
@@ -1305,11 +1348,11 @@ typedef struct poolstats {
 	double hashrate5m;
 	double hashrate1hr;
 	double hashrate24hr;
-	bool stored; // Non-db field
+	bool stored; // non-DB field
 	SIMPLEDATECONTROLFIELDS;
 } POOLSTATS;
 
-#define ALLOC_POOLSTATS 10000
+#define ALLOC_POOLSTATS 1000
 #define LIMIT_POOLSTATS 0
 #define INIT_POOLSTATS(_item) INIT_GENERIC(_item, poolstats)
 #define DATA_POOLSTATS(_var, _item) DATA_GENERIC(_var, _item, poolstats, true)
@@ -1336,7 +1379,7 @@ typedef struct userstats {
 	double hashrate5m;
 	double hashrate1hr;
 	double hashrate24hr;
-	bool idle; // Non-db field
+	bool idle; // non-DB field
 	char summarylevel[TXT_FLAG+1]; // SUMMARY_NONE in RAM
 	int32_t summarycount;
 	tv_t statsdate;
@@ -1348,7 +1391,7 @@ typedef struct userstats {
  * createdate batch, and thus could move all (complete) records
  * matching the createdate from userstats_eos_store into the tree */
 
-#define ALLOC_USERSTATS 10000
+#define ALLOC_USERSTATS 1000
 #define LIMIT_USERSTATS 0
 #define INIT_USERSTATS(_item) INIT_GENERIC(_item, userstats)
 #define DATA_USERSTATS(_var, _item) DATA_GENERIC(_var, _item, userstats, true)
@@ -1498,6 +1541,9 @@ extern K_TREE *markersummary_root;
 extern K_TREE *markersummary_userid_root;
 extern K_LIST *markersummary_free;
 extern K_STORE *markersummary_store;
+// Pool total markersummary stats
+extern K_TREE *markersummary_pool_root;
+extern K_STORE *markersummary_pool_store;
 
 // WORKMARKERS
 typedef struct workmarkers {
@@ -1689,6 +1735,7 @@ extern char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz,
 #define ctv_to_buf(_data, _buf, _siz) _ctv_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 #define ftv_to_buf(_data, _buf, _siz) _ftv_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 #define tvs_to_buf(_data, _buf, _siz) _tvs_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
+#define btv_to_buf(_data, _buf, _siz) _btv_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 //#define blob_to_buf(_data, _buf, _siz) _blob_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 #define double_to_buf(_data, _buf, _siz) _double_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 
@@ -1702,6 +1749,8 @@ extern char *_ctv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 extern char *_ftv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 // Convert tv to seconds (ignore uS)
 extern char *_tvs_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
+// Convert tv to (brief) DD HH:MM:SS
+extern char *_btv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 /* unused yet
 extern char *_blob_to_buf(char *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 */
@@ -1770,6 +1819,8 @@ extern cmp_t cmp_accountbalance(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_accountbalance(int64_t userid);
 extern cmp_t cmp_optioncontrol(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_optioncontrol(char *optionname, tv_t *now, int32_t height);
+extern int64_t user_sys_setting(int64_t userid, char *setting_name,
+				int64_t setting_default, tv_t *now);
 extern cmp_t cmp_workinfo(K_ITEM *a, K_ITEM *b);
 #define coinbase1height(_cb1) _coinbase1height(_cb1, WHERE_FFL_HERE)
 extern int32_t _coinbase1height(char *coinbase1, WHERE_FFL_ARGS);
@@ -1788,8 +1839,17 @@ extern void dsp_sharesummary(K_ITEM *item, FILE *stream);
 extern cmp_t cmp_sharesummary(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_sharesummary_workinfoid(K_ITEM *a, K_ITEM *b);
 extern void zero_sharesummary(SHARESUMMARY *row, tv_t *cd, double diff);
-extern K_ITEM *find_sharesummary(int64_t userid, char *workername,
-				 int64_t workinfoid);
+#define find_sharesummary(_userid, _workername, _workinfoid) \
+	_find_sharesummary(_userid, _workername, _workinfoid, false)
+#define find_sharesummary_p(_workinfoid) \
+	_find_sharesummary(KANO, EMPTY, _workinfoid, true)
+#define POOL_SS(_row) do { \
+		(_row)->userid = KANO; \
+		(_row)->workername = strdup(EMPTY); \
+	} while (0)
+extern K_ITEM *_find_sharesummary(int64_t userid, char *workername,
+				  int64_t workinfoid, bool pool);
+extern K_ITEM *find_last_sharesummary(int64_t userid, char *workername);
 extern void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
 			   char *by, char *code, char *inet, tv_t *cd);
 #define dbhash2btchash(_hash, _buf, _siz) \
@@ -1819,6 +1879,7 @@ extern cmp_t cmp_payouts_id(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_payouts(int32_t height, char *blockhash);
 extern K_ITEM *find_last_payouts();
 extern K_ITEM *find_payoutid(int64_t payoutid);
+extern double payout_stats(PAYOUTS *payouts, char *statname);
 extern bool process_pplns(int32_t height, char *blockhash, tv_t *now);
 extern cmp_t cmp_auths(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_poolstats(K_ITEM *a, K_ITEM *b);
@@ -1830,8 +1891,16 @@ extern cmp_t cmp_markersummary(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_markersummary_userid(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_markersummary_userid(int64_t userid, char *workername,
 					 K_TREE_CTX *ctx);
-extern K_ITEM *find_markersummary(int64_t workinfoid, int64_t userid,
-				  char *workername);
+#define find_markersummary(_workinfoid, _userid, _workername) \
+	_find_markersummary(0, _workinfoid, _userid, _workername, false)
+#define find_markersummary_p(_markerid) \
+	_find_markersummary(_markerid, 0, KANO, EMPTY, true)
+#define POOL_MS(_row) do { \
+		(_row)->userid = KANO; \
+		(_row)->workername = strdup(EMPTY); \
+	} while (0)
+extern K_ITEM *_find_markersummary(int64_t markerid, int64_t workinfoid,
+				   int64_t userid, char *workername, bool pool);
 extern bool make_markersummaries(bool msg, char *by, char *code, char *inet,
 				 tv_t *cd, K_TREE *trf_root);
 extern void dsp_workmarkers(K_ITEM *item, FILE *stream);
@@ -1965,6 +2034,7 @@ extern bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 extern bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 						char *by, char *code, char *inet,
 						tv_t *cd, K_TREE *trf_root);
+extern char *ooo_status(char *buf, size_t siz);
 #define sharesummary_update(_conn, _s_row, _e_row, _ss_item, _by, _code, _inet, _cd) \
 		_sharesummary_update(_conn, _s_row, _e_row, _ss_item, _by, _code, _inet, _cd, \
 					WHERE_FFL_HERE)

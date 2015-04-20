@@ -300,6 +300,45 @@ struct session {
 	time_t added;
 };
 
+#define ID_AUTH 0
+#define ID_WORKINFO 1
+#define ID_AGEWORKINFO 2
+#define ID_SHARES 3
+#define ID_SHAREERR 4
+#define ID_POOLSTATS 5
+#define ID_WORKERSTATS 6
+#define ID_BLOCK 7
+#define ID_ADDRAUTH 8
+#define ID_HEARTBEAT 9
+
+static const char *ckdb_ids[] = {
+	"authorise",
+	"workinfo",
+	"ageworkinfo",
+	"shares",
+	"shareerror",
+	"poolstats",
+	"workerstats",
+	"block",
+	"addrauth",
+	"heartbeat"
+};
+
+static const char *ckdb_seq_names[] = {
+	"seqauthorise",
+	"seqworkinfo",
+	"seqageworkinfo",
+	"seqshares",
+	"seqshareerror",
+	"seqpoolstats",
+	"seqworkerstats",
+	"seqblock",
+	"seqaddrauth",
+	"seqheartbeat"
+};
+
+#define ID_COUNT (sizeof(ckdb_ids)/sizeof(char *))
+
 struct stratifier_data {
 	char pubkeytxnbin[25];
 	char donkeytxnbin[25];
@@ -310,6 +349,12 @@ struct stratifier_data {
 
 	/* Serialises sends/receives to ckdb if possible */
 	mutex_t ckdb_lock;
+	/* Protects sequence numbers */
+	mutex_t ckdb_msg_lock;
+	/* Incrementing global sequence number */
+	uint64_t ckdb_seq;
+	/* Incrementing ckdb_ids[] sequence numbers */
+	uint64_t ckdb_seq_ids[ID_COUNT];
 
 	bool ckdb_offline;
 
@@ -400,30 +445,6 @@ struct json_entry {
 #define GEN_LAX 0
 #define GEN_NORMAL 1
 #define GEN_PRIORITY 2
-
-#define ID_AUTH 0
-#define ID_WORKINFO 1
-#define ID_AGEWORKINFO 2
-#define ID_SHARES 3
-#define ID_SHAREERR 4
-#define ID_POOLSTATS 5
-#define ID_WORKERSTATS 6
-#define ID_BLOCK 7
-#define ID_ADDRAUTH 8
-#define ID_HEARTBEAT 9
-
-static const char *ckdb_ids[] = {
-	"authorise",
-	"workinfo",
-	"ageworkinfo",
-	"shares",
-	"shareerror",
-	"poolstats",
-	"workerstats",
-	"block",
-	"addrauth",
-	"heartbeat"
-};
 
 /* For storing a set of messages within another lock, allowing us to dump them
  * to the log outside of lock */
@@ -646,15 +667,26 @@ static char *status_chars = "|/-\\";
 
 /* Absorbs the json and generates a ckdb json message, logs it to the ckdb
  * log and returns the malloced message. */
-static char *ckdb_msg(ckpool_t *ckp, json_t *val, const int idtype)
+static char *ckdb_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const int idtype)
 {
-	char *json_msg = json_dumps(val, JSON_COMPACT);
+	char *json_msg;
 	char logname[512];
 	char *ret = NULL;
+	uint64_t seqall;
 
+	json_set_int(val, "seqstart", ckp->starttime);
+	json_set_int(val, "seqpid", ckp->startpid);
+	/* Set the atomically incrementing sequence numbers */
+	mutex_lock(&sdata->ckdb_msg_lock);
+	seqall = sdata->ckdb_seq++;
+	json_set_int(val, "seqall", seqall);
+	json_set_int(val, ckdb_seq_names[idtype], sdata->ckdb_seq_ids[idtype]++);
+	mutex_unlock(&sdata->ckdb_msg_lock);
+
+	json_msg = json_dumps(val, JSON_COMPACT);
 	if (unlikely(!json_msg))
 		goto out;
-	ASPRINTF(&ret, "%s.id.json=%s", ckdb_ids[idtype], json_msg);
+	ASPRINTF(&ret, "%s.%"PRIu64".json=%s", ckdb_ids[idtype], seqall, json_msg);
 	free(json_msg);
 out:
 	json_decref(val);
@@ -690,7 +722,7 @@ static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char 
 	if (CKP_STANDALONE(ckp))
 		return json_decref(val);
 
-	json_msg = ckdb_msg(ckp, val, idtype);
+	json_msg = ckdb_msg(ckp, sdata, val, idtype);
 	if (unlikely(!json_msg)) {
 		LOGWARNING("Failed to dump json from %s %s:%d", file, func, line);
 		return;
@@ -1798,13 +1830,18 @@ static char *stratifier_stats(ckpool_t *ckp, sdata_t *sdata)
 
 static int stratum_loop(ckpool_t *ckp, proc_instance_t *pi)
 {
-	int sockd, ret = 0, selret = 0;
 	sdata_t *sdata = ckp->data;
-	unixsock_t *us = &pi->us;
+	unix_msg_t *umsg = NULL;
 	tv_t start_tv = {0, 0};
-	char *buf = NULL;
+	int ret = 0;
+	char *buf;
 
 retry:
+	if (umsg) {
+		free(umsg->buf);
+		dealloc(umsg);
+	}
+
 	do {
 		double tdiff;
 		tv_t end_tv;
@@ -1822,43 +1859,30 @@ retry:
 					 ckp->update_interval);
 				broadcast_ping(sdata);
 			}
-			continue;
 		}
-		selret = wait_read_select(us->sockd, 5);
-		if (!selret && !ping_main(ckp)) {
-			LOGEMERG("Generator failed to ping main process, exiting");
+
+		umsg = get_unix_msg(pi);
+		if (unlikely(!umsg &&!ping_main(ckp))) {
+			LOGEMERG("Stratifier failed to ping main process, exiting");
 			ret = 1;
 			goto out;
 		}
-	} while (selret < 1);
+	} while (!umsg);
 
-	sockd = accept(us->sockd, NULL, NULL);
-	if (sockd < 0) {
-		LOGERR("Failed to accept on stratifier socket, exiting");
-		ret = 1;
-		goto out;
-	}
-
-	dealloc(buf);
-	buf = recv_unix_msg(sockd);
-	if (unlikely(!buf)) {
-		Close(sockd);
-		LOGWARNING("Failed to get message in stratum_loop");
-		goto retry;
-	}
+	buf = umsg->buf;
 	if (likely(buf[0] == '{')) {
 		/* The bulk of the messages will be received json from the
 		 * connector so look for this first. The srecv_process frees
 		 * the buf heap ram */
-		ckmsgq_add(sdata->srecvs, buf);
-		Close(sockd);
-		buf = NULL;
+		Close(umsg->sockd);
+		ckmsgq_add(sdata->srecvs, umsg->buf);
+		umsg->buf = NULL;
 		goto retry;
 	}
 	if (cmdmatch(buf, "ping")) {
 		LOGDEBUG("Stratifier received ping request");
-		send_unix_msg(sockd, "pong");
-		Close(sockd);
+		send_unix_msg(umsg->sockd, "pong");
+		Close(umsg->sockd);
 		goto retry;
 	}
 	if (cmdmatch(buf, "stats")) {
@@ -1866,12 +1890,12 @@ retry:
 
 		LOGDEBUG("Stratifier received stats request");
 		msg = stratifier_stats(ckp, sdata);
-		send_unix_msg(sockd, msg);
-		Close(sockd);
+		send_unix_msg(umsg->sockd, msg);
+		Close(umsg->sockd);
 		goto retry;
 	}
 
-	Close(sockd);
+	Close(umsg->sockd);
 	LOGDEBUG("Stratifier received request: %s", buf);
 	if (cmdmatch(buf, "shutdown")) {
 		ret = 0;
@@ -1909,7 +1933,6 @@ retry:
 	goto retry;
 
 out:
-	dealloc(buf);
 	return ret;
 }
 
@@ -2445,9 +2468,9 @@ static int send_recv_auth(stratum_instance_t *client)
 	json_set_string(val, "createcode", __func__);
 	json_set_string(val, "createinet", client->address);
 	if (user->btcaddress)
-		json_msg = ckdb_msg(ckp, val, ID_ADDRAUTH);
+		json_msg = ckdb_msg(ckp, sdata, val, ID_ADDRAUTH);
 	else
-		json_msg = ckdb_msg(ckp, val, ID_AUTH);
+		json_msg = ckdb_msg(ckp, sdata, val, ID_AUTH);
 	if (unlikely(!json_msg)) {
 		LOGWARNING("Failed to dump json in send_recv_auth");
 		goto out;
@@ -2471,14 +2494,20 @@ static int send_recv_auth(stratum_instance_t *client)
 		worker_instance_t *worker = client->worker_instance;
 		json_error_t err_val;
 		json_t *val = NULL;
+		int offset = 0;
 
 		LOGINFO("Got ckdb response: %s", buf);
 		response = alloca(responselen);
 		memset(response, 0, responselen);
-		if (unlikely(sscanf(buf, "id.%*d.%s", response) < 1 || strlen(response) < 1 || !strchr(response, '='))) {
+		if (unlikely(sscanf(buf, "%*d.%*d.%c%n", response, &offset) < 1)) {
+			LOGWARNING("Got1 unparseable ckdb auth response: %s", buf);
+			goto out_fail;
+		}
+		strcpy(response+1, buf+offset);
+		if (!strchr(response, '=')) {
 			if (cmdmatch(response, "failed"))
 				goto out;
-			LOGWARNING("Got unparseable ckdb auth response: %s", buf);
+			LOGWARNING("Got2 unparseable ckdb auth response: %s", buf);
 			goto out_fail;
 		}
 		cmd = response;
@@ -3975,21 +4004,25 @@ static void ckdbq_process(ckpool_t *ckp, char *msg)
 		responselen = strlen(buf);
 	if (likely(responselen > 0)) {
 		char *response = alloca(responselen);
+		int offset = 0;
 
 		memset(response, 0, responselen);
-		sscanf(buf, "id.%*d.%s", response);
-		if (safecmp(response, "ok")) {
-			char *cmd;
+		if (sscanf(buf, "%*d.%*d.%c%n", response, &offset) > 0) {
+			strcpy(response+1, buf+offset);
+			if (safecmp(response, "ok")) {
+				char *cmd;
 
-			cmd = response;
-			strsep(&cmd, ".");
-			LOGDEBUG("Got ckdb response: %s cmd %s", response, cmd);
-			if (cmdmatch(cmd, "heartbeat=")) {
-				strsep(&cmd, "=");
-				parse_ckdb_cmd(ckp, cmd);
-			}
+				cmd = response;
+				strsep(&cmd, ".");
+				LOGDEBUG("Got ckdb response: %s cmd %s", response, cmd);
+				if (cmdmatch(cmd, "heartbeat=")) {
+					strsep(&cmd, "=");
+					parse_ckdb_cmd(ckp, cmd);
+				}
+			} else
+				LOGWARNING("Got ckdb failure response: %s", buf);
 		} else
-			LOGWARNING("Got failed ckdb response: %s", buf);
+			LOGWARNING("Got bad ckdb response: %s", buf);
 		free(buf);
 	}
 }
@@ -4660,6 +4693,7 @@ int stratifier(proc_instance_t *pi)
 	cklock_init(&sdata->instance_lock);
 
 	mutex_init(&sdata->ckdb_lock);
+	mutex_init(&sdata->ckdb_msg_lock);
 	sdata->ssends = create_ckmsgq(ckp, "ssender", &ssend_process);
 	/* Create half as many share processing threads as there are CPUs */
 	threads = sysconf(_SC_NPROCESSORS_ONLN) / 2 ? : 1;
@@ -4684,6 +4718,8 @@ int stratifier(proc_instance_t *pi)
 
 	mutex_init(&sdata->share_lock);
 	mutex_init(&sdata->block_lock);
+
+	create_unix_receiver(pi);
 
 	LOGWARNING("%s stratifier ready", ckp->name);
 
