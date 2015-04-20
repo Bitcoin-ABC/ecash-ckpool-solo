@@ -52,6 +52,8 @@ struct ckmsgq {
 
 typedef struct ckmsgq ckmsgq_t;
 
+typedef struct proc_instance proc_instance_t;
+
 struct proc_instance {
 	ckpool_t *ckp;
 	unixsock_t us;

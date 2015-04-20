@@ -309,9 +309,6 @@ struct unixsock {
 
 typedef struct unixsock unixsock_t;
 
-typedef struct proc_instance proc_instance_t;
-
-
 void _json_check(json_t *val, json_error_t *err, const char *file, const char *func, const int line);
 #define json_check(VAL, ERR) _json_check(VAL, ERR,  __FILE__, __func__, __LINE__)
 
