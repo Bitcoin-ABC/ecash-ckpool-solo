@@ -945,12 +945,12 @@ redo:
 			APPEND_REALLOC(buf, off, len, tmp);
 
 			snprintf(tmp, sizeof(tmp),
-				 "firstcreatedate:%d=%ld%c", rows,
+				 "first"CDTRF":%d=%ld%c", rows,
 				 first_cd.tv_sec, FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 
 			snprintf(tmp, sizeof(tmp),
-				 "createdate:%d=%ld%c", rows,
+				 CDTRF":%d=%ld%c", rows,
 				 blocks->createdate.tv_sec, FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 
@@ -1077,8 +1077,8 @@ redo:
 	snprintf(tmp, sizeof(tmp),
 		 "rows=%d%cflds=%s%c",
 		 rows, FLDSEP,
-		 "seq,height,blockhash,nonce,reward,workername,firstcreatedate,"
-		 "createdate,status,statsconf,diffacc,diffinv,shareacc,"
+		 "seq,height,blockhash,nonce,reward,workername,first"CDTRF","
+		 CDTRF",status,statsconf,diffacc,diffinv,shareacc,"
 		 "shareinv,elapsed,netdiff,diffratio,cdf,luck", FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
@@ -2683,7 +2683,7 @@ static char *cmd_heartbeat(__maybe_unused PGconn *conn, char *cmd, char *id,
 		snprintf(tmp, sizeof(tmp),
 			 "%s{\"workername\":\"%s\","
 			 "\"difficultydefault\":%d,"
-			 "\"createdate\":\"%ld,%ld\"}",
+			 "\""CDTRF"\":\"%ld,%ld\"}",
 			 first ? "" : ",",
 			 heartbeatqueue->workername,
 			 heartbeatqueue->difficultydefault,
@@ -5198,6 +5198,8 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USEINFO(transfer, 0, 0);
 	USEINFO(heartbeatqueue, 1, 0);
 	USEINFO(logqueue, 1, 0);
+	USEINFO(seqset, 1, 0);
+	USEINFO(seqtrans, 0, 0);
 
 	snprintf(tmp, sizeof(tmp), "totalram=%"PRIu64"%c", tot, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
@@ -5908,50 +5910,50 @@ static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
  * For the heartbeat pulse reply it has no '={}'
  */
 
-//	  cmd_val	cmd_str		noid	createdate func		access
+//	  cmd_val	cmd_str		noid	createdate func		seq		access
 struct CMDS ckdb_cmds[] = {
-	{ CMD_TERMINATE, "terminate",	true,	false,	NULL,		ACCESS_SYSTEM },
-	{ CMD_PING,	"ping",		true,	false,	NULL,		ACCESS_SYSTEM ACCESS_POOL ACCESS_WEB },
-	{ CMD_VERSION,	"version",	true,	false,	NULL,		ACCESS_SYSTEM ACCESS_POOL ACCESS_WEB },
-	{ CMD_LOGLEVEL,	"loglevel",	true,	false,	NULL,		ACCESS_SYSTEM },
-	{ CMD_FLUSH,	"flush",	true,	false,	NULL,		ACCESS_SYSTEM },
-	{ CMD_SHARELOG,	STR_WORKINFO,	false,	true,	cmd_sharelog,	ACCESS_POOL },
-	{ CMD_SHARELOG,	STR_SHARES,	false,	true,	cmd_sharelog,	ACCESS_POOL },
-	{ CMD_SHARELOG,	STR_SHAREERRORS, false,	true,	cmd_sharelog,	ACCESS_POOL },
-	{ CMD_SHARELOG,	STR_AGEWORKINFO, false,	true,	cmd_sharelog,	ACCESS_POOL },
-	{ CMD_AUTH,	"authorise",	false,	true,	cmd_auth,	ACCESS_POOL },
-	{ CMD_ADDRAUTH,	"addrauth",	false,	true,	cmd_addrauth,	ACCESS_POOL },
-	{ CMD_HEARTBEAT,"heartbeat",	false,	true,	cmd_heartbeat,	ACCESS_POOL },
-	{ CMD_ADDUSER,	"adduser",	false,	false,	cmd_adduser,	ACCESS_WEB },
-	{ CMD_NEWPASS,	"newpass",	false,	false,	cmd_newpass,	ACCESS_WEB },
-	{ CMD_CHKPASS,	"chkpass",	false,	false,	cmd_chkpass,	ACCESS_WEB },
-	{ CMD_USERSET,	"usersettings",	false,	false,	cmd_userset,	ACCESS_WEB },
-	{ CMD_WORKERSET,"workerset",	false,	false,	cmd_workerset,	ACCESS_WEB },
-	{ CMD_POOLSTAT,	"poolstats",	false,	true,	cmd_poolstats,	ACCESS_POOL },
-	{ CMD_USERSTAT,	"userstats",	false,	true,	cmd_userstats,	ACCESS_POOL },
-	{ CMD_WORKERSTAT,"workerstats",	false,	true,	cmd_workerstats,ACCESS_POOL },
-	{ CMD_BLOCK,	"block",	false,	true,	cmd_blocks,	ACCESS_POOL },
-	{ CMD_BLOCKLIST,"blocklist",	false,	false,	cmd_blocklist,	ACCESS_WEB },
-	{ CMD_BLOCKSTATUS,"blockstatus",false,	false,	cmd_blockstatus,ACCESS_SYSTEM },
-	{ CMD_NEWID,	"newid",	false,	false,	cmd_newid,	ACCESS_SYSTEM },
-	{ CMD_PAYMENTS,	"payments",	false,	false,	cmd_payments,	ACCESS_WEB },
-	{ CMD_WORKERS,	"workers",	false,	false,	cmd_workers,	ACCESS_WEB },
-	{ CMD_ALLUSERS,	"allusers",	false,	false,	cmd_allusers,	ACCESS_WEB },
-	{ CMD_HOMEPAGE,	"homepage",	false,	false,	cmd_homepage,	ACCESS_WEB },
-	{ CMD_GETATTS,	"getatts",	false,	false,	cmd_getatts,	ACCESS_WEB },
-	{ CMD_SETATTS,	"setatts",	false,	false,	cmd_setatts,	ACCESS_WEB },
-	{ CMD_EXPATTS,	"expatts",	false,	false,	cmd_expatts,	ACCESS_WEB },
-	{ CMD_GETOPTS,	"getopts",	false,	false,	cmd_getopts,	ACCESS_WEB },
-	{ CMD_SETOPTS,	"setopts",	false,	false,	cmd_setopts,	ACCESS_WEB },
-	{ CMD_DSP,	"dsp",		false,	false,	cmd_dsp,	ACCESS_SYSTEM },
-	{ CMD_STATS,	"stats",	true,	false,	cmd_stats,	ACCESS_SYSTEM ACCESS_WEB },
-	{ CMD_PPLNS,	"pplns",	false,	false,	cmd_pplns,	ACCESS_SYSTEM ACCESS_WEB },
-	{ CMD_PPLNS2,	"pplns2",	false,	false,	cmd_pplns2,	ACCESS_SYSTEM ACCESS_WEB },
-	{ CMD_PAYOUTS,	"payouts",	false,	false,	cmd_payouts,	ACCESS_SYSTEM },
-	{ CMD_MPAYOUTS,	"mpayouts",	false,	false,	cmd_mpayouts,	ACCESS_SYSTEM ACCESS_WEB },
-	{ CMD_SHIFTS,	"shifts",	false,	false,	cmd_shifts,	ACCESS_SYSTEM ACCESS_WEB },
-	{ CMD_USERSTATUS,"userstatus",	false,	false,	cmd_userstatus,	ACCESS_SYSTEM ACCESS_WEB },
-	{ CMD_MARKS,	"marks",	false,	false,	cmd_marks,	ACCESS_SYSTEM },
-	{ CMD_PSHIFT,	"pshift",	false,	false,	cmd_pshift,	ACCESS_SYSTEM ACCESS_WEB },
-	{ CMD_END,	NULL,		false,	false,	NULL,		NULL }
+	{ CMD_TERMINATE, "terminate",	true,	false,	NULL,		SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_PING,	"ping",		true,	false,	NULL,		SEQ_NONE,	ACCESS_SYSTEM ACCESS_POOL ACCESS_WEB },
+	{ CMD_VERSION,	"version",	true,	false,	NULL,		SEQ_NONE,	ACCESS_SYSTEM ACCESS_POOL ACCESS_WEB },
+	{ CMD_LOGLEVEL,	"loglevel",	true,	false,	NULL,		SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_FLUSH,	"flush",	true,	false,	NULL,		SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_SHARELOG,	STR_WORKINFO,	false,	true,	cmd_sharelog,	SEQ_WORKINFO,	ACCESS_POOL },
+	{ CMD_SHARELOG,	STR_SHARES,	false,	true,	cmd_sharelog,	SEQ_SHARES,	ACCESS_POOL },
+	{ CMD_SHARELOG,	STR_SHAREERRORS,false,	true,	cmd_sharelog,	SEQ_SHAREERRORS,ACCESS_POOL },
+	{ CMD_SHARELOG,	STR_AGEWORKINFO,false,	true,	cmd_sharelog,	SEQ_AGEWORKINFO,ACCESS_POOL },
+	{ CMD_AUTH,	"authorise",	false,	true,	cmd_auth,	SEQ_AUTH,	ACCESS_POOL },
+	{ CMD_ADDRAUTH,	"addrauth",	false,	true,	cmd_addrauth,	SEQ_ADDRAUTH,	ACCESS_POOL },
+	{ CMD_HEARTBEAT,"heartbeat",	false,	true,	cmd_heartbeat,	SEQ_HEARTBEAT,	ACCESS_POOL },
+	{ CMD_ADDUSER,	"adduser",	false,	false,	cmd_adduser,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_NEWPASS,	"newpass",	false,	false,	cmd_newpass,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_CHKPASS,	"chkpass",	false,	false,	cmd_chkpass,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_USERSET,	"usersettings",	false,	false,	cmd_userset,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_WORKERSET,"workerset",	false,	false,	cmd_workerset,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_POOLSTAT,	"poolstats",	false,	true,	cmd_poolstats,	SEQ_POOLSTATS,	ACCESS_POOL },
+	{ CMD_USERSTAT,	"userstats",	false,	true,	cmd_userstats,	SEQ_NONE,	ACCESS_POOL },
+	{ CMD_WORKERSTAT,"workerstats",	false,	true,	cmd_workerstats,SEQ_WORKERSTAT, ACCESS_POOL },
+	{ CMD_BLOCK,	"block",	false,	true,	cmd_blocks,	SEQ_BLOCK,	ACCESS_POOL },
+	{ CMD_BLOCKLIST,"blocklist",	false,	false,	cmd_blocklist,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_BLOCKSTATUS,"blockstatus",false,	false,	cmd_blockstatus,SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_NEWID,	"newid",	false,	false,	cmd_newid,	SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_PAYMENTS,	"payments",	false,	false,	cmd_payments,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_WORKERS,	"workers",	false,	false,	cmd_workers,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_ALLUSERS,	"allusers",	false,	false,	cmd_allusers,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_HOMEPAGE,	"homepage",	false,	false,	cmd_homepage,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_GETATTS,	"getatts",	false,	false,	cmd_getatts,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_SETATTS,	"setatts",	false,	false,	cmd_setatts,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_EXPATTS,	"expatts",	false,	false,	cmd_expatts,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_GETOPTS,	"getopts",	false,	false,	cmd_getopts,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_SETOPTS,	"setopts",	false,	false,	cmd_setopts,	SEQ_NONE,	ACCESS_WEB },
+	{ CMD_DSP,	"dsp",		false,	false,	cmd_dsp,	SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_STATS,	"stats",	true,	false,	cmd_stats,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_PPLNS,	"pplns",	false,	false,	cmd_pplns,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_PPLNS2,	"pplns2",	false,	false,	cmd_pplns2,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_PAYOUTS,	"payouts",	false,	false,	cmd_payouts,	SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_MPAYOUTS,	"mpayouts",	false,	false,	cmd_mpayouts,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_SHIFTS,	"shifts",	false,	false,	cmd_shifts,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_USERSTATUS,"userstatus",	false,	false,	cmd_userstatus,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_MARKS,	"marks",	false,	false,	cmd_marks,	SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_PSHIFT,	"pshift",	false,	false,	cmd_pshift,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_END,	NULL,		false,	false,	NULL,		SEQ_NONE,	NULL }
 };

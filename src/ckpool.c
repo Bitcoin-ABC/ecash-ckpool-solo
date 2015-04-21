@@ -175,7 +175,7 @@ ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, cons
 }
 
 /* Generic function for adding messages to a ckmsgq linked list and signal the
- * ckmsgq parsing thread to wake up and process it. */
+ * ckmsgq parsing thread(s) to wake up and process it. */
 void ckmsgq_add(ckmsgq_t *ckmsgq, void *data)
 {
 	ckmsg_t *msg = ckalloc(sizeof(ckmsg_t));
@@ -185,7 +185,7 @@ void ckmsgq_add(ckmsgq_t *ckmsgq, void *data)
 	mutex_lock(ckmsgq->lock);
 	ckmsgq->messages++;
 	DL_APPEND(ckmsgq->msgs, msg);
-	pthread_cond_signal(ckmsgq->cond);
+	pthread_cond_broadcast(ckmsgq->cond);
 	mutex_unlock(ckmsgq->lock);
 }
 

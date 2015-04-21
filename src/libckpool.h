@@ -194,6 +194,9 @@ void logmsg(int loglevel, const char *fmt, ...);
 
 #define DEFLOGBUFSIZ 512
 
+#define LOGMSGBUF(__lvl, __buf) do { \
+		logmsg(__lvl, "%s", __buf); \
+	} while(0)
 #define LOGMSGSIZ(__siz, __lvl, __fmt, ...) do { \
 		char tmp42[__siz]; \
 		snprintf(tmp42, sizeof(tmp42), __fmt, ##__VA_ARGS__); \

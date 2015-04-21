@@ -87,8 +87,21 @@ void free_marks_data(K_ITEM *item)
 		FREENULL(marks->extra);
 }
 
+void free_seqset_data(K_ITEM *item)
+{
+	SEQSET *seqset;
+	int i;
+
+	DATA_SEQSET(seqset, item);
+	if (seqset->seqstt) {
+		for (i = 0; i < SEQ_MAX; i++)
+			FREENULL(seqset->seqdata[i].item);
+		seqset->seqstt = 0;
+	}
+}
+
 // Clear text printable version of txt up to first '\0'
-char *safe_text(char *txt)
+char *_safe_text(char *txt, bool shownull)
 {
 	unsigned char *ptr = (unsigned char *)txt;
 	size_t len;
@@ -114,7 +127,11 @@ char *safe_text(char *txt)
 			buf += 4;
 		}
 	}
-	strcpy(buf, "0x00");
+	if (shownull)
+		strcpy(buf, "0x00");
+	else
+		*buf = '\0';
+
 	return ret;
 }
 
@@ -375,6 +392,9 @@ char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz, WHERE_
 				break;
 			case TYPE_TV:
 			case TYPE_TVS:
+			case TYPE_BTV:
+			case TYPE_T:
+			case TYPE_BT:
 				siz = DATE_BUFSIZ;
 				break;
 			case TYPE_CTV:
@@ -441,6 +461,25 @@ char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz, WHERE_
 		case TYPE_DOUBLE:
 			snprintf(buf, siz, "%f", *((double *)data));
 			break;
+		case TYPE_T:
+			gmtime_r((time_t *)data, &tm);
+			snprintf(buf, siz, "%d-%02d-%02d %02d:%02d:%02d+00",
+					   tm.tm_year + 1900,
+					   tm.tm_mon + 1,
+					   tm.tm_mday,
+					   tm.tm_hour,
+					   tm.tm_min,
+					   tm.tm_sec);
+			break;
+		case TYPE_BT:
+			gmtime_r((time_t *)data, &tm);
+			snprintf(buf, siz, "%d-%02d %02d:%02d:%02d",
+					   tm.tm_mon + 1,
+					   tm.tm_mday,
+					   tm.tm_hour,
+					   tm.tm_min,
+					   tm.tm_sec);
+			break;
 	}
 
 	return buf;
@@ -500,6 +539,22 @@ char *_blob_to_buf(char *data, char *buf, size_t siz, WHERE_FFL_ARGS)
 char *_double_to_buf(double data, char *buf, size_t siz, WHERE_FFL_ARGS)
 {
 	return _data_to_buf(TYPE_DOUBLE, (void *)(&data), buf, siz, WHERE_FFL_PASS);
+}
+
+char *_t_to_buf(time_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
+{
+	return _data_to_buf(TYPE_T, (void *)data, buf, siz, WHERE_FFL_PASS);
+}
+
+char *_bt_to_buf(time_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
+{
+	return _data_to_buf(TYPE_BT, (void *)data, buf, siz, WHERE_FFL_PASS);
+}
+
+char *_btu64_to_buf(uint64_t *data, char *buf, size_t siz, WHERE_FFL_ARGS)
+{
+	time_t t = *data;
+	return _data_to_buf(TYPE_BT, (void *)&t, buf, siz, WHERE_FFL_PASS);
 }
 
 // For mutiple variable function calls that need the data

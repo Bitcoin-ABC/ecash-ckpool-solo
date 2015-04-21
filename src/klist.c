@@ -205,6 +205,11 @@ void _k_add_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 				list->name, __func__, item->name, KLIST_FFL_PASS);
 	}
 
+	if (item->prev || item->next) {
+		quithere(1, "%s() added item %s still linked" KLIST_FFL,
+				__func__, item->name, KLIST_FFL_PASS);
+	}
+
 	item->prev = NULL;
 	item->next = list->head;
 	if (list->head)
@@ -239,6 +244,11 @@ void _k_add_tail(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 	if (!(list->do_tail)) {
 		quithere(1, "List %s can't %s() - do_tail is false" KLIST_FFL,
 				list->name, __func__, KLIST_FFL_PASS);
+	}
+
+	if (item->prev || item->next) {
+		quithere(1, "%s() added item %s still linked" KLIST_FFL,
+				__func__, item->name, KLIST_FFL_PASS);
 	}
 
 	item->prev = list->tail;

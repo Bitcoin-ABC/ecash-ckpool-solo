@@ -55,7 +55,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.0"
-#define CKDB_VERSION DB_VERSION"-1.066"
+#define CKDB_VERSION DB_VERSION"-1.073"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -102,8 +102,10 @@ extern int switch_state;
 #define SWITCH_STATE_AUTHWORKERS 1
 #define SWITCH_STATE_ALL 666666
 
+#define BLANK " "
 extern char *EMPTY;
 
+// Field patterns
 extern const char *userpatt;
 extern const char *mailpatt;
 extern const char *idpatt;
@@ -237,7 +239,9 @@ enum data_type {
 	TYPE_CTV,
 	TYPE_FTV,
 	TYPE_BLOB,
-	TYPE_DOUBLE
+	TYPE_DOUBLE,
+	TYPE_T,
+	TYPE_BT
 };
 
 // BLOB does what PTR needs
@@ -336,12 +340,27 @@ extern char *btc_server;
 extern char *btc_auth;
 extern int btc_timeout;
 
+#define EDDB "expirydate"
+#define CDDB "createdate"
+#define CDTRF CDDB
+#define BYDB "createby"
+#define BYTRF BYDB
+#define CODEDB "createcode"
+#define CODETRF CODEDB
+#define INETDB "createinet"
+#define INETTRF INETDB
+#define MDDB "modifydate"
+#define MBYDB "modifyby"
+#define MCODEDB "modifycode"
+#define MINETDB "modifyinet"
+
 extern char *by_default;
 extern char *inet_default;
 extern char *id_default;
 
 enum cmd_values {
 	CMD_UNSET,
+	CMD_DUPSEQ, // Ignore, we've already got it
 	CMD_REPLY, // Means something was wrong - send back reply
 	CMD_TERMINATE,
 	CMD_PING,
@@ -426,12 +445,16 @@ enum cmd_values {
 // The size strdup will allocate multiples of
 #define MEMBASE 4
 
+#define LIST_MEM_ADD_SIZ(_list, _siz) do { \
+		if (_siz % MEMBASE) \
+			_siz += MEMBASE - (_siz % MEMBASE); \
+		_list->ram += (int)_siz; \
+	} while (0)
+
 #define LIST_MEM_ADD(_list, _fld) do { \
 		size_t __siz; \
 		__siz = strlen(_fld) + 1; \
-		if (__siz % MEMBASE) \
-			__siz += MEMBASE - (__siz % MEMBASE); \
-		_list->ram += (int)__siz; \
+		LIST_MEM_ADD_SIZ(_list, __siz); \
 	} while (0)
 
 #define LIST_MEM_SUB(_list, _fld) do { \
@@ -470,7 +493,7 @@ enum cmd_values {
 #define SET_MODIFYCODE(_list, _fld, _val) SET_POINTER(_list, _fld, _val, EMPTY)
 #define SET_MODIFYINET(_list, _fld, _val) SET_POINTER(_list, _fld, _val, inet_default)
 
-#define HISTORYDATECONTROL ",createdate,createby,createcode,createinet,expirydate"
+#define HISTORYDATECONTROL ","CDDB","BYDB","CODEDB","INETDB","EDDB
 #define HISTORYDATECOUNT 5
 #define HISTORYDATECONTROLFIELDS \
 	tv_t createdate; \
@@ -497,17 +520,17 @@ enum cmd_values {
 			size_t __siz = sizeof(__reply); \
 			K_ITEM *__item; \
 			TRANSFER *__transfer; \
-			__item = optional_name(_root, "createby", 1, NULL, __reply, __siz); \
+			__item = optional_name(_root, BYTRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
 				STRNCPY(_row->createby, __transfer->mvalue); \
 			} \
-			__item = optional_name(_root, "createcode", 1, NULL, __reply, __siz); \
+			__item = optional_name(_root, CODETRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
 				STRNCPY(_row->createcode, __transfer->mvalue); \
 			} \
-			__item = optional_name(_root, "createinet", 1, NULL, __reply, __siz); \
+			__item = optional_name(_root, INETTRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
 				STRNCPY(_row->createinet, __transfer->mvalue); \
@@ -515,8 +538,8 @@ enum cmd_values {
 		} \
 	} while (0)
 
-#define MODIFYDATECONTROL ",createdate,createby,createcode,createinet" \
-			  ",modifydate,modifyby,modifycode,modifyinet"
+#define MODIFYDATECONTROL ","CDDB","BYDB","CODEDB","INETDB \
+			  ","MDDB","MBYDB","MCODEDB","MINETDB
 #define MODIFYDATECOUNT 8
 #define MODIFYUPDATECOUNT 4
 #define MODIFYDATECONTROLFIELDS \
@@ -595,17 +618,17 @@ enum cmd_values {
 			size_t __siz = sizeof(__reply); \
 			K_ITEM *__item; \
 			TRANSFER *__transfer; \
-			__item = optional_name(_root, "createby", 1, NULL, __reply, __siz); \
+			__item = optional_name(_root, BYTRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
 				SET_CREATEBY(_list, _row->createby, __transfer->mvalue); \
 			} \
-			__item = optional_name(_root, "createcode", 1, NULL, __reply, __siz); \
+			__item = optional_name(_root, CODETRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
 				SET_CREATECODE(_list, _row->createcode, __transfer->mvalue); \
 			} \
-			__item = optional_name(_root, "createinet", 1, NULL, __reply, __siz); \
+			__item = optional_name(_root, INETTRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
 				SET_CREATEINET(_list, _row->createinet, __transfer->mvalue); \
@@ -614,7 +637,7 @@ enum cmd_values {
 		} \
 	} while (0)
 
-#define SIMPLEDATECONTROL ",createdate,createby,createcode,createinet"
+#define SIMPLEDATECONTROL ","CDDB","BYDB","CODEDB","INETDB
 #define SIMPLEDATECOUNT 4
 #define SIMPLEDATECONTROLFIELDS \
 	tv_t createdate; \
@@ -645,17 +668,17 @@ enum cmd_values {
 		size_t __siz = sizeof(__reply); \
 		K_ITEM *__item; \
 		TRANSFER *__transfer; \
-		__item = optional_name(_root, "createby", 1, NULL, __reply, __siz); \
+		__item = optional_name(_root, BYTRF, 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createby, __transfer->mvalue); \
 		} \
-		__item = optional_name(_root, "createcode", 1, NULL, __reply, __siz); \
+		__item = optional_name(_root, CODETRF, 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createcode, __transfer->mvalue); \
 		} \
-		__item = optional_name(_root, "createinet", 1, NULL, __reply, __siz); \
+		__item = optional_name(_root, INETTRF, 1, NULL, __reply, __siz); \
 		if (__item) { \
 			DATA_TRANSFER(__transfer, __item); \
 			STRNCPY(_row->createinet, __transfer->mvalue); \
@@ -750,6 +773,172 @@ extern K_ITEM shares_secondaryuserid;
 extern K_ITEM shareerrors_secondaryuserid;
 extern tv_t missing_secuser_min;
 extern tv_t missing_secuser_max;
+
+/* The aim of the sequence data is to identify and ignore duplicate records -
+ *  which should usually only be during a reload -
+ *  and to identify missing records when their sequence numbers are skipped
+ *
+ * If at any time there is a problem with a sequence number, an error is
+ *  reported, then the record being processed is simply processed normally by
+ *  the cmd_func() it was intended for - which may or may not produce other
+ *  processing error messages depending on the validity of the rest of the data
+ *
+ * Field explanation:
+ *  Normal sequence processing would be that we first get seq N, then N+1
+ *   then N+2 ... etc.
+ *   seqbase,minseq,maxseq are all set to the first N for the given sequence
+ *   maxseq is incremented to the current maximum N+x each time a record is
+ *   processed
+ *  If we get up to N+3 but it is unexpectedly followed by N+5, that means N+4
+ *   is currently missing - so it is flagged as missing by MISSFLAG=0 and the
+ *   missing counters are incremented - maxseq will now be N+5
+ *  Once we reach N+size we need to discard N and use it as N+size
+ *   and increment seqbase N
+ *   When we discard the oldest item due to needing more, if that oldest
+ *    item was missing, it is now considered lost and the lost counters
+ *    are incremented (and missing counters decremented)
+ *  If we receive an item N+x where N+x-maxseq>highlimit we reject it as high
+ *   and increment the high counters - this avoids creating a high bad sequence
+ *   number and flagging any missing sequence numbers, most likely incorrectly,
+ *   as lost in the range N to N+x-size
+ *  If we receive an item N-x i.e. less than seqbase N, then:
+ *   If maxseq-N = size then N-x is considered stale and the stale counters
+ *    are incremented since there's no unused items below N available
+ *    This shouldn't normally happen after we've received size seq numbers
+ *   Else maxseq-N is less than size, that means there are unused items below N
+ *    This will usually only be with a new sequence and the first seq was out
+ *     of order, before lower sequence numbers, thus maxseq should be close to
+ *     seqbase N and no where near N+size and there should be x unused below N
+ *    If there are x unused items below N then we can move seqbase down to N-x
+ *     after we flag all N-1,N-2,N-3..N-(x-1) as missing
+ *    Else there aren't enough unused items below N, then N-x is considered
+ *     stale and the stale counters are incremented
+ *
+ * timelimit is an early limit to flag missing sequence numbers as 'transient'
+ * Normally, if a missing item at N is later reused, it will be discarded and
+ *  reported as lost
+ * After the reload queue is complete, timelimit reports missing sequence
+ *  numbers early, as transient, if they have been missing for 'timelimit' but
+ *  not already lost
+ *  missing isn't decremented, since it is still treated as missing
+ * This is needed in case a size limit on a sequence means it may take a long
+ *  time before it reports messages as lost - this also means that after the
+ *  reload queue has cleared after ckdb startup, it will report the transient
+ *  missing sequence numbers shortly after the timelimit
+ * When they are later found or lost they will again be reported, this time as
+ *  found or lost */
+
+// ckpool sequence numbers
+#define SEQALL "seqall"
+#define SEQSTT "seqstart"
+#define SEQPID "seqpid"
+#define SEQPRE "seq"
+
+/* Value to use for SEQSTT when manually sending messages,
+ *  to make ckdb not check the seq numbers
+ * The message must have a SEQALL but the value is ignored
+ * SEQPID and SEQcmd don't need to exist and are ignored */
+#define SEQSTTIGN 42
+
+enum seq_num {
+	SEQ_NONE = -1, // Invalid to have ckpool seq numbers
+	SEQ_ALL,
+	SEQ_BLOCK,
+	SEQ_SHARES,
+	SEQ_WORKINFO,
+	SEQ_AGEWORKINFO,
+	SEQ_AUTH,
+	SEQ_ADDRAUTH,
+	SEQ_HEARTBEAT,
+	SEQ_SHAREERRORS,
+	SEQ_WORKERSTAT,
+	SEQ_POOLSTATS,
+	SEQ_MAX
+};
+
+// Ensure size is a (multiple of 8)-1
+#define SEQ_CODE 15
+
+typedef struct seqitem {
+	tv_t cd; // sec:0=missing, usec:0=miss !0=trans
+	tv_t time;
+	char code[SEQ_CODE+1];
+} SEQITEM;
+
+typedef struct seqdata {
+	size_t	size; // item count - MUST be a power of 2
+	uint64_t highlimit;
+	int timelimit;
+	uint64_t minseq;
+	uint64_t maxseq;
+	uint64_t seqbase;
+	uint64_t missing;
+	uint64_t trans;
+	uint64_t lost;
+	uint64_t stale;
+	uint64_t high;
+	uint64_t ok;
+	tv_t firsttime;
+	tv_t lasttime;
+	tv_t firstcd;
+	tv_t lastcd;
+	SEQITEM *item;
+} SEQDATA;
+
+// SEQSET
+typedef struct seqset {
+	uint64_t seqstt; // 0 if unused/unallocated
+	uint64_t seqpid;
+	uint64_t missing; // total from seqdata
+	uint64_t trans; // total from seqdata
+	uint64_t lost; // total from seqdata
+	uint64_t stale; // total from seqdata
+	uint64_t high; // total from seqdata
+	uint64_t ok; // total from seqdata
+	SEQDATA seqdata[SEQ_MAX];
+} SEQSET;
+
+/* All *_SIZ must be >= 64 and a power of 2
+ *  but if any aren't, the code checks this and quit()s
+ *  the first time it processes a record with sequences */
+
+// SEQALL and SHARES */
+#define SEQ_LARGE_LIM 64
+#define SEQ_LARGE_SIZ (65536*SEQ_LARGE_LIM)
+// WORKERSTATS, AUTH and ADDRAUTH
+#define SEQ_MEDIUM_LIM 128
+#define SEQ_MEDIUM_SIZ 65536
+// The rest
+#define SEQ_SMALL_LIM 128
+#define SEQ_SMALL_SIZ 16384
+
+#define ALLOC_SEQSET 1
+#define LIMIT_SEQSET 16
+#define INIT_SEQSET(_item) INIT_GENERIC(_item, seqset)
+#define DATA_SEQSET(_var, _item) DATA_GENERIC(_var, _item, seqset, true)
+
+extern K_LIST *seqset_free;
+// each new seqset is added to the head, so head is the current one
+extern K_STORE *seqset_store;
+
+// Initialised when seqset_free is allocated
+extern char *seqnam[SEQ_MAX];
+
+// SEQTRANS
+typedef struct seqtrans {
+	int seq;
+	uint64_t seqnum;
+	SEQITEM item;
+} SEQTRANS;
+
+// The stores are created and freed each time required
+extern K_LIST *seqtrans_free;
+
+#define ALLOC_SEQTRANS 1024
+#define LIMIT_SEQTRANS 0
+#define CULL_SEQTRANS 65536
+#define INIT_SEQTRANS(_item) INIT_GENERIC(_item, seqtrans)
+#define DATA_SEQTRANS(_var, _item) DATA_GENERIC(_var, _item, seqtrans, true)
 
 // USERS
 typedef struct users {
@@ -1701,8 +1890,11 @@ extern void free_optioncontrol_data(K_ITEM *item);
 extern void free_markersummary_data(K_ITEM *item);
 extern void free_workmarkers_data(K_ITEM *item);
 extern void free_marks_data(K_ITEM *item);
+extern void free_seqset_data(K_ITEM *item);
 
-extern char *safe_text(char *txt);
+#define safe_text(_txt) _safe_text(_txt, true)
+#define safe_text_nonull(_txt) _safe_text(_txt, false)
+extern char *_safe_text(char *txt, bool shownull);
 extern void username_trim(USERS *users);
 extern bool like_address(char *username);
 
@@ -1738,6 +1930,9 @@ extern char *_data_to_buf(enum data_type typ, void *data, char *buf, size_t siz,
 #define btv_to_buf(_data, _buf, _siz) _btv_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 //#define blob_to_buf(_data, _buf, _siz) _blob_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 #define double_to_buf(_data, _buf, _siz) _double_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
+#define t_to_buf(_data, _buf, _siz) _t_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
+#define bt_to_buf(_data, _buf, _siz) _bt_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
+#define btu64_to_buf(_data, _buf, _siz) _btu64_to_buf(_data, _buf, _siz, WHERE_FFL_HERE)
 
 extern char *_str_to_buf(char data[], char *buf, size_t siz, WHERE_FFL_ARGS);
 extern char *_bigint_to_buf(int64_t data, char *buf, size_t siz, WHERE_FFL_ARGS);
@@ -1749,12 +1944,17 @@ extern char *_ctv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 extern char *_ftv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 // Convert tv to seconds (ignore uS)
 extern char *_tvs_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
-// Convert tv to (brief) DD HH:MM:SS
+// Convert tv to (brief) DD/HH:MM:SS
 extern char *_btv_to_buf(tv_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 /* unused yet
 extern char *_blob_to_buf(char *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 */
 extern char *_double_to_buf(double data, char *buf, size_t siz, WHERE_FFL_ARGS);
+// Convert seconds (only) time to date
+extern char *_t_to_buf(time_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
+// Convert seconds (only) time to (brief) M-DD/HH:MM:SS
+extern char *_bt_to_buf(time_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
+extern char *_btu64_to_buf(uint64_t *data, char *buf, size_t siz, WHERE_FFL_ARGS);
 
 extern char *_transfer_data(K_ITEM *item, WHERE_FFL_ARGS);
 extern void dsp_transfer(K_ITEM *item, FILE *stream);
@@ -2131,6 +2331,7 @@ struct CMDS {
 	bool createdate; // requires a createdate
 	char *(*func)(PGconn *, char *, char *, tv_t *, char *, char *,
 			char *, tv_t *, K_TREE *);
+	enum seq_num seq;
 	char *access;
 };
 
