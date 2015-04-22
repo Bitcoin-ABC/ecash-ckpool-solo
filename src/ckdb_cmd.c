@@ -5844,6 +5844,24 @@ static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
 	return(buf);
 }
 
+/* Show a share status report on the console
+ * Currently: sequence status and OoO info */
+static char *cmd_shsta(__maybe_unused PGconn *conn, char *cmd, char *id,
+			__maybe_unused tv_t *now, __maybe_unused char *by,
+			__maybe_unused char *code, __maybe_unused char *inet,
+			__maybe_unused tv_t *notcd, __maybe_unused K_TREE *trf_root)
+{
+	char ooo_buf[256];
+	char buf[256];
+
+	LOGWARNING("OoO %s", ooo_status(ooo_buf, sizeof(ooo_buf)));
+	sequence_report(true);
+
+	snprintf(buf, sizeof(buf), "ok.%s", cmd);
+	LOGDEBUG("%s.%s", id, buf);
+	return strdup(buf);
+}
+
 // TODO: limit access by having seperate sockets for each
 #define ACCESS_POOL	"p"
 #define ACCESS_SYSTEM	"s"
@@ -5955,5 +5973,6 @@ struct CMDS ckdb_cmds[] = {
 	{ CMD_USERSTATUS,"userstatus",	false,	false,	cmd_userstatus,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
 	{ CMD_MARKS,	"marks",	false,	false,	cmd_marks,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_PSHIFT,	"pshift",	false,	false,	cmd_pshift,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
+	{ CMD_SHSTA,	"shsta",	true,	false,	cmd_shsta,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_END,	NULL,		false,	false,	NULL,		SEQ_NONE,	NULL }
 };

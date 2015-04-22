@@ -219,17 +219,21 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	}
 
 	keep_sockalive(fd);
-	nolinger_socket(fd);
 
 	LOGINFO("Connected new client %d on socket %d to %d active clients from %s:%d",
 		cdata->nfds, fd, no_clients, client->address_name, port);
 
+	ck_wlock(&cdata->lock);
+	client->id = cdata->client_id++;
+	HASH_ADD_I64(cdata->clients, id, client);
+	cdata->nfds++;
+	ck_wunlock(&cdata->lock);
+
 	client->fd = fd;
-	event.data.ptr = client;
-	event.events = EPOLLIN;
+	event.data.u64 = client->id;
+	event.events = EPOLLIN | EPOLLRDHUP;
 	if (unlikely(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) < 0)) {
 		LOGERR("Failed to epoll_ctl add in accept_client");
-		recycle_client(cdata, client);
 		return 0;
 	}
 
@@ -237,12 +241,6 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	 * to it. We drop that reference when the socket is closed which
 	 * removes it automatically from the epoll list. */
 	__inc_instance_ref(client);
-
-	ck_wlock(&cdata->lock);
-	client->id = cdata->client_id++;
-	HASH_ADD_I64(cdata->clients, id, client);
-	cdata->nfds++;
-	ck_wunlock(&cdata->lock);
 
 	return 1;
 }
@@ -258,7 +256,8 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 	if (fd != -1) {
 		client_id = client->id;
 
-		epoll_ctl(cdata->epfd, EPOLL_CTL_DEL, client->fd, NULL);
+		epoll_ctl(cdata->epfd, EPOLL_CTL_DEL, fd, NULL);
+		nolinger_socket(fd);
 		Close(client->fd);
 		HASH_DEL(cdata->clients, client);
 		DL_APPEND(cdata->dead_clients, client);
@@ -318,25 +317,21 @@ static void send_client(cdata_t *cdata, int64_t id, char *buf);
 /* Client is holding a reference count from being on the epoll list */
 static void parse_client_msg(cdata_t *cdata, client_instance_t *client)
 {
-	int buflen, ret, selfail = 0;
 	ckpool_t *ckp = cdata->ckp;
 	char msg[PAGESIZE], *eol;
+	int buflen, ret;
 	json_t *val;
 
 retry:
-	/* Select should always return positive after poll unless we have
-	 * been disconnected. On retries, decdatade whether we should do further
-	 * reads based on select readiness and only fail if we get an error. */
 	ret = wait_read_select(client->fd, 0);
 	if (ret < 1) {
-		if (ret > selfail)
+		if (!ret)
 			return;
 		LOGINFO("Client fd %d disconnected - select fail with bufofs %d ret %d errno %d %s",
 			client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
 		invalidate_client(ckp, cdata, client);
 		return;
 	}
-	selfail = -1;
 	buflen = PAGESIZE - client->bufofs;
 	ret = recv(client->fd, client->buf + client->bufofs, buflen, 0);
 	if (ret < 1) {
@@ -447,8 +442,7 @@ void *receiver(void *arg)
 	serverfds = cdata->ckp->serverurls;
 	/* Add all the serverfds to the epoll */
 	for (i = 0; i < serverfds; i++) {
-		/* The small values will be easily identifiable compared to
-		 * pointers */
+		/* The small values will be less than the first client ids */
 		event.data.u64 = i;
 		event.events = EPOLLIN;
 		ret = epoll_ctl(epfd, EPOLL_CTL_ADD, cdata->serverfd[i], &event);
@@ -494,13 +488,12 @@ void *receiver(void *arg)
 			}
 			continue;
 		}
-		client = event.data.ptr;
-		/* Recheck this client still exists in the same form when it
-		 * was queued. */
-		client = ref_client_by_id(cdata, client->id);
-		if (unlikely(!client))
+		client = ref_client_by_id(cdata, event.data.u64);
+		if (unlikely(!client)) {
+			LOGWARNING("Failed to find client by id in receiver!");
 			continue;
-		if ((event.events & EPOLLERR) || (event.events & EPOLLHUP)) {
+		}
+		if (event.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
 			/* Client disconnected */
 			LOGDEBUG("Client fd %d HUP in epoll", client->fd);
 			invalidate_client(cdata->pi->ckp, cdata, client);
@@ -975,7 +968,9 @@ int connector(proc_instance_t *pi)
 	cklock_init(&cdata->lock);
 	cdata->pi = pi;
 	cdata->nfds = 0;
-	cdata->client_id = 1;
+	/* Set the client id to the highest serverurl count to distinguish
+	 * them from the server fds in epoll. */
+	cdata->client_id = ckp->serverurls;
 	mutex_init(&cdata->sender_lock);
 	cond_init(&cdata->sender_cond);
 	create_pthread(&cdata->pth_sender, sender, cdata);

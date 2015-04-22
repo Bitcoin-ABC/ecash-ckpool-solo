@@ -3436,7 +3436,7 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 	PGresult *res;
 	K_TREE_CTX ss_ctx[1], ms_ctx[1];
 	SHARESUMMARY *sharesummary, looksharesummary;
-	MARKERSUMMARY *markersummary, lookmarkersummary, *p_markersummary;
+	MARKERSUMMARY *markersummary, lookmarkersummary, *p_markersummary = NULL;
 	K_ITEM *ss_item, *ss_prev, ss_look, *ms_item, ms_look;
 	K_ITEM *p_ss_item, *p_ms_item;
 	bool ok = false, conned = false;
@@ -3865,7 +3865,7 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 	PGresult *res = NULL;
 	WORKMARKERS *wm;
 	SHARESUMMARY *row, *p_row;
-	K_ITEM *item, *wm_item, *p_item;
+	K_ITEM *item, *wm_item, *p_item = NULL;
 	char *ins, *upd;
 	bool ok = false, new = false, p_new = false;
 	char *params[19 + MODIFYDATECOUNT];

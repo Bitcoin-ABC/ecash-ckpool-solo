@@ -3458,7 +3458,7 @@ static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_va
 {
 	json_t *val;
 
-	JSON_CPACK(val, "{soss}", "id", json_copy(id_val), "error", err_msg);
+	JSON_CPACK(val, "{soss}", "id", json_deep_copy(id_val), "error", err_msg);
 	stratum_add_send(sdata, val, client_id);
 }
 
@@ -3818,8 +3818,16 @@ static void discard_json_params(json_params_t *jp)
 {
 	json_decref(jp->method);
 	json_decref(jp->params);
-	json_decref(jp->id_val);
+	if (jp->id_val)
+		json_decref(jp->id_val);
 	free(jp);
+}
+
+static void steal_json_id(json_t *val, json_params_t *jp)
+{
+	/* Steal the id_val as is to avoid a copy */
+	json_object_set_new_nocheck(val, "id", jp->id_val);
+	jp->id_val = NULL;
 }
 
 static void sshare_process(ckpool_t *ckp, json_params_t *jp)
@@ -3844,7 +3852,7 @@ static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 	result_val = parse_submit(client, json_msg, jp->params, &err_val);
 	json_object_set_new_nocheck(json_msg, "result", result_val);
 	json_object_set_new_nocheck(json_msg, "error", err_val ? err_val : json_null());
-	json_object_set_nocheck(json_msg, "id", jp->id_val);
+	steal_json_id(json_msg, jp);
 	stratum_add_send(sdata, json_msg, client_id);
 out_decref:
 	dec_instance_ref(sdata, client);
@@ -3906,7 +3914,7 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 	json_msg = json_object();
 	json_object_set_new_nocheck(json_msg, "result", result_val);
 	json_object_set_new_nocheck(json_msg, "error", err_val ? err_val : json_null());
-	json_object_set_nocheck(json_msg, "id", jp->id_val);
+	steal_json_id(json_msg, jp);
 	stratum_add_send(sdata, json_msg, client_id);
 
 	if (!json_is_true(result_val) || !client->suggest_diff)
@@ -4070,7 +4078,7 @@ static void send_transactions(ckpool_t *ckp, json_params_t *jp)
 		goto out;
 	}
 	val = json_object();
-	json_object_set_nocheck(val, "id", jp->id_val);
+	steal_json_id(val, jp);
 	if (cmdmatch(msg, "mining.get_transactions")) {
 		int txns;
 

@@ -9,10 +9,35 @@
 
 #include "klist.h"
 
+#define _CHKLIST(_list, _name) do {\
+		if (!_list) { \
+			quithere(1, "%s() can't process a NULL " _name \
+					KLIST_FFL, \
+					__func__, KLIST_FFL_PASS); \
+		} \
+	} while (0);
+
+#define CHKLIST(__list) _CHKLIST(__list, "list")
+
+#define CHKLS(__list) _CHKLIST(__list, "list/store")
+
+#define _CHKITEM(_item, _list, _name) do {\
+		if (!_item) { \
+			quithere(1, "%s() can't process a NULL %s " _name \
+					KLIST_FFL, \
+					__func__, _list->name, \
+					KLIST_FFL_PASS); \
+		} \
+	} while (0);
+
+#define CHKITEM(__item, __list) _CHKITEM(__item, __list, "item")
+
 static void k_alloc_items(K_LIST *list, KLIST_FFL_ARGS)
 {
 	K_ITEM *item;
 	int allocate, i;
+
+	CHKLIST(list);
 
 	if (list->is_store) {
 		quithere(1, "List %s store can't %s()" KLIST_FFL,
@@ -76,9 +101,11 @@ static void k_alloc_items(K_LIST *list, KLIST_FFL_ARGS)
 	}
 }
 
-K_STORE *k_new_store(K_LIST *list)
+K_STORE *_k_new_store(K_LIST *list, KLIST_FFL_ARGS)
 {
 	K_STORE *store;
+
+	CHKLIST(list);
 
 	store = calloc(1, sizeof(*store));
 	if (!store)
@@ -136,6 +163,8 @@ K_ITEM *_k_unlink_head(K_LIST *list, KLIST_FFL_ARGS)
 {
 	K_ITEM *item;
 
+	CHKLS(list);
+
 	if (!(list->head) && !(list->is_store))
 		k_alloc_items(list, KLIST_FFL_PASS);
 
@@ -163,6 +192,8 @@ K_ITEM *_k_unlink_head_zero(K_LIST *list, KLIST_FFL_ARGS)
 {
 	K_ITEM *item;
 
+	CHKLS(list);
+
 	item = _k_unlink_head(list, KLIST_FFL_PASS);
 
 	if (item)
@@ -175,6 +206,8 @@ K_ITEM *_k_unlink_head_zero(K_LIST *list, KLIST_FFL_ARGS)
 K_ITEM *_k_unlink_tail(K_LIST *list, KLIST_FFL_ARGS)
 {
 	K_ITEM *item;
+
+	CHKLS(list);
 
 	if (!(list->do_tail)) {
 		quithere(1, "List %s can't %s() - do_tail is false" KLIST_FFL,
@@ -200,6 +233,10 @@ K_ITEM *_k_unlink_tail(K_LIST *list, KLIST_FFL_ARGS)
 
 void _k_add_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 {
+	CHKLS(list);
+
+	CHKITEM(item, list);
+
 	if (item->name != list->name) {
 		quithere(1, "List %s can't %s() a %s item" KLIST_FFL,
 				list->name, __func__, item->name, KLIST_FFL_PASS);
@@ -229,6 +266,10 @@ void _k_add_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 /* slows it down (of course) - only for debugging
 void _k_free_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 {
+	CHKLS(list);
+
+	CHKITEM(item, list);
+
 	memset(item->data, 0xff, list->siz);
 	_k_add_head(list, item, KLIST_FFL_PASS);
 }
@@ -236,6 +277,10 @@ void _k_free_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 
 void _k_add_tail(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 {
+	CHKLS(list);
+
+	CHKITEM(item, list);
+
 	if (item->name != list->name) {
 		quithere(1, "List %s can't %s() a %s item" KLIST_FFL,
 				list->name, __func__, item->name, KLIST_FFL_PASS);
@@ -265,8 +310,51 @@ void _k_add_tail(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 	list->count_up++;
 }
 
+// Insert item into the list next after 'after'
+void _k_insert_after(K_LIST *list, K_ITEM *item, K_ITEM *after, KLIST_FFL_ARGS)
+{
+	CHKLS(list);
+
+	CHKITEM(item, list);
+
+	_CHKITEM(item, after, "after");
+
+	if (item->name != list->name) {
+		quithere(1, "List %s can't %s() a %s item" KLIST_FFL,
+				list->name, __func__, item->name, KLIST_FFL_PASS);
+	}
+
+	if (after->name != list->name) {
+		quithere(1, "List %s can't %s() a %s after" KLIST_FFL,
+				list->name, __func__, item->name, KLIST_FFL_PASS);
+	}
+
+	if (item->prev || item->next) {
+		quithere(1, "%s() added item %s still linked" KLIST_FFL,
+				__func__, item->name, KLIST_FFL_PASS);
+	}
+
+	item->prev = after;
+	item->next = after->next;
+	if (item->next)
+		item->next->prev = item;
+	after->next = item;
+
+	if (list->do_tail) {
+		if (list->tail == after)
+			list->tail = item;
+	}
+
+	list->count++;
+	list->count_up++;
+}
+
 void _k_unlink_item(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 {
+	CHKLS(list);
+
+	CHKITEM(item, list);
+
 	if (item->name != list->name) {
 		quithere(1, "List %s can't %s() a %s item" KLIST_FFL,
 				list->name, __func__, item->name, KLIST_FFL_PASS);
@@ -293,6 +381,10 @@ void _k_unlink_item(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 
 void _k_list_transfer_to_head(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS)
 {
+	_CHKLIST(from, "from list/store");
+
+	_CHKLIST(to, "to list/store");
+
 	if (from->name != to->name) {
 		quithere(1, "List %s can't %s() to a %s list" KLIST_FFL,
 				from->name, __func__, to->name, KLIST_FFL_PASS);
@@ -323,6 +415,10 @@ void _k_list_transfer_to_head(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS)
 
 void _k_list_transfer_to_tail(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS)
 {
+	_CHKLIST(from, "from list/store");
+
+	_CHKLIST(to, "to list/store");
+
 	if (from->name != to->name) {
 		quithere(1, "List %s can't %s() to a %s list" KLIST_FFL,
 				from->name, __func__, to->name, KLIST_FFL_PASS);
@@ -355,6 +451,8 @@ K_LIST *_k_free_list(K_LIST *list, KLIST_FFL_ARGS)
 {
 	int i;
 
+	CHKLIST(list);
+
 	if (list->is_store) {
 		quithere(1, "List %s can't %s() a store" KLIST_FFL,
 				list->name, __func__, KLIST_FFL_PASS);
@@ -379,6 +477,8 @@ K_LIST *_k_free_list(K_LIST *list, KLIST_FFL_ARGS)
 
 K_STORE *_k_free_store(K_STORE *store, KLIST_FFL_ARGS)
 {
+	_CHKLIST(store, "store");
+
 	if (!(store->is_store)) {
 		quithere(1, "Store %s can't %s() the list" KLIST_FFL,
 				store->name, __func__, KLIST_FFL_PASS);
@@ -393,6 +493,8 @@ K_STORE *_k_free_store(K_STORE *store, KLIST_FFL_ARGS)
 void _k_cull_list(K_LIST *list, KLIST_FFL_ARGS)
 {
 	int i;
+
+	CHKLIST(list);
 
 	if (list->is_store) {
 		quithere(1, "List %s can't %s() a store" KLIST_FFL,

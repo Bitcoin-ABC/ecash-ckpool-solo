@@ -55,7 +55,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.0"
-#define CKDB_VERSION DB_VERSION"-1.073"
+#define CKDB_VERSION DB_VERSION"-1.079"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -402,6 +402,7 @@ enum cmd_values {
 	CMD_USERSTATUS,
 	CMD_MARKS,
 	CMD_PSHIFT,
+	CMD_SHSTA,
 	CMD_END
 };
 
@@ -859,7 +860,23 @@ enum seq_num {
 // Ensure size is a (multiple of 8)-1
 #define SEQ_CODE 15
 
+#define SICHR(_sif) (((_sif) == SI_EARLYSOCK) ? 'E' : \
+			(((_sif) == SI_RELOAD) ? 'R' : \
+			(((_sif) == SI_SOCKET) ? 'S' : '?')))
+
+// Msg from the socket before startup completed - ignore if it was a DUP
+#define SI_EARLYSOCK 1
+// Msg was from reload
+#define SI_RELOAD 2
+// Msg from the socket after startup completed
+#define SI_SOCKET 4
+
+/* An SI_EARLYSOCK item vs an SI_RELOAD item is not considered a DUP
+ *  since the reload reads to the end of the reload file after
+ *  the match between the queue and the reload has been found */
+
 typedef struct seqitem {
+	int flags;
 	tv_t cd; // sec:0=missing, usec:0=miss !0=trans
 	tv_t time;
 	char code[SEQ_CODE+1];
@@ -1864,6 +1881,7 @@ extern void logmsg(int loglevel, const char *fmt, ...);
 extern void setnow(tv_t *now);
 extern void tick();
 extern PGconn *dbconnect();
+extern void sequence_report(bool lock);
 
 // ***
 // *** ckdb_data.c ***

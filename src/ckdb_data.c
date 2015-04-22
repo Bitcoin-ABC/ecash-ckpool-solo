@@ -2383,7 +2383,7 @@ void set_block_share_counters()
 {
 	K_TREE_CTX ctx[1], ctx_ms[1];
 	K_ITEM *ss_item, ss_look, *ws_item, *wm_item, *ms_item, ms_look;
-	WORKERSTATUS *workerstatus;
+	WORKERSTATUS *workerstatus = NULL;
 	SHARESUMMARY *sharesummary, looksharesummary;
 	WORKMARKERS *workmarkers;
 	MARKERSUMMARY *markersummary, lookmarkersummary;

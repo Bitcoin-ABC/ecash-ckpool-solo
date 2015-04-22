@@ -71,7 +71,8 @@ typedef struct k_list {
 // Upgrade I to W
 #define K_ULOCK(_list) ck_ulock(_list->lock)
 
-extern K_STORE *k_new_store(K_LIST *list);
+extern K_STORE *_k_new_store(K_LIST *list, KLIST_FFL_ARGS);
+#define k_new_store(_list) _k_new_store(_list, KLIST_FFL_HERE)
 extern K_LIST *_k_new_list(const char *name, size_t siz, int allocate, int limit, bool do_tail, KLIST_FFL_ARGS);
 #define k_new_list(_name, _siz, _allocate, _limit, _do_tail) _k_new_list(_name, _siz, _allocate, _limit, _do_tail, KLIST_FFL_HERE)
 extern K_ITEM *_k_unlink_head(K_LIST *list, KLIST_FFL_ARGS);
@@ -86,11 +87,13 @@ extern void _k_add_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS);
 #define k_free_head(__list, __item) _k_add_head(__list, __item, KLIST_FFL_HERE)
 extern void _k_add_tail(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS);
 #define k_add_tail(_list, _item) _k_add_tail(_list, _item, KLIST_FFL_HERE)
+extern void _k_insert_after(K_LIST *list, K_ITEM *item, K_ITEM *after, KLIST_FFL_ARGS);
+#define k_insert_after(_list, _item, _after) _k_insert_after(_list, _item, _after, KLIST_FFL_HERE)
 extern void _k_unlink_item(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS);
 #define k_unlink_item(_list, _item) _k_unlink_item(_list, _item, KLIST_FFL_HERE)
-void _k_list_transfer_to_head(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS);
+extern void _k_list_transfer_to_head(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS);
 #define k_list_transfer_to_head(_from, _to) _k_list_transfer_to_head(_from, _to, KLIST_FFL_HERE)
-void _k_list_transfer_to_tail(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS);
+extern void _k_list_transfer_to_tail(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS);
 #define k_list_transfer_to_tail(_from, _to) _k_list_transfer_to_tail(_from, _to, KLIST_FFL_HERE)
 extern K_LIST *_k_free_list(K_LIST *list, KLIST_FFL_ARGS);
 #define k_free_list(_list) _k_free_list(_list, KLIST_FFL_HERE)
