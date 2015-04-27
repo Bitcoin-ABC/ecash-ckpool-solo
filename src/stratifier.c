@@ -1425,7 +1425,7 @@ static stratum_instance_t *__recruit_stratum_instance(sdata_t *sdata)
 
 /* Enter with write instance_lock held */
 static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t id,
-						  const char *address, const int server)
+						  const char *address, int server)
 {
 	stratum_instance_t *client;
 	sdata_t *sdata = ckp->data;
@@ -1434,6 +1434,9 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t i
 	client->id = id;
 	client->session_id = ++sdata->session_id;
 	strcpy(client->address, address);
+	/* Sanity check to not overflow lookup in ckp->serverurl[] */
+	if (server >= ckp->serverurls)
+		server = 0;
 	client->server = server;
 	client->diff = client->old_diff = ckp->startdiff;
 	client->ckp = ckp;
@@ -1586,11 +1589,8 @@ static void reconnect_clients(sdata_t *sdata, const char *cmd)
 	if (port)
 		url = strsep(&port, ",");
 	if (url && port) {
-		int port_no;
-
-		port_no = strtol(port, NULL, 10);
-		JSON_CPACK(json_msg, "{sosss[sii]}", "id", json_null(), "method", "client.reconnect",
-			"params", url, port_no, 0);
+		JSON_CPACK(json_msg, "{sosss[ssi]}", "id", json_null(), "method", "client.reconnect",
+			"params", url, port, 0);
 	} else
 		JSON_CPACK(json_msg, "{sosss[]}", "id", json_null(), "method", "client.reconnect",
 		   "params");
@@ -2524,8 +2524,7 @@ static int send_recv_auth(stratum_instance_t *client)
 			json_get_string(&secondaryuserid, val, "secondaryuserid");
 			parse_worker_diffs(ckp, worker_array);
 			client->suggest_diff = worker->mindiff;
-			if (!user->auth_time)
-				user->auth_time = time(NULL);
+			user->auth_time = time(NULL);
 		}
 		if (secondaryuserid && (!safecmp(response, "ok.authorise") ||
 					!safecmp(response, "ok.addrauth"))) {
@@ -3602,14 +3601,14 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 	}
 
 	if (unlikely(cmdmatch(method, "mining.passthrough"))) {
-		LOGNOTICE("Adding passthrough client %"PRId64" %s", client_id, client->address);
 		/* We need to inform the connector process that this client
-		 * is a passthrough and to manage its messages accordingly.
-		 * The client_id stays on the list but we won't send anything
-		 * to it since it's unauthorised. Set the flag just in case. */
-		client->authorised = false;
+		 * is a passthrough and to manage its messages accordingly. No
+		 * data from this client id should ever come back to this
+		 * stratifier after this so drop the client in the stratifier. */
+		LOGNOTICE("Adding passthrough client %"PRId64" %s", client_id, client->address);
 		snprintf(buf, 255, "passthrough=%"PRId64, client_id);
 		send_proc(client->ckp->connector, buf);
+		drop_client(sdata, client_id);
 		return;
 	}
 
@@ -3636,12 +3635,8 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 
 	/* We should only accept authorised requests from here on */
 	if (!client->authorised) {
-		/* Dropping unauthorised clients here also allows the
-		 * stratifier process to restart since it will have lost all
-		 * the stratum instance data. Clients will just reconnect. */
-		LOGINFO("Dropping unauthorised client %"PRId64" %s", client_id, client->address);
-		snprintf(buf, 255, "dropclient=%"PRId64, client_id);
-		send_proc(client->ckp->connector, buf);
+		LOGINFO("Dropping %s from unauthorised client %"PRId64" %s", method,
+			client_id, client->address);
 		return;
 	}
 
@@ -3657,6 +3652,13 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 		ckmsgq_add(sdata->stxnq, jp);
 		return;
 	}
+
+	if (cmdmatch(method, "mining.term")) {
+		LOGDEBUG("Mining terminate requested from %"PRId64" %s", client_id, client->address);
+		drop_client(sdata, client_id);
+		return;
+	}
+
 	/* Unhandled message here */
 	LOGINFO("Unhandled client %"PRId64" %s method %s", client_id, client->address, method);
 	return;

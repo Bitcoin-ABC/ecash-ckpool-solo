@@ -29,11 +29,16 @@ struct client_instance {
 	/* For clients hashtable */
 	UT_hash_handle hh;
 	int64_t id;
+
+	/* fd cannot be changed while a ref is held */
 	int fd;
 
 	/* Reference count for when this instance is used outside of the
 	 * connector_data lock */
 	int ref;
+
+	/* Have we disabled this client to be removed when there are no refs? */
+	bool invalid;
 
 	/* For dead_clients list */
 	client_instance_t *next;
@@ -58,6 +63,7 @@ struct sender_send {
 	client_instance_t *client;
 	char *buf;
 	int len;
+	int ofs;
 };
 
 typedef struct sender_send sender_send_t;
@@ -93,7 +99,6 @@ struct connector_data {
 
 	/* For the linked list of pending sends */
 	sender_send_t *sender_sends;
-	sender_send_t *delayed_sends;
 
 	int64_t sends_generated;
 	int64_t sends_delayed;
@@ -229,7 +234,6 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	cdata->nfds++;
 	ck_wunlock(&cdata->lock);
 
-	client->fd = fd;
 	event.data.u64 = client->id;
 	event.events = EPOLLIN | EPOLLRDHUP;
 	if (unlikely(epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) < 0)) {
@@ -241,6 +245,7 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	 * to it. We drop that reference when the socket is closed which
 	 * removes it automatically from the epoll list. */
 	__inc_instance_ref(client);
+	client->fd = fd;
 
 	return 1;
 }
@@ -249,16 +254,14 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 static int drop_client(cdata_t *cdata, client_instance_t *client)
 {
 	int64_t client_id = 0;
-	int fd;
+	int fd = -1;
 
 	ck_wlock(&cdata->lock);
-	fd = client->fd;
-	if (fd != -1) {
+	if (!client->invalid) {
+		client->invalid = true;
 		client_id = client->id;
-
+		fd = client->fd;
 		epoll_ctl(cdata->epfd, EPOLL_CTL_DEL, fd, NULL);
-		nolinger_socket(fd);
-		Close(client->fd);
 		HASH_DEL(cdata->clients, client);
 		DL_APPEND(cdata->dead_clients, client);
 		/* This is the reference to this client's presence in the
@@ -274,12 +277,32 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 	return fd;
 }
 
-static void stratifier_drop_client(ckpool_t *ckp, int64_t id)
+/* For sending the drop command to the upstream pool in passthrough mode */
+static void generator_drop_client(ckpool_t *ckp, const client_instance_t *client)
+{
+	json_t *val;
+	char *s;
+
+	JSON_CPACK(val, "{si,sI:ss:si:ss:s[]}", "id", 42, "client_id", client->id, "address",
+		   client->address_name, "server", client->server, "method", "mining.term",
+		   "params");
+	s = json_dumps(val, 0);
+	json_decref(val);
+	send_proc(ckp->generator, s);
+	free(s);
+}
+
+static void stratifier_drop_id(ckpool_t *ckp, const int64_t id)
 {
 	char buf[256];
 
 	sprintf(buf, "dropclient=%"PRId64, id);
 	send_proc(ckp->stratifier, buf);
+}
+
+static void stratifier_drop_client(ckpool_t *ckp, const client_instance_t *client)
+{
+	stratifier_drop_id(ckp, client->id);
 }
 
 /* Invalidate this instance. Remove them from the hashtables we look up
@@ -292,9 +315,10 @@ static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *c
 	int ret;
 
 	ret = drop_client(cdata, client);
-	if (ckp->passthrough)
-		goto out;
-	stratifier_drop_client(ckp, client->id);
+	if (!ckp->passthrough && !client->passthrough)
+		stratifier_drop_client(ckp, client);
+	else if (ckp->passthrough)
+		generator_drop_client(ckp, client);
 
 	/* Cull old unused clients lazily when there are no more reference
 	 * counts for them. */
@@ -303,12 +327,16 @@ static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *c
 		if (!client->ref) {
 			DL_DELETE(cdata->dead_clients, client);
 			LOGINFO("Connector recycling client %"PRId64, client->id);
+			/* We only close the client fd once we're sure there
+			 * are no references to it left to prevent fds being
+			 * reused on new and old clients. */
+			nolinger_socket(client->fd);
+			Close(client->fd);
 			__recycle_client(cdata, client);
 		}
 	}
 	ck_wunlock(&cdata->lock);
 
-out:
 	return ret;
 }
 
@@ -323,21 +351,13 @@ static void parse_client_msg(cdata_t *cdata, client_instance_t *client)
 	json_t *val;
 
 retry:
-	ret = wait_read_select(client->fd, 0);
+	buflen = PAGESIZE - client->bufofs;
+	ret = recv(client->fd, client->buf + client->bufofs, buflen, MSG_DONTWAIT);
 	if (ret < 1) {
 		if (!ret)
 			return;
-		LOGINFO("Client fd %d disconnected - select fail with bufofs %d ret %d errno %d %s",
-			client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
-		invalidate_client(ckp, cdata, client);
-		return;
-	}
-	buflen = PAGESIZE - client->bufofs;
-	ret = recv(client->fd, client->buf + client->bufofs, buflen, 0);
-	if (ret < 1) {
-		/* We should have something to read if called since poll set
-		 * this fd's revents status so if there's nothing it means the
-		 * client has disconnected. */
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return;
 		LOGINFO("Client fd %d disconnected - recv fail with bufofs %d ret %d errno %d %s",
 			client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
 		invalidate_client(ckp, cdata, client);
@@ -383,16 +403,17 @@ reparse:
 			json_object_del(val, "client_id");
 			passthrough_id = (client->id << 32) | passthrough_id;
 			json_object_set_new_nocheck(val, "client_id", json_integer(passthrough_id));
-		} else
+		} else {
 			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
-		json_object_set_new_nocheck(val, "address", json_string(client->address_name));
+			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
+		}
 		json_object_set_new_nocheck(val, "server", json_integer(client->server));
 		s = json_dumps(val, 0);
 
 		/* Do not send messages of clients we've already dropped. We
 		 * do this unlocked as the occasional false negative can be
 		 * filtered by the stratifier. */
-		if (likely(client->fd != -1)) {
+		if (likely(!client->invalid)) {
 			if (ckp->passthrough)
 				send_proc(ckp->generator, s);
 			else
@@ -414,8 +435,12 @@ static client_instance_t *ref_client_by_id(cdata_t *cdata, int64_t id)
 
 	ck_wlock(&cdata->lock);
 	HASH_FIND_I64(cdata->clients, &id, client);
-	if (client)
-		__inc_instance_ref(client);
+	if (client) {
+		if (!client->invalid)
+			__inc_instance_ref(client);
+		else
+			client = NULL;
+	}
 	ck_wunlock(&cdata->lock);
 
 	return client;
@@ -437,7 +462,7 @@ void *receiver(void *arg)
 	epfd = cdata->epfd = epoll_create1(EPOLL_CLOEXEC);
 	if (epfd < 0) {
 		LOGEMERG("FATAL: Failed to create epoll in receiver");
-		return NULL;
+		goto out;
 	}
 	serverfds = cdata->ckp->serverurls;
 	/* Add all the serverfds to the epoll */
@@ -448,7 +473,7 @@ void *receiver(void *arg)
 		ret = epoll_ctl(epfd, EPOLL_CTL_ADD, cdata->serverfd[i], &event);
 		if (ret < 0) {
 			LOGEMERG("FATAL: Failed to add epfd %d to epoll_ctl", epfd);
-			return NULL;
+			goto out;
 		}
 	}
 
@@ -490,41 +515,109 @@ void *receiver(void *arg)
 		}
 		client = ref_client_by_id(cdata, event.data.u64);
 		if (unlikely(!client)) {
-			LOGWARNING("Failed to find client by id in receiver!");
+			LOGNOTICE("Failed to find client by id %"PRId64" in receiver!", event.data.u64);
 			continue;
 		}
-		if (event.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-			/* Client disconnected */
-			LOGDEBUG("Client fd %d HUP in epoll", client->fd);
-			invalidate_client(cdata->pi->ckp, cdata, client);
-		} else
+		if (unlikely(client->invalid))
+			goto noparse;
+		/* We can have both messages and read hang ups so process the
+		 * message first. */
+		if (likely(event.events & EPOLLIN))
 			parse_client_msg(cdata, client);
+		if (unlikely(client->invalid))
+			goto noparse;
+		if (unlikely(event.events & EPOLLERR)) {
+			socklen_t errlen = sizeof(int);
+			int error = 0;
+
+			/* See what type of error this is and raise the log
+			 * level of the message if it's unexpected. */
+			getsockopt(client->fd, SOL_SOCKET, SO_ERROR, (void *)&error, &errlen);
+			if (error != 104) {
+				LOGNOTICE("Client id %"PRId64" fd %d epollerr HUP in epoll with errno %d: %s",
+					  client->id, client->fd, error, strerror(error));
+			} else {
+				LOGINFO("Client id %"PRId64" fd %d epollerr HUP in epoll with errno %d: %s",
+					client->id, client->fd, error, strerror(error));
+			}
+			invalidate_client(cdata->pi->ckp, cdata, client);
+		} else if (unlikely(event.events & EPOLLHUP)) {
+			/* Client connection reset by peer */
+			LOGINFO("Client id %"PRId64" fd %d HUP in epoll", client->id, client->fd);
+			invalidate_client(cdata->pi->ckp, cdata, client);
+		} else if (unlikely(event.events & EPOLLRDHUP)) {
+			/* Client disconnected by peer */
+			LOGINFO("Client id %"PRId64" fd %d RDHUP in epoll", client->id, client->fd);
+			invalidate_client(cdata->pi->ckp, cdata, client);
+		}
+noparse:
 		dec_instance_ref(cdata, client);
 	}
+out:
+	/* We shouldn't get here unless there's an error */
+	childsighandler(15);
 	return NULL;
+}
+
+/* Send a sender_send message and return true if we've finished sending it or
+ * are unable to send any more. */
+static bool send_sender_send(ckpool_t *ckp, cdata_t *cdata, sender_send_t *sender_send)
+{
+	client_instance_t *client = sender_send->client;
+
+	if (unlikely(client->invalid))
+		return true;
+
+	while (sender_send->len) {
+		int ret = send(client->fd, sender_send->buf + sender_send->ofs, sender_send->len , MSG_DONTWAIT);
+
+		if (unlikely(ret < 1)) {
+			if (!ret)
+				return false;
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				return false;
+			LOGINFO("Client id %"PRId64" fd %d disconnected", client->id, client->fd);
+			invalidate_client(ckp, cdata, client);
+			return true;
+		}
+		sender_send->ofs += ret;
+		sender_send->len -= ret;
+	}
+	return true;
+}
+
+static void clear_sender_send(sender_send_t *sender_send, cdata_t *cdata)
+{
+	dec_instance_ref(cdata, sender_send->client);
+	free(sender_send->buf);
+	free(sender_send);
 }
 
 /* Use a thread to send queued messages, using select() to only send to sockets
  * ready for writing immediately to not delay other messages. */
-void *sender(void *arg)
+static void *sender(void *arg)
 {
 	cdata_t *cdata = (cdata_t *)arg;
+	sender_send_t *sends = NULL;
 	ckpool_t *ckp = cdata->ckp;
-	bool sent = false;
 
 	rename_proc("csender");
 
 	while (42) {
-		sender_send_t *sender_send, *delayed;
-		client_instance_t *client;
-		int ret = 0, fd, ofs = 0;
+		sender_send_t *sender_send, *sending, *tmp;
+
+		/* Check all sends to see if they can be written out */
+		DL_FOREACH_SAFE(sends, sending, tmp) {
+			if (send_sender_send(ckp, cdata, sending)) {
+				DL_DELETE(sends, sending);
+				clear_sender_send(sending, cdata);
+			} else
+				cdata->sends_delayed++;
+		}
 
 		mutex_lock(&cdata->sender_lock);
-		/* Poll every 10ms if there are no new sends. Re-examine
-		 * delayed sends immediately after a successful send in case
-		 * endless new sends more frequently end up starving the
-		 * delayed sends. */
-		if (!cdata->sender_sends && !sent) {
+		/* Poll every 10ms if there are no new sends. */
+		if (!cdata->sender_sends) {
 			const ts_t polltime = {0, 10000000};
 			ts_t timeout_ts;
 
@@ -537,71 +630,11 @@ void *sender(void *arg)
 			DL_DELETE(cdata->sender_sends, sender_send);
 		mutex_unlock(&cdata->sender_lock);
 
-		sent = false;
-
-		/* Service delayed sends only if we have timed out on the
-		 * conditional with no new sends appearing or have just
-		 * serviced another message successfully. */
-		if (!sender_send) {
-			/* Find a delayed client that needs servicing and set
-			 * ret accordingly. We do not need to use FOREACH_SAFE
-			 * as we break out of the loop as soon as we manipuate
-			 * the list. */
-			DL_FOREACH(cdata->delayed_sends, delayed) {
-				if ((ret = wait_write_select(delayed->client->fd, 0))) {
-					sender_send = cdata->delayed_sends;
-					DL_DELETE(cdata->delayed_sends, sender_send);
-					break;
-				}
-			}
-			/* None found ? */
-			if (!sender_send)
-				continue;
-		}
-		client = sender_send->client;
-
-		/* If this socket is not ready to receive data from us, put the
-		 * send back on the tail of the list and decrease the timeout
-		 * to poll to either look for a client that is ready or poll
-		 * select on this one */
-		ck_rlock(&cdata->lock);
-		fd = client->fd;
-		if (!ret)
-			ret = wait_write_select(fd, 0);
-		ck_runlock(&cdata->lock);
-
-		if (ret < 1) {
-			if (ret < 0) {
-				LOGINFO("Client id %"PRId64" fd %d interrupted", client->id, fd);
-				invalidate_client(ckp, cdata, client);
-				goto contfree;
-			}
-			LOGDEBUG("Client %"PRId64" not ready for writes", client->id);
-
-			/* Append it to the tail of the delayed sends list.
-			 * This is the only function that alters it so no
-			 * locking is required. Keep the client ref. */
-			DL_APPEND(cdata->delayed_sends, sender_send);
-			cdata->sends_delayed++;
-			continue;
-		}
-		while (sender_send->len) {
-			ret = send(fd, sender_send->buf + ofs, sender_send->len , 0);
-			if (unlikely(ret < 0)) {
-				LOGINFO("Client id %"PRId64" fd %d disconnected", client->id, fd);
-				invalidate_client(ckp, cdata, client);
-				break;
-			}
-			ofs += ret;
-			sender_send->len -= ret;
-		}
-contfree:
-		sent = true;
-		free(sender_send->buf);
-		free(sender_send);
-		dec_instance_ref(cdata, client);
+		if (sender_send)
+			DL_APPEND(sends, sender_send);
 	}
-
+	/* We shouldn't get here unless there's an error */
+	childsighandler(15);
 	return NULL;
 }
 
@@ -611,7 +644,7 @@ static void send_client(cdata_t *cdata, int64_t id, char *buf)
 {
 	sender_send_t *sender_send;
 	client_instance_t *client;
-	int fd = -1, len;
+	int len;
 
 	if (unlikely(!buf)) {
 		LOGWARNING("Connector send_client sent a null buffer");
@@ -624,26 +657,14 @@ static void send_client(cdata_t *cdata, int64_t id, char *buf)
 		return;
 	}
 
-	ck_wlock(&cdata->lock);
-	HASH_FIND_I64(cdata->clients, &id, client);
-	if (likely(client)) {
-		fd = client->fd;
-		/* Grab a reference to this client until the sender_send has
-		 * completed processing. */
-		__inc_instance_ref(client);
-	}
-	ck_wunlock(&cdata->lock);
-
-	if (unlikely(fd == -1)) {
+	/* Grab a reference to this client until the sender_send has
+	 * completed processing. */
+	client = ref_client_by_id(cdata, id);
+	if (unlikely(!client)) {
 		ckpool_t *ckp = cdata->ckp;
 
-		if (client) {
-			/* This shouldn't happen */
-			LOGWARNING("Client id %"PRId64" disconnected but fd already invalidated!", id);
-			invalidate_client(ckp, cdata, client);
-		} else {
-			LOGINFO("Connector failed to find client id %"PRId64" to send to", id);
-		}
+		LOGINFO("Connector failed to find client id %"PRId64" to send to", id);
+		stratifier_drop_id(ckp, id);
 		free(buf);
 		return;
 	}
@@ -742,15 +763,8 @@ static char *connector_stats(cdata_t *cdata)
 	objects = 0;
 	memsize = 0;
 
-	mutex_lock(&cdata->sender_lock);
 	generated = cdata->sends_delayed;
-	DL_FOREACH(cdata->delayed_sends, send) {
-		objects++;
-		memsize += sizeof(sender_send_t) + send->len + 1;
-	}
-	mutex_unlock(&cdata->sender_lock);
-
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+	JSON_CPACK(subval, "{si}", "generated", generated);
 	json_set_object(val, "delays", subval);
 
 	buf = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
@@ -761,10 +775,9 @@ static char *connector_stats(cdata_t *cdata)
 
 static int connector_loop(proc_instance_t *pi, cdata_t *cdata)
 {
-	int64_t client_id64, client_id;
 	unix_msg_t *umsg = NULL;
 	ckpool_t *ckp = pi->ckp;
-	uint8_t test_cycle = 0;
+	int64_t client_id;
 	char *buf;
 	int ret = 0;
 
@@ -775,20 +788,6 @@ retry:
 		Close(umsg->sockd);
 		free(umsg->buf);
 		dealloc(umsg);
-	}
-
-	if (!++test_cycle) {
-		/* Test for pthread join every 256 messages */
-		if (unlikely(!pthread_tryjoin_np(cdata->pth_sender, NULL))) {
-			LOGEMERG("Connector sender thread shutdown, exiting");
-			ret = 1;
-			goto out;
-		}
-		if (unlikely(!pthread_tryjoin_np(cdata->pth_receiver, NULL))) {
-			LOGEMERG("Connector receiver thread shutdown, exiting");
-			ret = 1;
-			goto out;
-		}
 	}
 
 	do {
@@ -804,12 +803,14 @@ retry:
 	} else if (cmdmatch(buf, "dropclient")) {
 		client_instance_t *client;
 
-		ret = sscanf(buf, "dropclient=%"PRId64, &client_id64);
+		ret = sscanf(buf, "dropclient=%"PRId64, &client_id);
 		if (ret < 0) {
 			LOGDEBUG("Connector failed to parse dropclient command: %s", buf);
 			goto retry;
 		}
-		client_id = client_id64 & 0xffffffffll;
+		/* A passthrough client, we can't drop this yet */
+		if (client_id > 0xffffffffll)
+			goto retry;
 		client = ref_client_by_id(cdata, client_id);
 		if (unlikely(!client)) {
 			LOGINFO("Connector failed to find client id %"PRId64" to drop", client_id);

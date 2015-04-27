@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2015 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -54,15 +54,20 @@ void mkstamp(char *stamp, size_t siz)
 
 int main(int argc, char **argv)
 {
-	char *name = NULL, *socket_dir = NULL, *buf = NULL;
+	char *name = NULL, *socket_dir = NULL, *buf = NULL, *sockname = "listener";
 	int tmo1 = RECV_UNIX_TIMEOUT1;
 	int tmo2 = RECV_UNIX_TIMEOUT2;
 	bool proxy = false;
 	char stamp[128];
 	int c;
 
-	while ((c = getopt(argc, argv, "n:s:pt:T:")) != -1) {
+	while ((c = getopt(argc, argv, "N:n:s:pt:T:")) != -1) {
 		switch(c) {
+			/* Allows us to specify which process or socket to
+			 * talk to. */
+			case 'N':
+				sockname = strdup(optarg);
+				break;
 			case 'n':
 				name = strdup(optarg);
 				break;
@@ -92,7 +97,7 @@ int main(int argc, char **argv)
 	realloc_strcat(&socket_dir, name);
 	dealloc(name);
 	trail_slash(&socket_dir);
-	realloc_strcat(&socket_dir, "listener");
+	realloc_strcat(&socket_dir, sockname);
 
 	while (42) {
 		int sockd, len;

@@ -202,8 +202,6 @@ bool ckmsgq_empty(ckmsgq_t *ckmsgq)
 	return ret;
 }
 
-static void childsighandler(const int sig);
-
 /* Create a standalone thread that queues received unix messages for a proc
  * instance and adds them to linked list of received messages with their
  * associated receive socket, then signal the associated rmsg_cond for the
@@ -808,7 +806,7 @@ static void terminate_oldpid(const ckpool_t *ckp, proc_instance_t *pi, const pid
 		return;
 	LOGWARNING("Old process %s pid %d failed to respond to terminate request, killing",
 			pi->processname, oldpid);
-	if (kill_pid(oldpid, 9) || !pid_wait(oldpid, 500))
+	if (kill_pid(oldpid, 9) || !pid_wait(oldpid, 3000))
 		quit(1, "Unable to kill old process %s pid %d", pi->processname, oldpid);
 }
 
@@ -879,7 +877,7 @@ static void rm_namepid(const proc_instance_t *pi)
 
 /* Disable signal handlers for child processes, but simply pass them onto the
  * parent process to shut down cleanly. */
-static void childsighandler(const int sig)
+void childsighandler(const int sig)
 {
 	signal(sig, SIG_IGN);
 	signal(SIGTERM, SIG_IGN);

@@ -893,13 +893,13 @@ int wait_close(int sockd, int timeout)
 	if (unlikely(sockd < 0))
 		return -1;
 	sfd.fd = sockd;
-	sfd.events = POLLIN;
+	sfd.events = POLLRDHUP;
 	sfd.revents = 0;
 	timeout *= 1000;
 	ret = poll(&sfd, 1, timeout);
 	if (ret < 1)
 		return 0;
-	return sfd.revents & POLLHUP;
+	return sfd.revents & (POLLHUP | POLLRDHUP | POLLERR);
 }
 
 /* Emulate a select read wait for high fds that select doesn't support */
@@ -911,7 +911,7 @@ int wait_read_select(int sockd, int timeout)
 	if (unlikely(sockd < 0))
 		goto out;
 	sfd.fd = sockd;
-	sfd.events = POLLIN;
+	sfd.events = POLLIN | POLLRDHUP;
 	sfd.revents = 0;
 	timeout *= 1000;
 	ret = poll(&sfd, 1, timeout);
@@ -993,7 +993,7 @@ int wait_write_select(int sockd, int timeout)
 	if (unlikely(sockd < 0))
 		goto out;
 	sfd.fd = sockd;
-	sfd.events = POLLOUT;
+	sfd.events = POLLOUT | POLLRDHUP;
 	sfd.revents = 0;
 	timeout *= 1000;
 	ret = poll(&sfd, 1, timeout);
