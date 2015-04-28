@@ -74,6 +74,8 @@ struct connector_data {
 	cklock_t lock;
 	proc_instance_t *pi;
 
+	time_t start_time;
+
 	/* Array of server fds */
 	int *serverfd;
 	/* All time count of clients connected */
@@ -102,6 +104,8 @@ struct connector_data {
 
 	int64_t sends_generated;
 	int64_t sends_delayed;
+	int64_t sends_queued;
+	int64_t sends_size;
 
 	/* For protecting the pending sends list */
 	mutex_t sender_lock;
@@ -224,6 +228,7 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	}
 
 	keep_sockalive(fd);
+	noblock_socket(fd);
 
 	LOGINFO("Connected new client %d on socket %d to %d active clients from %s:%d",
 		cdata->nfds, fd, no_clients, client->address_name, port);
@@ -351,34 +356,33 @@ static void parse_client_msg(cdata_t *cdata, client_instance_t *client)
 	json_t *val;
 
 retry:
+	if (unlikely(client->bufofs > MAX_MSGSIZE)) {
+		LOGNOTICE("Client id %"PRId64" fd %d overloaded buffer without EOL, disconnecting",
+			  client->id, client->fd);
+		invalidate_client(ckp, cdata, client);
+		return;
+	}
 	buflen = PAGESIZE - client->bufofs;
-	ret = recv(client->fd, client->buf + client->bufofs, buflen, MSG_DONTWAIT);
+	/* This read call is non-blocking since the socket is set to O_NOBLOCK */
+	ret = read(client->fd, client->buf + client->bufofs, buflen);
 	if (ret < 1) {
-		if (!ret)
+		if (likely(errno == EAGAIN || errno == EWOULDBLOCK || !ret))
 			return;
-		if (errno == EAGAIN || errno == EWOULDBLOCK)
-			return;
-		LOGINFO("Client fd %d disconnected - recv fail with bufofs %d ret %d errno %d %s",
-			client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
+		LOGINFO("Client id %"PRId64" fd %d disconnected - recv fail with bufofs %d ret %d errno %d %s",
+			client->id, client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
 		invalidate_client(ckp, cdata, client);
 		return;
 	}
 	client->bufofs += ret;
 reparse:
 	eol = memchr(client->buf, '\n', client->bufofs);
-	if (!eol) {
-		if (unlikely(client->bufofs > MAX_MSGSIZE)) {
-			LOGWARNING("Client fd %d overloaded buffer without EOL, disconnecting", client->fd);
-			invalidate_client(ckp, cdata, client);
-			return;
-		}
+	if (!eol)
 		goto retry;
-	}
 
 	/* Do something useful with this message now */
 	buflen = eol - client->buf + 1;
 	if (unlikely(buflen > MAX_MSGSIZE)) {
-		LOGWARNING("Client fd %d message oversize, disconnecting", client->fd);
+		LOGNOTICE("Client id %"PRId64" fd %d message oversize, disconnecting", client->id, client->fd);
 		invalidate_client(ckp, cdata, client);
 		return;
 	}
@@ -451,10 +455,8 @@ static client_instance_t *ref_client_by_id(cdata_t *cdata, int64_t id)
 void *receiver(void *arg)
 {
 	cdata_t *cdata = (cdata_t *)arg;
-	bool dropped_backlog = false;
 	struct epoll_event event;
 	uint64_t serverfds, i;
-	time_t start_t;
 	int ret, epfd;
 
 	rename_proc("creceiver");
@@ -479,21 +481,10 @@ void *receiver(void *arg)
 
 	while (!cdata->accept)
 		cksleep_ms(1);
-	start_t = time(NULL);
 
 	while (42) {
 		client_instance_t *client;
 
-		if (unlikely(!dropped_backlog && time(NULL) - start_t > 90)) {
-			/* When we first start we listen to as many connections
-			 * as possible. After the first minute we drop the
-			 * listen to the minimum to effectively ratelimit how
-			 * fast we can receive new connections. */
-			dropped_backlog = true;
-			LOGNOTICE("Dropping server listen backlog to 0");
-			for (i = 0; i < serverfds; i++)
-				listen(cdata->serverfd[i], 0);
-		}
 		while (unlikely(!cdata->accept))
 			cksleep_ms(10);
 		ret = epoll_wait(epfd, &event, 1, 1000);
@@ -569,14 +560,13 @@ static bool send_sender_send(ckpool_t *ckp, cdata_t *cdata, sender_send_t *sende
 		return true;
 
 	while (sender_send->len) {
-		int ret = send(client->fd, sender_send->buf + sender_send->ofs, sender_send->len , MSG_DONTWAIT);
+		int ret = write(client->fd, sender_send->buf + sender_send->ofs, sender_send->len);
 
 		if (unlikely(ret < 1)) {
-			if (!ret)
+			if (errno == EAGAIN || errno == EWOULDBLOCK || !ret)
 				return false;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				return false;
-			LOGINFO("Client id %"PRId64" fd %d disconnected", client->id, client->fd);
+			LOGINFO("Client id %"PRId64" fd %d disconnected with write errno %d:%s",
+				client->id, client->fd, errno, strerror(errno));
 			invalidate_client(ckp, cdata, client);
 			return true;
 		}
@@ -593,8 +583,9 @@ static void clear_sender_send(sender_send_t *sender_send, cdata_t *cdata)
 	free(sender_send);
 }
 
-/* Use a thread to send queued messages, using select() to only send to sockets
- * ready for writing immediately to not delay other messages. */
+/* Use a thread to send queued messages, appending them to the sends list and
+ * iterating over all of them, attempting to send them all non-blocking to
+ * only send to those clients ready to receive data. */
 static void *sender(void *arg)
 {
 	cdata_t *cdata = (cdata_t *)arg;
@@ -604,18 +595,24 @@ static void *sender(void *arg)
 	rename_proc("csender");
 
 	while (42) {
-		sender_send_t *sender_send, *sending, *tmp;
+		int64_t sends_queued = 0, sends_size = 0;
+		sender_send_t *sending, *tmp;
 
 		/* Check all sends to see if they can be written out */
 		DL_FOREACH_SAFE(sends, sending, tmp) {
 			if (send_sender_send(ckp, cdata, sending)) {
 				DL_DELETE(sends, sending);
 				clear_sender_send(sending, cdata);
-			} else
-				cdata->sends_delayed++;
+			} else {
+				sends_queued++;
+				sends_size += sizeof(sender_send_t) + sending->len + 1;
+			}
 		}
 
 		mutex_lock(&cdata->sender_lock);
+		cdata->sends_delayed += sends_queued;
+		cdata->sends_queued = sends_queued;
+		cdata->sends_size = sends_size;
 		/* Poll every 10ms if there are no new sends. */
 		if (!cdata->sender_sends) {
 			const ts_t polltime = {0, 10000000};
@@ -625,13 +622,11 @@ static void *sender(void *arg)
 			timeraddspec(&timeout_ts, &polltime);
 			cond_timedwait(&cdata->sender_cond, &cdata->sender_lock, &timeout_ts);
 		}
-		sender_send = cdata->sender_sends;
-		if (sender_send)
-			DL_DELETE(cdata->sender_sends, sender_send);
+		if (cdata->sender_sends) {
+			DL_CONCAT(sends, cdata->sender_sends);
+			cdata->sender_sends = NULL;
+		}
 		mutex_unlock(&cdata->sender_lock);
-
-		if (sender_send)
-			DL_APPEND(sends, sender_send);
 	}
 	/* We shouldn't get here unless there's an error */
 	childsighandler(15);
@@ -640,8 +635,9 @@ static void *sender(void *arg)
 
 /* Send a client by id a heap allocated buffer, allowing this function to
  * free the ram. */
-static void send_client(cdata_t *cdata, int64_t id, char *buf)
+static void send_client(cdata_t *cdata, const int64_t id, char *buf)
 {
+	ckpool_t *ckp = cdata->ckp;
 	sender_send_t *sender_send;
 	client_instance_t *client;
 	int len;
@@ -658,15 +654,35 @@ static void send_client(cdata_t *cdata, int64_t id, char *buf)
 	}
 
 	/* Grab a reference to this client until the sender_send has
-	 * completed processing. */
-	client = ref_client_by_id(cdata, id);
-	if (unlikely(!client)) {
-		ckpool_t *ckp = cdata->ckp;
+	 * completed processing. Is this a passthrough subclient ? */
+	if (id > 0xffffffffll) {
+		int64_t client_id, pass_id;
 
-		LOGINFO("Connector failed to find client id %"PRId64" to send to", id);
-		stratifier_drop_id(ckp, id);
-		free(buf);
-		return;
+		client_id = id & 0xffffffffll;
+		pass_id = id >> 32;
+		/* Make sure the passthrough exists for passthrough subclients */
+		client = ref_client_by_id(cdata, pass_id);
+		if (unlikely(!client)) {
+			LOGINFO("Connector failed to find passthrough id %"PRId64" of client id %"PRId64" to send to",
+				pass_id, client_id);
+			/* Now see if the subclient exists */
+			client = ref_client_by_id(cdata, client_id);
+			if (client) {
+				invalidate_client(ckp, cdata, client);
+				dec_instance_ref(cdata, client);
+			} else
+				stratifier_drop_id(ckp, id);
+			free(buf);
+			return;
+		}
+	} else {
+		client = ref_client_by_id(cdata, id);
+		if (unlikely(!client)) {
+			LOGINFO("Connector failed to find client id %"PRId64" to send to", id);
+			stratifier_drop_id(ckp, id);
+			free(buf);
+			return;
+		}
 	}
 
 	sender_send = ckzalloc(sizeof(sender_send_t));
@@ -693,7 +709,7 @@ static void passthrough_client(cdata_t *cdata, client_instance_t *client)
 
 static void process_client_msg(cdata_t *cdata, const char *buf)
 {
-	int64_t client_id64, client_id;
+	int64_t client_id;
 	json_t *json_msg;
 	char *msg;
 
@@ -704,22 +720,18 @@ static void process_client_msg(cdata_t *cdata, const char *buf)
 	}
 
 	/* Extract the client id from the json message and remove its entry */
-	client_id64 = json_integer_value(json_object_get(json_msg, "client_id"));
+	client_id = json_integer_value(json_object_get(json_msg, "client_id"));
 	json_object_del(json_msg, "client_id");
-	if (client_id64 > 0xffffffffll) {
-		int64_t passthrough_id;
-
-		passthrough_id = client_id64 & 0xffffffffll;
-		client_id = client_id64 >> 32;
-		json_object_set_new_nocheck(json_msg, "client_id", json_integer(passthrough_id));
-	} else
-		client_id = client_id64;
+	/* Put client_id back in for a passthrough subclient, passing its
+	 * upstream client_id instead of the passthrough's. */
+	if (client_id > 0xffffffffll)
+		json_object_set_new_nocheck(json_msg, "client_id", json_integer(client_id & 0xffffffffll));
 	msg = json_dumps(json_msg, JSON_EOL);
 	send_client(cdata, client_id, msg);
 	json_decref(json_msg);
 }
 
-static char *connector_stats(cdata_t *cdata)
+static char *connector_stats(cdata_t *cdata, const int runtime)
 {
 	json_t *val = json_object(), *subval;
 	client_instance_t *client;
@@ -727,6 +739,10 @@ static char *connector_stats(cdata_t *cdata)
 	sender_send_t *send;
 	int64_t memsize;
 	char *buf;
+
+	/* If called in passthrough mode we log stats instead of the stratifier */
+	if (runtime)
+		json_set_int(val, "runtime", runtime);
 
 	ck_rlock(&cdata->lock);
 	objects = HASH_COUNT(cdata->clients);
@@ -750,26 +766,24 @@ static char *connector_stats(cdata_t *cdata)
 	memsize = 0;
 
 	mutex_lock(&cdata->sender_lock);
-	generated = cdata->sends_generated;
 	DL_FOREACH(cdata->sender_sends, send) {
 		objects++;
 		memsize += sizeof(sender_send_t) + send->len + 1;
 	}
-	mutex_unlock(&cdata->sender_lock);
-
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", cdata->sends_generated);
 	json_set_object(val, "sends", subval);
 
-	objects = 0;
-	memsize = 0;
+	JSON_CPACK(subval, "{si,si,si}", "count", cdata->sends_queued, "memory", cdata->sends_size, "generated", cdata->sends_delayed);
+	mutex_unlock(&cdata->sender_lock);
 
-	generated = cdata->sends_delayed;
-	JSON_CPACK(subval, "{si}", "generated", generated);
 	json_set_object(val, "delays", subval);
 
 	buf = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 	json_decref(val);
-	LOGNOTICE("Connector stats: %s", buf);
+	if (runtime)
+		LOGNOTICE("Passthrough:%s", buf);
+	else
+		LOGNOTICE("Connector stats: %s", buf);
 	return buf;
 }
 
@@ -777,13 +791,26 @@ static int connector_loop(proc_instance_t *pi, cdata_t *cdata)
 {
 	unix_msg_t *umsg = NULL;
 	ckpool_t *ckp = pi->ckp;
+	time_t last_stats;
 	int64_t client_id;
-	char *buf;
 	int ret = 0;
+	char *buf;
 
 	LOGWARNING("%s connector ready", ckp->name);
+	last_stats = cdata->start_time;
 
 retry:
+	if (ckp->passthrough) {
+		time_t diff = time(NULL);
+
+		if (diff - last_stats >= 60) {
+			last_stats = diff;
+			diff -= cdata->start_time;
+			buf = connector_stats(cdata, diff);
+			dealloc(buf);
+		}
+	}
+
 	if (umsg) {
 		Close(umsg->sockd);
 		free(umsg->buf);
@@ -833,7 +860,7 @@ retry:
 		char *msg;
 
 		LOGDEBUG("Connector received stats request");
-		msg = connector_stats(cdata);
+		msg = connector_stats(cdata, 0);
 		send_unix_msg(umsg->sockd, msg);
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
@@ -912,7 +939,9 @@ int connector(proc_instance_t *pi)
 			Close(sockd);
 			goto out;
 		}
-		if (listen(sockd, SOMAXCONN) < 0) {
+		/* Set listen backlog to larger than SOMAXCONN in case the
+		 * system configuration supports it */
+		if (listen(sockd, 8192) < 0) {
 			LOGERR("Connector failed to listen on socket");
 			Close(sockd);
 			goto out;
@@ -954,7 +983,7 @@ int connector(proc_instance_t *pi)
 				ret = 1;
 				goto out;
 			}
-			if (listen(sockd, SOMAXCONN) < 0) {
+			if (listen(sockd, 8192) < 0) {
 				LOGERR("Connector failed to listen on socket");
 				Close(sockd);
 				goto out;
@@ -976,6 +1005,7 @@ int connector(proc_instance_t *pi)
 	cond_init(&cdata->sender_cond);
 	create_pthread(&cdata->pth_sender, sender, cdata);
 	create_pthread(&cdata->pth_receiver, receiver, cdata);
+	cdata->start_time = time(NULL);
 
 	create_unix_receiver(pi);
 
