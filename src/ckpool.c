@@ -495,11 +495,13 @@ void empty_buffer(connsock_t *cs)
 /* Read from a socket into cs->buf till we get an '\n', converting it to '\0'
  * and storing how much extra data we've received, to be moved to the beginning
  * of the buffer for use on the next receive. */
-int read_socket_line(connsock_t *cs, const int timeout)
+int read_socket_line(connsock_t *cs, float timeout)
 {
 	int fd = cs->fd, ret = -1;
 	char *eom = NULL;
+	tv_t start, now;
 	size_t buflen;
+	float diff;
 
 	if (unlikely(fd < 0))
 		goto out;
@@ -515,28 +517,35 @@ int read_socket_line(connsock_t *cs, const int timeout)
 		eom = strchr(cs->buf, '\n');
 	}
 
+	tv_time(&start);
+rewait:
+	ret = wait_read_select(fd, eom ? 0 : timeout);
+	if (ret < 1) {
+		if (!ret) {
+			if (eom)
+				goto parse;
+			LOGDEBUG("Select timed out in read_socket_line");
+		} else
+			LOGERR("Select failed in read_socket_line");
+		goto out;
+	}
+	tv_time(&now);
+	diff = tvdiff(&now, &start);
+	timeout -= diff;
 	while (42) {
 		char readbuf[PAGESIZE] = {};
 		int backoff = 1;
 		char *newbuf;
 
-		ret = wait_read_select(fd, eom ? 0 : timeout);
+		ret = recv(fd, readbuf, PAGESIZE - 4, MSG_DONTWAIT);
 		if (ret < 1) {
+			/* No more to read or closed socket after valid message */
 			if (eom)
 				break;
-			if (!ret)
-				LOGDEBUG("Select timed out in read_socket_line");
-			else
-				LOGERR("Select failed in read_socket_line");
-			goto out;
-		}
-		ret = recv(fd, readbuf, PAGESIZE - 4, 0);
-		if (ret < 1) {
-			/* Closed socket after valid message */
-			if (eom)
-				break;
+			/* Have we used up all the timeout yet? */
+			if (timeout > 0 && (errno == EAGAIN || errno == EWOULDBLOCK || !ret))
+				goto rewait;
 			LOGERR("Failed to recv in read_socket_line");
-			ret = -1;
 			goto out;
 		}
 		buflen = cs->bufofs + ret + 1;
@@ -557,6 +566,7 @@ int read_socket_line(connsock_t *cs, const int timeout)
 		cs->buf[cs->bufofs] = '\0';
 		eom = strchr(cs->buf, '\n');
 	}
+parse:
 	ret = eom - cs->buf;
 
 	cs->buflen = cs->buf + cs->bufofs - eom - 1;

@@ -490,7 +490,7 @@ int _open_unix_server(const char *server_path, const char *file, const char *fun
 int _open_unix_client(const char *server_path, const char *file, const char *func, const int line);
 #define open_unix_client(server_path) _open_unix_client(server_path, __FILE__, __func__, __LINE__)
 int wait_close(int sockd, int timeout);
-int wait_read_select(int sockd, int timeout);
+int wait_read_select(int sockd, float timeout);
 int read_length(int sockd, void *buf, int len);
 char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, const char *func, const int line);
 #define RECV_UNIX_TIMEOUT1 30
@@ -498,7 +498,7 @@ char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, co
 #define recv_unix_msg(sockd) _recv_unix_msg(sockd, RECV_UNIX_TIMEOUT1, RECV_UNIX_TIMEOUT2, __FILE__, __func__, __LINE__)
 #define recv_unix_msg_tmo(sockd, tmo) _recv_unix_msg(sockd, tmo, RECV_UNIX_TIMEOUT2, __FILE__, __func__, __LINE__)
 #define recv_unix_msg_tmo2(sockd, tmo1, tmo2) _recv_unix_msg(sockd, tmo1, tmo2, __FILE__, __func__, __LINE__)
-int wait_write_select(int sockd, int timeout);
+int wait_write_select(int sockd, float timeout);
 int write_length(int sockd, const void *buf, int len);
 bool _send_unix_msg(int sockd, const char *buf, const char *file, const char *func, const int line);
 #define send_unix_msg(sockd, buf) _send_unix_msg(sockd, buf, __FILE__, __func__, __LINE__)

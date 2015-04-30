@@ -11,6 +11,39 @@
 #include <math.h>
 
 // Data free functions (added here as needed)
+
+void free_msgline_data(K_ITEM *item, bool t_lock, bool t_cull)
+{
+	K_ITEM *t_item = NULL;
+	TRANSFER *transfer;
+	MSGLINE *msgline;
+
+	DATA_MSGLINE(msgline, item);
+	if (msgline->trf_root)
+		msgline->trf_root = free_ktree(msgline->trf_root, NULL);
+	if (msgline->trf_store) {
+		t_item = msgline->trf_store->head;
+		while (t_item) {
+			DATA_TRANSFER(transfer, t_item);
+			if (transfer->mvalue != transfer->svalue)
+				FREENULL(transfer->mvalue);
+			t_item = t_item->next;
+		}
+		if (t_lock)
+			K_WLOCK(transfer_free);
+		k_list_transfer_to_head(msgline->trf_store, transfer_free);
+		if (t_cull) {
+			if (transfer_free->count == transfer_free->total &&
+			    transfer_free->total >= ALLOC_TRANSFER * CULL_TRANSFER)
+				k_cull_list(transfer_free);
+		}
+		if (t_lock)
+			K_WUNLOCK(transfer_free);
+		msgline->trf_store = k_free_store(msgline->trf_store);
+	}
+	FREENULL(msgline->msg);
+}
+
 void free_workinfo_data(K_ITEM *item)
 {
 	WORKINFO *workinfo;
@@ -87,15 +120,27 @@ void free_marks_data(K_ITEM *item)
 		FREENULL(marks->extra);
 }
 
-void free_seqset_data(K_ITEM *item)
+void _free_seqset_data(K_ITEM *item, bool lock)
 {
+	K_STORE *reload_lost;
 	SEQSET *seqset;
 	int i;
 
 	DATA_SEQSET(seqset, item);
 	if (seqset->seqstt) {
-		for (i = 0; i < SEQ_MAX; i++)
-			FREENULL(seqset->seqdata[i].item);
+		for (i = 0; i < SEQ_MAX; i++) {
+			reload_lost = seqset->seqdata[i].reload_lost;
+			if (reload_lost) {
+				if (lock)
+					K_WLOCK(seqtrans_free);
+				k_list_transfer_to_head(reload_lost, seqtrans_free);
+				if (lock)
+					K_WUNLOCK(seqtrans_free);
+				k_free_store(reload_lost);
+				seqset->seqdata[i].reload_lost = NULL;
+			}
+			FREENULL(seqset->seqdata[i].entry);
+		}
 		seqset->seqstt = 0;
 	}
 }

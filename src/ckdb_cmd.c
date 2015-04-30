@@ -5194,6 +5194,7 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USEINFO(poolstats, 1, 1);
 	USEINFO(userstats, 2, 1);
 	USEINFO(workerstatus, 1, 1);
+	USEINFO(msgline, 1, 0);
 	USEINFO(workqueue, 1, 0);
 	USEINFO(transfer, 0, 0);
 	USEINFO(heartbeatqueue, 1, 0);
