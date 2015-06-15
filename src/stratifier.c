@@ -119,7 +119,8 @@ struct workbase {
 	char *coinb2; // coinbase2
 	uchar *coinb2bin;
 	int coinb2len; // length of above
-	int genoffset; // Offset into coinbase2 where the generation txn is
+	char *coinb3bin; // coinbase3 for variable coinb2len
+	int coinb3len; // length of above
 
 	/* Cached header binary */
 	char headerbin[112];
@@ -155,6 +156,7 @@ struct userwb {
 
 	uchar *coinb2bin; // Coinb2 cointaining this user's address for generation
 	char *coinb2;
+	int coinb2len; // Length of user coinb2
 };
 
 struct user_instance;
@@ -180,6 +182,7 @@ struct user_instance {
 
 	int workers;
 	char txnbin[25];
+	int txnlen;
 	struct userwb *userwbs; /* Protected by instance lock */
 
 	double best_diff; /* Best share found by this user */
@@ -341,7 +344,9 @@ static const char *ckdb_seq_names[] = {
 
 struct stratifier_data {
 	char pubkeytxnbin[25];
+	int pubkeytxnlen;
 	char donkeytxnbin[25];
+	int donkeytxnlen;
 
 	pool_stats_t stats;
 	/* Protects changes to pool stats */
@@ -554,26 +559,35 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 	*u64 = htole64(g64);
 	wb->coinb2len += 8;
 
-	wb->coinb2bin[wb->coinb2len++] = 25;
-	wb->genoffset = wb->coinb2len; // This is where the generation txn is
-	memcpy(wb->coinb2bin + wb->coinb2len, sdata->pubkeytxnbin, 25);
-	wb->coinb2len += 25;
+	/* Coinb2 address goes here, takes up 23~25 bytes + 1 byte for length */
 
+	wb->coinb3len = 0;
+	wb->coinb3bin = ckzalloc(256);
 	if (ckp->donvalid) {
-		u64 = (uint64_t *)&wb->coinb2bin[wb->coinb2len];
+		u64 = (uint64_t *)wb->coinb3bin;
 		*u64 = htole64(d64);
-		wb->coinb2len += 8;
+		wb->coinb3len += 8;
 
-		wb->coinb2bin[wb->coinb2len++] = 25;
-		memcpy(wb->coinb2bin + wb->coinb2len, sdata->donkeytxnbin, 25);
-		wb->coinb2len += 25;
+		wb->coinb3bin[wb->coinb3len++] = sdata->donkeytxnlen;
+		memcpy(wb->coinb3bin + wb->coinb3len, sdata->donkeytxnbin, sdata->donkeytxnlen);
+		wb->coinb3len += sdata->donkeytxnlen;
 	}
 
-	wb->coinb2len += 4; // Blank lock
+	wb->coinb3len += 4; // Blank lock
 
-	wb->coinb2 = bin2hex(wb->coinb2bin, wb->coinb2len);
-	LOGDEBUG("Coinb2: %s", wb->coinb2);
-	/* Coinbase 2 complete */
+	if (!ckp->btcsolo) {
+		/* Append the generation address and coinb3 in !solo mode */
+		wb->coinb2bin[wb->coinb2len++] = sdata->pubkeytxnlen;
+		memcpy(wb->coinb2bin + wb->coinb2len, sdata->pubkeytxnbin, sdata->pubkeytxnlen);
+		wb->coinb2len += sdata->pubkeytxnlen;
+		memcpy(wb->coinb2bin + wb->coinb2len, wb->coinb3bin, wb->coinb3len);
+		wb->coinb2len += wb->coinb3len;
+		wb->coinb3len = 0;
+		dealloc(wb->coinb3bin);
+		wb->coinb2 = bin2hex(wb->coinb2bin, wb->coinb2len);
+		LOGDEBUG("Coinb2: %s", wb->coinb2);
+	}
+	/* Coinbases 2 +/- 3 templates complete */
 
 	snprintf(header, 225, "%s%s%s%s%s%s%s",
 		 wb->bbversion, wb->prevhash,
@@ -619,6 +633,7 @@ static void clear_workbase(ckpool_t *ckp, workbase_t *wb)
 	free(wb->coinb1);
 	free(wb->coinb2bin);
 	free(wb->coinb2);
+	free(wb->coinb3bin);
 	json_decref(wb->merkle_array);
 	free(wb);
 }
@@ -783,6 +798,7 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 {
 	struct userwb *userwb;
 	int64_t id = wb->id;
+	int offset = 0;
 
 	/* Make sure this user doesn't have this userwb already */
 	HASH_FIND_I64(user->userwbs, &id, userwb);
@@ -792,10 +808,15 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 	sdata->userwbs_generated++;
 	userwb = ckzalloc(sizeof(struct userwb));
 	userwb->id = id;
-	userwb->coinb2bin = ckalloc(wb->coinb2len);
+	userwb->coinb2bin = ckalloc(wb->coinb2len + 1 + user->txnlen + wb->coinb3len);
 	memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
-	memcpy(userwb->coinb2bin + wb->genoffset, user->txnbin, 25);
-	userwb->coinb2 = bin2hex(userwb->coinb2bin, wb->coinb2len);
+	offset += wb->coinb2len;
+	userwb->coinb2bin[offset++] = user->txnlen;
+	memcpy(userwb->coinb2bin + offset, user->txnbin, user->txnlen);
+	offset += user->txnlen;
+	memcpy(userwb->coinb2bin + offset, wb->coinb3bin, wb->coinb3len);
+	offset += wb->coinb3len;
+	userwb->coinb2 = bin2hex(userwb->coinb2bin, offset);
 	HASH_ADD_I64(user->userwbs, id, userwb);
 }
 
@@ -2414,9 +2435,15 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	if (new_user && !ckp->proxy) {
 		/* Is this a btc address based username? */
 		if (len > 26 && len < 35) {
-			if (test_address(ckp, username) && !script_address(username)) {
+			if (test_address(ckp, username)) {
 				user->btcaddress = true;
-				address_to_pubkeytxn(user->txnbin, username);
+				if (script_address(username)) {
+					user->txnlen = 23;
+					address_to_scripttxn(user->txnbin, username);
+				} else {
+					user->txnlen = 25;
+					address_to_pubkeytxn(user->txnbin, username);
+				}
 			}
 		}
 		LOGNOTICE("Added new user %s%s", username, user->btcaddress ?
@@ -2980,19 +3007,24 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 }
 
 /* Entered with instance_lock held */
-static inline uchar *__user_coinb2(const stratum_instance_t *client, const workbase_t *wb)
+static inline uchar *__user_coinb2(const stratum_instance_t *client, const workbase_t *wb, int *cb2len)
 {
 	struct userwb *userwb;
 	int64_t id;
 
 	if (!client->ckp->btcsolo)
-		return wb->coinb2bin;
+		goto out_nouserwb;
 
 	id = wb->id;
 	HASH_FIND_I64(client->user_instance->userwbs, &id, userwb);
 	if (unlikely(!userwb))
-		return wb->coinb2bin;
+		goto out_nouserwb;
+	*cb2len = userwb->coinb2len;
 	return userwb->coinb2bin;
+
+out_nouserwb:
+	*cb2len = wb->coinb2len;
+	return wb->coinb2bin;
 }
 
 /* Needs to be entered with client holding a ref count. */
@@ -3003,11 +3035,12 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 	uint32_t *data32, *swap32, benonce32;
 	char *coinbase, data[80];
 	uchar swap[80], hash1[32];
+	int cblen, i, cb2len;
 	uchar *coinb2bin;
-	int cblen, i;
 	double ret;
 
-	coinbase = alloca(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len);
+	/* Leave enough room for 25 byte generation address + length counter */
+	coinbase = alloca(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len + 26 + wb->coinb3len);
 	memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
 	cblen = wb->coinb1len;
 	memcpy(coinbase + cblen, &client->enonce1bin, wb->enonce1constlen + wb->enonce1varlen);
@@ -3016,7 +3049,7 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 	cblen += wb->enonce2varlen;
 
 	ck_rlock(&sdata->instance_lock);
-	coinb2bin = __user_coinb2(client, wb);
+	coinb2bin = __user_coinb2(client, wb, &cb2len);
 	memcpy(coinbase + cblen, coinb2bin, wb->coinb2len);
 	ck_runlock(&sdata->instance_lock);
 
@@ -4684,18 +4717,26 @@ int stratifier(proc_instance_t *pi)
 			LOGEMERG("Fatal: btcaddress invalid according to bitcoind");
 			goto out;
 		}
-		if (script_address(ckp->btcaddress)) {
-			LOGEMERG("Fatal: btcaddress valid but unsupported M of N 3x address");
-			goto out;
-		}
 
 		/* Store this for use elsewhere */
 		hex2bin(scriptsig_header_bin, scriptsig_header, 41);
-		address_to_pubkeytxn(sdata->pubkeytxnbin, ckp->btcaddress);
+		if (script_address(ckp->btcaddress)) {
+			address_to_scripttxn(sdata->pubkeytxnbin, ckp->btcaddress);
+			sdata->pubkeytxnlen = 23;
+		} else {
+			address_to_pubkeytxn(sdata->pubkeytxnbin, ckp->btcaddress);
+			sdata->pubkeytxnlen = 25;
+		}
 
 		if (test_address(ckp, ckp->donaddress)) {
 			ckp->donvalid = true;
-			address_to_pubkeytxn(sdata->donkeytxnbin, ckp->donaddress);
+			if (script_address(ckp->donaddress)) {
+				sdata->donkeytxnlen = 23;
+				address_to_scripttxn(sdata->donkeytxnbin, ckp->donaddress);
+			} else {
+				sdata->donkeytxnlen = 25;
+				address_to_pubkeytxn(sdata->donkeytxnbin, ckp->donaddress);
+			}
 		}
 	}
 

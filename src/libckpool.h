@@ -537,6 +537,7 @@ int safecmp(const char *a, const char *b);
 bool cmdmatch(const char *buf, const char *cmd);
 
 void address_to_pubkeytxn(char *pkh, const char *addr);
+void address_to_scripttxn(char *pkh, const char *addr);
 int ser_number(uchar *s, int32_t val);
 int get_sernumber(uchar *s);
 bool fulltest(const uchar *hash, const uchar *target);
