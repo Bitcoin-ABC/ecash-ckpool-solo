@@ -753,6 +753,9 @@ static void send_workinfo(ckpool_t *ckp, const workbase_t *wb)
 	char cdfield[64];
 	json_t *val;
 
+	if (CKP_STANDALONE(ckp))
+		return;
+
 	sprintf(cdfield, "%lu,%lu", wb->gentime.tv_sec, wb->gentime.tv_nsec);
 
 	JSON_CPACK(val, "{sI,ss,ss,ss,ss,ss,ss,ss,ss,sI,so,ss,ss,ss,ss}",
@@ -780,6 +783,9 @@ static void send_ageworkinfo(ckpool_t *ckp, const int64_t id)
 	ts_t ts_now;
 	json_t *val;
 
+	if (CKP_STANDALONE(ckp))
+		return;
+
 	ts_realtime(&ts_now);
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
@@ -798,7 +804,6 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 {
 	struct userwb *userwb;
 	int64_t id = wb->id;
-	int offset = 0;
 
 	/* Make sure this user doesn't have this userwb already */
 	HASH_FIND_I64(user->userwbs, &id, userwb);
@@ -810,13 +815,13 @@ static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *u
 	userwb->id = id;
 	userwb->coinb2bin = ckalloc(wb->coinb2len + 1 + user->txnlen + wb->coinb3len);
 	memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
-	offset += wb->coinb2len;
-	userwb->coinb2bin[offset++] = user->txnlen;
-	memcpy(userwb->coinb2bin + offset, user->txnbin, user->txnlen);
-	offset += user->txnlen;
-	memcpy(userwb->coinb2bin + offset, wb->coinb3bin, wb->coinb3len);
-	offset += wb->coinb3len;
-	userwb->coinb2 = bin2hex(userwb->coinb2bin, offset);
+	userwb->coinb2len = wb->coinb2len;
+	userwb->coinb2bin[userwb->coinb2len++] = user->txnlen;
+	memcpy(userwb->coinb2bin + userwb->coinb2len, user->txnbin, user->txnlen);
+	userwb->coinb2len += user->txnlen;
+	memcpy(userwb->coinb2bin + userwb->coinb2len, wb->coinb3bin, wb->coinb3len);
+	userwb->coinb2len += wb->coinb3len;
+	userwb->coinb2 = bin2hex(userwb->coinb2bin, userwb->coinb2len);
 	HASH_ADD_I64(user->userwbs, id, userwb);
 }
 
@@ -3050,10 +3055,10 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 
 	ck_rlock(&sdata->instance_lock);
 	coinb2bin = __user_coinb2(client, wb, &cb2len);
-	memcpy(coinbase + cblen, coinb2bin, wb->coinb2len);
+	memcpy(coinbase + cblen, coinb2bin, cb2len);
 	ck_runlock(&sdata->instance_lock);
 
-	cblen += wb->coinb2len;
+	cblen += cb2len;
 
 	gen_hash((uchar *)coinbase, merkle_root, cblen);
 	memcpy(merkle_sha, merkle_root, 32);
