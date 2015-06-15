@@ -100,18 +100,18 @@ global $sipre;
 # max of uint256 is ~1.158x10^77, which is well above 'Y' (10^24)
 $sipre = array('', 'k', 'M', 'G', 'T', 'P', 'E', 'Z', 'Y');
 #
-function siprefmt($amt)
+function siprefmt($amt, $dot = 2)
 {
  global $sipre;
 
- $dot = 2;
+ $rnd = pow(10, $dot);
  $pref = floor(log10($amt)/3);
  if ($pref < 0)
 	$pref = 0;
  if ($pref >= count($sipre))
 	$pref = count($sipre)-1;
 
- $amt = round(100.0 * $amt / pow(10, $pref * 3)) / 100;
+ $amt = round($rnd * $amt / pow(10, $pref * 3)) / $rnd;
  if ($amt > 999.99 && $pref < (count($sipre)-1))
  {
   $amt /= 1000;
@@ -141,7 +141,7 @@ function dsprate($hr)
 #
 function difffmt($amt)
 {
- return siprefmt($amt);
+ return siprefmt($amt, 3);
 }
 #
 function emailStr($str)

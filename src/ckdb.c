@@ -1147,16 +1147,19 @@ static void alloc_storage()
 	marks_root = new_ktree();
 }
 
-#define SEQSETWARN(_set, _seqset, _msgtxt, _endtxt) do { \
+#define SEQSETMSG(_set, _seqset, _msgtxt, _endtxt) do { \
 	char _t_buf[DATE_BUFSIZ]; \
+	bool _warn = ((_seqset)->seqdata[SEQ_SHARES].missing > 0) || \
+		     ((_seqset)->seqdata[SEQ_SHARES].lost > 0); \
 	btu64_to_buf(&((_seqset)->seqstt), _t_buf, sizeof(_t_buf)); \
-	LOGWARNING("SEQ %s: %d/"SEQSTT":%"PRIu64"=%s "SEQPID":%"PRIu64 \
+	LOGWARNING("%s %s: %d/"SEQSTT":%"PRIu64"=%s "SEQPID":%"PRIu64 \
 		   " M%"PRIu64"/T%"PRIu64"/L%"PRIu64"/S%"PRIu64"/H%"PRIu64 \
 		   "/R%"PRIu64"/OK%"PRIu64" %s v%"PRIu64"/^%"PRIu64"/M%"PRIu64 \
 		   "/T%"PRIu64"/L%"PRIu64"/S%"PRIu64"/H%"PRIu64"/R%"PRIu64 \
 		   "/OK%"PRIu64" %s v%"PRIu64"/^%"PRIu64"/M%"PRIu64"/T%"PRIu64 \
 		   "/L%"PRIu64"/S%"PRIu64"/H%"PRIu64"/R%"PRIu64 \
 		   "/OK%"PRIu64"%s", \
+		   _warn ? "SEQ" : "Seq", \
 		   _msgtxt, _set, (_seqset)->seqstt, _t_buf, \
 		   (_seqset)->seqpid, (_seqset)->missing, (_seqset)->trans, \
 		   (_seqset)->lost, (_seqset)->stale, (_seqset)->high, \
@@ -1248,16 +1251,15 @@ void sequence_report(bool lock)
 		    seqset->seqdata[SEQ_SHARES].missing ||
 		    seqset->seqdata[SEQ_SHARES].trans ||
 		    seqset->seqdata[SEQ_SHARES].lost)) {
-			miss = (seqset->seqdata[SEQ_SHARES].missing ||
-				seqset->seqdata[SEQ_SHARES].trans ||
-				seqset->seqdata[SEQ_SHARES].lost);
+			miss = (seqset->seqdata[SEQ_SHARES].missing > 0) ||
+				(seqset->seqdata[SEQ_SHARES].lost > 0);
 			if (lock) {
 				memcpy(&seqset_copy, seqset, sizeof(seqset_copy));
 				ck_wunlock(&seq_lock);
 				seqset = &seqset_copy;
 			}
-			SEQSETWARN(set, seqset,
-				   miss ? "SHARES MISSING" : "status" , EMPTY);
+			SEQSETMSG(set, seqset,
+				  miss ? "SHARES MISSING" : "status" , EMPTY);
 			if (lock)
 				ck_wlock(&seq_lock);
 		}
@@ -1746,8 +1748,9 @@ static void seq_reloadmax()
  *  messages or incorrect messages on the console when errors occur
  * It wont lose msglines from the reload or the queue, since if there is any
  *  problem with any msgline, it will be processed rather than skipped
- * Only valid duplicates, with all 3 sequence numbers (cmd, stt, pid) matching
- *  a previous msgline, are flagged DUP to be skipped by the sequence code */
+ * Only valid duplicates, with all 4 sequence numbers (all, cmd, stt, pid)
+ *  matching a previous msgline, are flagged DUP to be skipped by the
+ *  sequence code */
 static bool update_seq(enum seq_num seq, uint64_t n_seqcmd,
 			uint64_t n_seqstt, uint64_t n_seqpid,
 			char *nam, tv_t *now, tv_t *cd, char *code,
@@ -1767,6 +1770,11 @@ static bool update_seq(enum seq_num seq, uint64_t n_seqcmd,
 	uint64_t u;
 	int set = -1, expset = -1, highlimit, i;
 	K_STORE *lost = NULL;
+
+	LOGDEBUG("%s() SQ %c:%d/%s/%"PRIu64"/%"PRIu64"/%"PRIu64"/%s '%.80s...",
+		 __func__, SECHR(seqentryflags), seq, nam, n_seqcmd, n_seqstt,
+		 n_seqpid, code, st = safe_text(msg));
+	FREENULL(st);
 
 	firstseq = newseq = expseq = gothigh = okhi = gotstale =
 	gotstalestart = dup = wastrans = gotrecover = false;
@@ -1954,7 +1962,7 @@ gotseqset:
 			 *  there was some problem with the reload data
 			 * When we switch from the reload data to the queue
 			 *  data, it is also flagged ok since it may also be
-			 *  due to lost data at the end or missing reload files
+			 *  due to lost data at the end, or missing reload files
 			 * In both these cases the message will be 'OKHI'
 			 *  instead of 'HIGH'
 			 * If however this is caused by a corrupt seq number
@@ -2186,12 +2194,13 @@ setitemdata:
 	} else {
 		if (newseq) {
 			if (set == 0)
-				SEQSETWARN(0, &seqset_pre, "previous", EMPTY);
+				SEQSETMSG(0, &seqset_pre, "previous", EMPTY);
 			else
-				SEQSETWARN(0, &seqset_pre, "current", EMPTY);
+				SEQSETMSG(0, &seqset_pre, "current", EMPTY);
 		}
-		if (expseq)
-			SEQSETWARN(expset, &seqset_exp, "discarded old", " for:");
+		if (expseq) {
+			SEQSETMSG(expset, &seqset_exp, "discarded old", " for:");
+		}
 		if (newseq || expseq) {
 			btu64_to_buf(&n_seqstt, t_buf, sizeof(t_buf));
 			LOGWARNING("Seq created new: set:%d %s:%"PRIu64" "
@@ -2203,15 +2212,21 @@ setitemdata:
 
 	if (dup) {
 		int level = LOG_WARNING;
-		/* If one is SE_RELOAD and the other is SE_EARLYSOCK then it's
-		 *  not unexpected so only LOG_DEBUG */
+		/* If one is SE_RELOAD and the other is SE_EARLYSOCK or
+		 *  SE_SOCKET then it's not unexpected, so only use LOG_DEBUG
+		 * Technically SE_SOCKET is unexpected, except that at the end
+		 *  of the reload sync there may still be pool messages that
+		 *  haven't got into the queue yet - it wouldn't be expected
+		 *  for there to be many since it would be ckdb emptying the
+		 *  queue faster than it is filling due to the reload delay -
+		 *  but either way they don't need to be reported */
 		if (((seqentry_copy.flags | seqentryflags) & SE_RELOAD) &&
-		    ((seqentry_copy.flags | seqentryflags) & SE_EARLYSOCK))
+		    ((seqentry_copy.flags | seqentryflags) & (SE_EARLYSOCK | SE_SOCKET)))
 			level = LOG_DEBUG;
 		btu64_to_buf(&n_seqstt, t_buf, sizeof(t_buf));
 		bt_to_buf(&(cd->tv_sec), t_buf2, sizeof(t_buf2));
 		LOGMSG(level, "SEQ dup%s %c:%c %s %"PRIu64" set:%d/%"PRIu64
-				"=%s/%"PRIu64" %s/%s v%"PRIu64"/^%"PRIu64
+				"=%s/%"PRIu64" %s/%s -vs- v%"PRIu64"/^%"PRIu64
 				"/M%"PRIu64"/T%"PRIu64"/L%"PRIu64"/S%"PRIu64
 				"/H%"PRIu64"/OK%"PRIu64" cmd=%.42s...",
 				(level == LOG_DEBUG) ? "*" : EMPTY,
