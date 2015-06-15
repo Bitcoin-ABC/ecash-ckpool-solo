@@ -10,6 +10,7 @@ function doshifts($data, $user)
  $pg .= "<td class=dl>Start</td>";
  $pg .= "<td class=dr>Length</td>";
  $pg .= "<td class=dr>Your Diff</td>";
+ $pg .= "<td class=dr>Inv Diff</td>";
  $pg .= "<td class=dr>Avg Hs</td>";
  $pg .= "<td class=dr>Shares</td>";
  $pg .= "<td class=dr>Avg Share</td>";
@@ -54,6 +55,8 @@ function doshifts($data, $user)
 		$pg .= '<td class=dr>'.howmanyhrs($elapsed).'</td>';
 		$diffacc = $ans[$pre.'diffacc:'.$i];
 		$pg .= '<td class=dr>'.difffmt($diffacc).'</td>';
+		$diffinv = $ans[$pre.'diffinv:'.$i];
+		$pg .= '<td class=dr>'.difffmt($diffinv).'</td>';
 		$hr = $diffacc * pow(2,32) / $elapsed;
 		$pg .= '<td class=dr>'.dsprate($hr).'</td>';
 		$shareacc = $ans[$pre.'shareacc:'.$i];

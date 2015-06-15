@@ -1,5 +1,7 @@
 <?php
 #
+include_once('email.php');
+#
 function settings($data, $user, $email, $addr, $err)
 {
  $pg = '<h1>Account Settings</h1>';
@@ -9,6 +11,8 @@ function settings($data, $user, $email, $addr, $err)
 
  $pg .= '<table cellpadding=20 cellspacing=0 border=1>';
  $pg .= '<tr class=dc><td><center>';
+
+ $_SESSION['old_set_email'] = $email;
 
  $pg .= makeForm('settings');
  $pg .= '<table cellpadding=5 cellspacing=0 border=0>';
@@ -101,6 +105,7 @@ function dosettings($data, $user)
 	$email = getparam('email', false);
 	$pass = getparam('pass', false);
 	$ans = userSettings($user, $email, null, $pass);
+	$err = 'EMail changed';
 	$check = true;
 	break;
   case 'Address':
@@ -110,6 +115,7 @@ function dosettings($data, $user)
 		$addrarr = array(array('addr' => $addr));
 		$pass = getparam('pass', false);
 		$ans = userSettings($user, null, $addrarr, $pass);
+		$err = 'Payout address changed';
 		$check = true;
 	}
 	break;
@@ -132,13 +138,18 @@ function dosettings($data, $user)
 	}
 	break;
  }
+ $doemail = false;
  if ($check === true)
+ {
 	if ($ans['STATUS'] != 'ok')
 	{
 		$err = $ans['STATUS'];
 		if ($ans['ERROR'] != '')
 			$err .= ': '.$ans['ERROR'];
 	}
+	else
+		$doemail = true;
+ }
  $ans = userSettings($user);
  if ($ans['STATUS'] != 'ok')
 	dbdown(); // Should be no other reason?
@@ -151,6 +162,44 @@ function dosettings($data, $user)
 	$addr = $ans['addr:0'];
  else
 	$addr = '';
+
+ if ($doemail)
+ {
+	if ($email == '')
+	{
+		if ($err != '')
+			$err .= '<br>';
+		$err .= 'An error occurred, check your details below';
+		goto iroiroattanoyo;
+	}
+
+	$emailinfo = getOpts($user, emailOptList());
+	if ($emailinfo['STATUS'] != 'ok')
+	{
+		if ($err != '')
+			$err .= '<br>';
+		$err .= 'An error occurred, check your details below';
+		goto iroiroattanoyo;
+	}
+
+	switch ($chg)
+	{
+	  case 'EMail':
+		if (isset($_SESSION['old_set_email']))
+			$old = $_SESSION['old_set_email'];
+		else
+			$old = null;
+		emailAddressChanged($email, zeip(), $emailinfo, $old);
+		break;
+	  case 'Address':
+		payoutAddressChanged($email, zeip(), $emailinfo);
+		break;
+	  case 'Password':
+		passChanged($email, zeip(), $emailinfo);
+		break;
+	}
+ }
+iroiroattanoyo:
  $pg = settings($data, $user, $email, $addr, $err);
  return $pg;
 }

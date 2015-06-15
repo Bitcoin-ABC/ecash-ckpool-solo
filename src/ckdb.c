@@ -268,7 +268,7 @@ bool dbload_only_sharesummary = false;
  *  markersummaries and pplns payouts may not be correct */
 bool sharesummary_marks_limit = false;
 
-// DB users,workers load is complete
+// DB optioncontrol,users,workers,useratts load is complete
 bool db_users_complete = false;
 // DB load is complete
 bool db_load_complete = false;
@@ -509,6 +509,11 @@ const char *marktype_other_finish_fmt = "fin: %s";
 // For getting back the shift code/name
 const char *marktype_shift_begin_skip = "Shift stt: ";
 const char *marktype_shift_end_skip = "Shift fin: ";
+
+// USERINFO from various incoming data
+K_TREE *userinfo_root;
+K_LIST *userinfo_free;
+K_STORE *userinfo_store;
 
 static char logname[512];
 static char *dbcode;
@@ -753,7 +758,9 @@ static bool getdata1()
 		goto matane;
 	if (!(ok = users_fill(conn)))
 		goto matane;
-	ok = workers_fill(conn);
+	if (!(ok = workers_fill(conn)))
+		goto matane;
+	ok = useratts_fill(conn);
 
 matane:
 
@@ -791,21 +798,15 @@ static bool getdata3()
 	}
 	if (!(ok = workinfo_fill(conn)) || everyone_die)
 		goto sukamudai;
-	/* marks must be loaded before sharesummary
-	 * since sharesummary looks at the marks data */
 	if (!(ok = marks_fill(conn)) || everyone_die)
 		goto sukamudai;
+	/* must be after workinfo */
 	if (!(ok = workmarkers_fill(conn)) || everyone_die)
 		goto sukamudai;
 	if (!(ok = markersummary_fill(conn)) || everyone_die)
 		goto sukamudai;
-	if (!(ok = sharesummary_fill(conn)) || everyone_die)
-		goto sukamudai;
-	if (!confirm_sharesummary) {
-		if (!(ok = useratts_fill(conn)) || everyone_die)
-			goto sukamudai;
+	if (!confirm_sharesummary && !everyone_die)
 		ok = poolstats_fill(conn);
-	}
 
 sukamudai:
 
@@ -823,31 +824,24 @@ static bool reload()
 	char *reason;
 	FILE *fp;
 
-	tv_to_buf(&(dbstatus.oldest_sharesummary_firstshare_n), buf, sizeof(buf));
-	LOGWARNING("%s(): %s oldest DB incomplete sharesummary", __func__, buf);
-	tv_to_buf(&(dbstatus.newest_sharesummary_firstshare_ay), buf, sizeof(buf));
-	LOGWARNING("%s(): %s newest DB complete sharesummary", __func__, buf);
+	tv_to_buf(&(dbstatus.newest_createdate_workmarker_workinfo),
+		  buf, sizeof(buf));
+	LOGWARNING("%s(): %s newest DB workmarker wid %"PRId64,
+		   __func__, buf,
+		   dbstatus.newest_workmarker_workinfoid);
 	tv_to_buf(&(dbstatus.newest_createdate_workinfo), buf, sizeof(buf));
-	LOGWARNING("%s(): %s newest DB workinfo", __func__, buf);
+	LOGWARNING("%s(): %s newest DB workinfo wid %"PRId64,
+		   __func__, buf, dbstatus.newest_workinfoid);
 	tv_to_buf(&(dbstatus.newest_createdate_poolstats), buf, sizeof(buf));
-	LOGWARNING("%s(): %s newest DB poolstats", __func__, buf);
+	LOGWARNING("%s(): %s newest DB poolstats (ignored)", __func__, buf);
 	tv_to_buf(&(dbstatus.newest_createdate_blocks), buf, sizeof(buf));
 	LOGWARNING("%s(): %s newest DB blocks (ignored)", __func__, buf);
 
-	if (dbstatus.oldest_sharesummary_firstshare_n.tv_sec)
-		copy_tv(&(dbstatus.sharesummary_firstshare), &(dbstatus.oldest_sharesummary_firstshare_n));
-	else
-		copy_tv(&(dbstatus.sharesummary_firstshare), &(dbstatus.newest_sharesummary_firstshare_ay));
-
-	copy_tv(&start, &(dbstatus.sharesummary_firstshare));
-	reason = "sharesummary";
+	copy_tv(&start, &(dbstatus.newest_createdate_workmarker_workinfo));
+	reason = "workmarkers";
 	if (!tv_newer(&start, &(dbstatus.newest_createdate_workinfo))) {
 		copy_tv(&start, &(dbstatus.newest_createdate_workinfo));
 		reason = "workinfo";
-	}
-	if (!tv_newer(&start, &(dbstatus.newest_createdate_poolstats))) {
-		copy_tv(&start, &(dbstatus.newest_createdate_poolstats));
-		reason = "poolstats";
 	}
 
 	tv_to_buf(&start, buf, sizeof(buf));
@@ -896,15 +890,18 @@ static bool write_pid(ckpool_t *ckp, const char *path, pid_t pid)
 		fclose(fp);
 		if (ret == 1 && !(kill(oldpid, 0))) {
 			if (!ckp->killold) {
-				LOGEMERG("Process %s pid %d still exists, start ckpool with -k if you wish to kill it",
+				LOGEMERG("Process %s pid %d still exists, start"
+					 " ckpool with -k if you wish to kill it",
 					 path, oldpid);
 				return false;
 			}
 			if (kill(oldpid, 9)) {
-				LOGEMERG("Unable to kill old process %s pid %d", path, oldpid);
+				LOGEMERG("Unable to kill old process %s pid %d",
+					 path, oldpid);
 				return false;
 			}
-			LOGWARNING("Killing off old process %s pid %d", path, oldpid);
+			LOGWARNING("Killing off old process %s pid %d",
+				   path, oldpid);
 		}
 	}
 	fp = fopen(path, "we");
@@ -1145,6 +1142,11 @@ static void alloc_storage()
 				ALLOC_MARKS, LIMIT_MARKS, true);
 	marks_store = k_new_store(marks_free);
 	marks_root = new_ktree();
+
+	userinfo_free = k_new_list("UserInfo", sizeof(USERINFO),
+					ALLOC_USERINFO, LIMIT_USERINFO, true);
+	userinfo_store = k_new_store(userinfo_free);
+	userinfo_root = new_ktree();
 }
 
 #define SEQSETMSG(_set, _seqset, _msgtxt, _endtxt) do { \
@@ -1281,6 +1283,8 @@ static void dealloc_storage()
 	LOGWARNING("%s() logqueue ...", __func__);
 
 	FREE_LISTS(logqueue);
+
+	FREE_ALL(userinfo);
 
 	FREE_TREE(marks);
 	FREE_STORE_DATA(marks);
@@ -3064,7 +3068,7 @@ static void *summariser(__maybe_unused void *arg)
 
 	rename_proc("db_summariser");
 
-	while (!everyone_die && !startup_complete)
+	while (!everyone_die && !reload_queue_complete)
 		cksleep_ms(42);
 
 	summariser_using_data = true;
@@ -3121,7 +3125,7 @@ static char *shift_words[] =
 	"quinn",
 	"rika",
 	"sena",
-	"tsubasa",
+	"tenshi",
 	"ur",
 	"valentina",
 	"winry",
@@ -3556,7 +3560,7 @@ static void *marker(__maybe_unused void *arg)
 
 	rename_proc("db_marker");
 
-	while (!everyone_die && !startup_complete)
+	while (!everyone_die && !reload_queue_complete)
 		cksleep_ms(42);
 
 	if (sharesummary_marks_limit) {
@@ -3566,16 +3570,6 @@ static void *marker(__maybe_unused void *arg)
 	}
 
 	marker_using_data = true;
-
-/* TODO: trigger this every workinfo change?
- *  note that history catch up would also mean the tigger would
- *  catch up at most 100 missing marks per shift
- *  however, also, a workinfo change means a sharesummary DB update,
- *  so would be best to (usually) wait until that is done
- * OR: avoid writing the sharesummaries to the DB at all
- *  and only write the markersummaries? - since 100 workinfoid shifts
- *  will usually mean that markersummaries are less than every hour
- *  (and a reload processes more than an hour) */
 
 	while (!everyone_die) {
 		for (i = 0; i < 5; i++) {
@@ -3953,6 +3947,7 @@ static void *socketer(__maybe_unused void *arg)
 					case CMD_STATS:
 					case CMD_USERSTATUS:
 					case CMD_SHSTA:
+					case CMD_USERINFO:
 						ans = ckdb_cmds[msgline->which_cmds].func(NULL,
 								msgline->cmd,
 								msgline->id,
@@ -4150,6 +4145,21 @@ static void *socketer(__maybe_unused void *arg)
 						workqueue->code =  (char *)__func__;
 						workqueue->inet = inet_default;
 						k_add_tail(workqueue_store, wq_item);
+						/* Stop the reload queue from growing too big
+						 * Use a size that should be big enough */
+						if (reloading && workqueue_store->count > 250000) {
+							K_ITEM *wq2_item = k_unlink_head(workqueue_store);
+							K_WUNLOCK(workqueue_free);
+							WORKQUEUE *wq;
+							DATA_WORKQUEUE(wq, wq2_item);
+							K_ITEM *ml_item = wq->msgline_item;
+							free_msgline_data(ml_item, true, false);
+							K_WLOCK(msgline_free);
+							k_add_head(msgline_free, ml_item);
+							K_WUNLOCK(msgline_free);
+							K_WLOCK(workqueue_free);
+							k_add_head(workqueue_free, wq2_item);
+						}
 						K_WUNLOCK(workqueue_free);
 						ml_item = NULL;
 						mutex_lock(&wq_waitlock);
@@ -4275,6 +4285,7 @@ static void reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_MARKS:
 			case CMD_PSHIFT:
 			case CMD_SHSTA:
+			case CMD_USERINFO:
 				LOGERR("%s() INVALID message line %"PRIu64
 					" ignored '%.42s...",
 					__func__, count,
@@ -4425,6 +4436,7 @@ static bool reload_from(tv_t *start)
 	reloading = true;
 
 	copy_tv(&reload_timestamp, start);
+	// Go back further - one reload file
 	reload_timestamp.tv_sec -= reload_timestamp.tv_sec % ROLL_S;
 
 	tv_to_buf(start, buf, sizeof(buf));
@@ -4747,6 +4759,7 @@ static void *listener(void *arg)
 							seqdata++;
 						}
 					}
+					ss_item = ss_item->next;
 				}
 			}
 			seqdata_reload_lost = false;
@@ -4776,6 +4789,7 @@ static void *listener(void *arg)
 	return NULL;
 }
 
+#if 0
 /* TODO: This will be way faster traversing both trees simultaneously
  *  rather than traversing one and searching the other, then repeating
  *  in reverse. Will change it later */
@@ -4879,6 +4893,7 @@ static void compare_summaries(K_TREE *leftsum, char *leftname,
 			diff_first, diff_last, cd_buf1, cd_buf2);
 	}
 }
+#endif
 
 /* TODO: have a seperate option to find/store missing workinfo/shares/etc
  *  from the reload files, in a supplied UTC time range
@@ -4891,6 +4906,9 @@ static void compare_summaries(K_TREE *leftsum, char *leftname,
  *  and the payment is now wrong */
 static void confirm_reload()
 {
+#if 0
+	TODO: redo this using workmarkers
+
 	K_TREE *sharesummary_workinfoid_save;
 	__maybe_unused K_TREE *sharesummary_save;
 	__maybe_unused K_TREE *workinfo_save;
@@ -5205,6 +5223,7 @@ static void confirm_reload()
 	compare_summaries(sharesummary_workinfoid_root, "ReLoad",
 			  sharesummary_workinfoid_save, "DB",
 			  true, false);
+#endif
 }
 
 // TODO: handle workmarkers/markersummaries

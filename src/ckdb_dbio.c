@@ -9,6 +9,17 @@
 
 #include "ckdb.h"
 
+// Doesn't work with negative numbers ...
+void pcom(int n)
+{
+	if (n < 1000)
+		printf("%d", n);
+	else {
+		pcom(n/1000);
+		printf(",%03d", n % 1000);
+	}
+}
+
 char *pqerrmsg(PGconn *conn)
 {
 	char *ptr, *buf = strdup(PQerrorMessage(conn));
@@ -2291,6 +2302,7 @@ nostart:
 			DATA_OPTIONCONTROL(optioncontrol, old_item);
 			optioncontrol_root = remove_from_ktree(optioncontrol_root, old_item,
 							       cmp_optioncontrol);
+			k_unlink_item(optioncontrol_store, old_item);
 			FREENULL(optioncontrol->optionvalue);
 			k_add_head(optioncontrol_free, old_item);
 		}
@@ -2624,6 +2636,9 @@ bool workinfo_fill(PGconn *conn)
 
 	LOGDEBUG("%s(): select", __func__);
 
+	printf(TICK_PREFIX"wi 0\r");
+	fflush(stdout);
+
 	// TODO: select the data based on sharesummary since old data isn't needed
 	//  however, the ageing rules for workinfo will decide that also
 	//  keep the last block + current? Rules will depend on payout scheme also
@@ -2760,8 +2775,17 @@ bool workinfo_fill(PGconn *conn)
 			workinfo_height_root = add_to_ktree(workinfo_height_root, item, cmp_workinfo_height);
 		k_add_head(workinfo_store, item);
 
-		if (tv_newer(&(dbstatus.newest_createdate_workinfo), &(row->createdate)))
+		if (tv_newer(&(dbstatus.newest_createdate_workinfo), &(row->createdate))) {
 			copy_tv(&(dbstatus.newest_createdate_workinfo), &(row->createdate));
+			dbstatus.newest_workinfoid = row->workinfoid;
+		}
+
+		if (i == 0 || ((i+1) % 100000) == 0) {
+			printf(TICK_PREFIX"wi ");
+			pcom(i+1);
+			putchar('\r');
+			fflush(stdout);
+		}
 
 		tick();
 	}
@@ -2834,20 +2858,15 @@ static bool shares_process(PGconn *conn, SHARES *shares, K_TREE *trf_root)
 				// Reloading a share already summarised
 				return true;
 			}
-
-			if (!sharesummary->reset) {
-				zero_sharesummary(sharesummary,
-						  &(shares->createdate),
-						  shares->diff);
-				sharesummary->reset = true;
-			}
 		}
 	}
 
-	if (!confirm_sharesummary)
+	if (!confirm_sharesummary) {
 		workerstatus_update(NULL, shares, NULL);
+		userinfo_update(shares, NULL, NULL);
+	}
 
-	sharesummary_update(conn, shares, NULL, NULL, shares->createby,
+	sharesummary_update(shares, NULL, NULL, shares->createby,
 			    shares->createcode, shares->createinet,
 			    &(shares->createdate));
 
@@ -3142,17 +3161,10 @@ static bool shareerrors_process(PGconn *conn, SHAREERRORS *shareerrors,
 				FREENULL(st);
 				return false;
 			}
-
-			if (!sharesummary->reset) {
-				zero_sharesummary(sharesummary,
-						  &(shareerrors->createdate),
-						  0.0);
-				sharesummary->reset = true;
-			}
 		}
 	}
 
-	sharesummary_update(conn, NULL, shareerrors, NULL,
+	sharesummary_update(NULL, shareerrors, NULL,
 			    shareerrors->createby,
 			    shareerrors->createcode,
 			    shareerrors->createinet,
@@ -3441,12 +3453,11 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 	K_ITEM *p_ss_item, *p_ms_item;
 	bool ok = false, conned = false;
 	int64_t diffacc, shareacc;
-	char *reason = NULL, *tuples = NULL;
+	char *reason = NULL;
 	char *params[2];
-	int n, par = 0, deleted = -7;
+	int n, par = 0;
 	int ss_count, ms_count;
 	char *st = NULL;
-	char *del;
 
 	LOGWARNING("%s() Processing: workmarkers %"PRId64"/%s/"
 		   "End %"PRId64"/Stt %"PRId64"/%s/%s",
@@ -3595,37 +3606,6 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 		ms_item = ms_item->next;
 	}
 
-	if (old_sharesummary_store->count > 0) {
-		par = 0;
-		params[par++] = bigint_to_buf(workmarkers->workinfoidstart, NULL, 0);
-		params[par++] = bigint_to_buf(workmarkers->workinfoidend, NULL, 0);
-		PARCHK(par, params);
-
-		del = "delete from sharesummary "
-			"where workinfoid >= $1 and workinfoid <= $2";
-
-		res = PQexecParams(conn, del, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-		rescode = PQresultStatus(res);
-		if (PGOK(rescode)) {
-			tuples = PQcmdTuples(res);
-			if (tuples && *tuples)
-				deleted = atoi(tuples);
-		}
-		PQclear(res);
-		if (!PGOK(rescode)) {
-			PGLOGERR("Delete", rescode, conn);
-			reason = "delete failure";
-			goto rollback;
-		}
-
-		if (deleted != old_sharesummary_store->count) {
-			LOGERR("%s() processed sharesummaries=%d but deleted=%d",
-				shortname, old_sharesummary_store->count, deleted);
-			reason = "delete mismatch";
-			goto rollback;
-		}
-	}
-
 	ok = workmarkers_process(conn, true, true,
 				 workmarkers->markerid,
 				 workmarkers->poolinstance,
@@ -3760,6 +3740,8 @@ flail:
 	return ok;
 }
 
+// no longer used
+#if 0
 static void sharesummary_to_pool(SHARESUMMARY *p_row, SHARESUMMARY *row)
 {
 	p_row->diffacc += row->diffacc;
@@ -3783,6 +3765,7 @@ static void sharesummary_to_pool(SHARESUMMARY *p_row, SHARESUMMARY *row)
 		p_row->lastdiffacc = row->lastdiffacc;
 	}
 }
+#endif
 
 static void set_sharesummary_stats(SHARESUMMARY *row, SHARES *s_row,
 				   SHAREERRORS *e_row, bool new,
@@ -3858,22 +3841,18 @@ char *ooo_status(char *buf, size_t siz)
 	return buf;
 }
 
-bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITEM *ss_item,
-				char *by, char *code, char *inet, tv_t *cd, WHERE_FFL_ARGS)
+// No longer stored in the DB but fields are updated as before
+bool _sharesummary_update(SHARES *s_row, SHAREERRORS *e_row, K_ITEM *ss_item,
+				char *by, char *code, char *inet, tv_t *cd,
+				WHERE_FFL_ARGS)
 {
-	ExecStatusType rescode;
-	PGresult *res = NULL;
 	WORKMARKERS *wm;
 	SHARESUMMARY *row, *p_row;
 	K_ITEM *item, *wm_item, *p_item = NULL;
-	char *ins, *upd;
-	bool ok = false, new = false, p_new = false;
-	char *params[19 + MODIFYDATECOUNT];
-	int n, par = 0;
+	bool new = false, p_new = false;
 	int64_t userid, workinfoid;
 	char *workername;
 	tv_t *createdate;
-	bool must_update = false, conned = false;
 	char *st = NULL, *db = NULL;
 	char ooo_buf[256];
 	double tdf, tdl;
@@ -3889,7 +3868,6 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 		}
 		item = ss_item;
 		DATA_SHARESUMMARY(row, item);
-		must_update = true;
 		row->complete[0] = SUMMARY_COMPLETE;
 		row->complete[1] = '\0';
 	} else {
@@ -3950,8 +3928,6 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 			row->workername = strdup(workername);
 			LIST_MEM_ADD(sharesummary_free, row->workername);
 			row->workinfoid = workinfoid;
-			row->inserted = false;
-			row->saveaged = false;
 		}
 
 		// N.B. this directly updates the non-key data
@@ -4010,7 +3986,6 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 			}
 		}
 
-		// p_items are ram only
 		if (p_item) {
 			DATA_SHARESUMMARY(p_row, p_item);
 		} else {
@@ -4028,161 +4003,9 @@ bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITE
 		set_sharesummary_stats(p_row, s_row, e_row, p_new, &tdf, &tdl);
 	}
 
-	// During startup, don't save 'new' sharesummaries, to reduce DB I/O
-	// ... and also during normal processing
-	if (row->complete[0] == SUMMARY_NEW)
-		goto startupskip;
+	MODIFYDATEPOINTERS(sharesummary_free, row, cd, by, code, inet);
 
-	if (conn == NULL && !confirm_sharesummary) {
-		conn = dbconnect();
-		conned = true;
-	}
-
-	if (new || !(row->inserted)) {
-		MODIFYDATEPOINTERS(sharesummary_free, row, cd, by, code, inet);
-
-		if (!confirm_sharesummary) {
-			par = 0;
-			params[par++] = bigint_to_buf(row->userid, NULL, 0);
-			params[par++] = str_to_buf(row->workername, NULL, 0);
-			params[par++] = bigint_to_buf(row->workinfoid, NULL, 0);
-			params[par++] = double_to_buf(row->diffacc, NULL, 0);
-			params[par++] = double_to_buf(row->diffsta, NULL, 0);
-			params[par++] = double_to_buf(row->diffdup, NULL, 0);
-			params[par++] = double_to_buf(row->diffhi, NULL, 0);
-			params[par++] = double_to_buf(row->diffrej, NULL, 0);
-			params[par++] = double_to_buf(row->shareacc, NULL, 0);
-			params[par++] = double_to_buf(row->sharesta, NULL, 0);
-			params[par++] = double_to_buf(row->sharedup, NULL, 0);
-			params[par++] = double_to_buf(row->sharehi, NULL, 0);
-			params[par++] = double_to_buf(row->sharerej, NULL, 0);
-			params[par++] = bigint_to_buf(row->sharecount, NULL, 0);
-			params[par++] = bigint_to_buf(row->errorcount, NULL, 0);
-			params[par++] = tv_to_buf(&(row->firstshare), NULL, 0);
-			params[par++] = tv_to_buf(&(row->lastshare), NULL, 0);
-			params[par++] = double_to_buf(row->lastdiffacc, NULL, 0);
-			params[par++] = str_to_buf(row->complete, NULL, 0);
-			MODIFYDATEPARAMS(params, par, row);
-			PARCHK(par, params);
-
-			ins = "insert into sharesummary "
-				"(userid,workername,workinfoid,diffacc,diffsta,diffdup,diffhi,"
-				"diffrej,shareacc,sharesta,sharedup,sharehi,sharerej,"
-				"sharecount,errorcount,firstshare,lastshare,"
-				"lastdiffacc,complete"
-				MODIFYDATECONTROL ") values (" PQPARAM27 ")";
-
-			res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-			rescode = PQresultStatus(res);
-			if (!PGOK(rescode)) {
-				PGLOGERR("Insert", rescode, conn);
-				goto unparam;
-			}
-		}
-
-		row->countlastupdate = row->sharecount + row->errorcount;
-		row->inserted = true;
-		if (row->complete[0] == SUMMARY_COMPLETE)
-			row->saveaged = true;
-	} else {
-		bool stats_update = false;
-
-		MODIFYUPDATEPOINTERS(sharesummary_free, row, cd, by, code, inet);
-
-		if ((row->countlastupdate + SHARESUMMARY_UPDATE_EVERY) <
-		    (row->sharecount + row->errorcount))
-			stats_update = true;
-
-		if (must_update && row->countlastupdate < (row->sharecount + row->errorcount))
-			stats_update = true;
-
-		if (stats_update) {
-			if (!confirm_sharesummary) {
-				par = 0;
-				params[par++] = bigint_to_buf(row->userid, NULL, 0);
-				params[par++] = str_to_buf(row->workername, NULL, 0);
-				params[par++] = bigint_to_buf(row->workinfoid, NULL, 0);
-				params[par++] = double_to_buf(row->diffacc, NULL, 0);
-				params[par++] = double_to_buf(row->diffsta, NULL, 0);
-				params[par++] = double_to_buf(row->diffdup, NULL, 0);
-				params[par++] = double_to_buf(row->diffhi, NULL, 0);
-				params[par++] = double_to_buf(row->diffrej, NULL, 0);
-				params[par++] = double_to_buf(row->shareacc, NULL, 0);
-				params[par++] = double_to_buf(row->sharesta, NULL, 0);
-				params[par++] = double_to_buf(row->sharedup, NULL, 0);
-				params[par++] = double_to_buf(row->sharehi, NULL, 0);
-				params[par++] = double_to_buf(row->sharerej, NULL, 0);
-				params[par++] = tv_to_buf(&(row->firstshare), NULL, 0);
-				params[par++] = tv_to_buf(&(row->lastshare), NULL, 0);
-				params[par++] = bigint_to_buf(row->sharecount, NULL, 0);
-				params[par++] = bigint_to_buf(row->errorcount, NULL, 0);
-				params[par++] = double_to_buf(row->lastdiffacc, NULL, 0);
-				params[par++] = str_to_buf(row->complete, NULL, 0);
-				MODIFYUPDATEPARAMS(params, par, row);
-				PARCHKVAL(par, 23, params);
-
-				upd = "update sharesummary "
-					"set diffacc=$4,diffsta=$5,diffdup=$6,diffhi=$7,diffrej=$8,"
-					"shareacc=$9,sharesta=$10,sharedup=$11,sharehi=$12,"
-					"sharerej=$13,firstshare=$14,lastshare=$15,"
-					"sharecount=$16,errorcount=$17,lastdiffacc=$18,complete=$19"
-					","MDDB"=$20,"MBYDB"=$21,"MCODEDB"=$22,"MINETDB"=$23 "
-					"where userid=$1 and workername=$2 and workinfoid=$3";
-
-				res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-				rescode = PQresultStatus(res);
-				if (!PGOK(rescode)) {
-					PGLOGERR("Update", rescode, conn);
-					goto unparam;
-				}
-			}
-			row->countlastupdate = row->sharecount + row->errorcount;
-			if (row->complete[0] == SUMMARY_COMPLETE)
-				row->saveaged = true;
-		} else {
-			if (!must_update) {
-				ok = true;
-				goto late;
-			} else {
-				if (!confirm_sharesummary) {
-					par = 0;
-					params[par++] = bigint_to_buf(row->userid, NULL, 0);
-					params[par++] = str_to_buf(row->workername, NULL, 0);
-					params[par++] = bigint_to_buf(row->workinfoid, NULL, 0);
-					params[par++] = str_to_buf(row->complete, NULL, 0);
-					MODIFYUPDATEPARAMS(params, par, row);
-					PARCHKVAL(par, 8, params);
-
-					upd = "update sharesummary "
-						"set complete=$4,"MDDB"=$5,"MBYDB"=$6,"MCODEDB"=$7,"MINETDB"=$8 "
-						"where userid=$1 and workername=$2 and workinfoid=$3";
-
-					res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
-					rescode = PQresultStatus(res);
-					if (!PGOK(rescode)) {
-						PGLOGERR("MustUpdate", rescode, conn);
-						goto unparam;
-					}
-				}
-				row->countlastupdate = row->sharecount + row->errorcount;
-				if (row->complete[0] == SUMMARY_COMPLETE)
-					row->saveaged = true;
-			}
-		}
-	}
-startupskip:
-	ok = true;
-unparam:
-	if (par) {
-		PQclear(res);
-		for (n = 0; n < par; n++)
-			free(params[n]);
-	}
-late:
-	if (conned)
-		PQfinish(conn);
-
-	// We keep the new item no matter what 'ok' is, since it will be inserted later
+	// Store either new item
 	if (new || p_new) {
 		K_WLOCK(sharesummary_free);
 		if (new) {
@@ -4201,265 +4024,7 @@ late:
 		K_WUNLOCK(sharesummary_free);
 	}
 
-	return ok;
-}
-
-bool sharesummary_fill(PGconn *conn)
-{
-	ExecStatusType rescode;
-	PGresult *res;
-	K_TREE_CTX ctx[1];
-	K_ITEM *item, *m_item, *p_item;
-	int n, i, par = 0, p_n;
-	SHARESUMMARY *row, *p_row;
-	MARKS *marks;
-	char *params[2];
-	char *field;
-	char *sel;
-	int fields = 19;
-	bool ok;
-
-	LOGDEBUG("%s(): select", __func__);
-
-	/* Load needs to go back to the last marks workinfoid(+1)
-	 * If it is later than that, we can't create markersummaries
-	 *  since some of the required data is missing -
-	 *  thus we also can't make the shift markersummaries */
-	m_item = last_in_ktree(marks_root, ctx);
-	if (!m_item) {
-		if (dbload_workinfoid_start != -1) {
-			sharesummary_marks_limit = true;
-			LOGWARNING("WARNING: dbload -w start used "
-				   "but there are no marks ...");
-		}
-	} else {
-		DATA_MARKS(marks, m_item);
-		if (dbload_workinfoid_start > marks->workinfoid) {
-			sharesummary_marks_limit = true;
-			LOGWARNING("WARNING: dbload -w start %"PRId64
-				   " is after the last mark %"PRId64" ...",
-				   dbload_workinfoid_start,
-				   marks->workinfoid);
-		}
-	}
-	if (sharesummary_marks_limit) {
-		LOGWARNING("WARNING: ... markersummaries cannot be created "
-			   "and pplns calculations may be wrong");
-	}
-
-	sel = "select "
-		"userid,workername,workinfoid,diffacc,diffsta,diffdup,diffhi,"
-		"diffrej,shareacc,sharesta,sharedup,sharehi,sharerej,"
-		"sharecount,errorcount,firstshare,lastshare,"
-		"lastdiffacc,complete"
-		MODIFYDATECONTROL
-		" from sharesummary where workinfoid>=$1 and workinfoid<=$2";
-	par = 0;
-	params[par++] = bigint_to_buf(dbload_workinfoid_start, NULL, 0);
-	params[par++] = bigint_to_buf(dbload_workinfoid_finish, NULL, 0);
-	PARCHK(par, params);
-	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
-	rescode = PQresultStatus(res);
-	if (!PGOK(rescode)) {
-		PGLOGERR("Select", rescode, conn);
-		PQclear(res);
-		return false;
-	}
-
-	n = PQnfields(res);
-	if (n != (fields + MODIFYDATECOUNT)) {
-		LOGERR("%s(): Invalid field count - should be %d, but is %d",
-			__func__, fields + MODIFYDATECOUNT, n);
-		PQclear(res);
-		return false;
-	}
-
-	n = PQntuples(res);
-	LOGDEBUG("%s(): tree build count %d", __func__, n);
-	ok = true;
-	//K_WLOCK(sharesummary_free);
-	for (i = 0; i < n; i++) {
-		item = k_unlink_head(sharesummary_free);
-		DATA_SHARESUMMARY(row, item);
-		bzero(row, sizeof(*row));
-
-		if (everyone_die) {
-			ok = false;
-			break;
-		}
-
-		row->inserted = true;
-
-		PQ_GET_FLD(res, i, "userid", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("userid", field, row->userid);
-
-		PQ_GET_FLD(res, i, "workername", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_PTR("workername", field, row->workername);
-		LIST_MEM_ADD(sharesummary_free, row->workername);
-
-		PQ_GET_FLD(res, i, "workinfoid", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("workinfoid", field, row->workinfoid);
-
-		PQ_GET_FLD(res, i, "diffacc", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("diffacc", field, row->diffacc);
-
-		PQ_GET_FLD(res, i, "diffsta", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("diffsta", field, row->diffsta);
-
-		PQ_GET_FLD(res, i, "diffdup", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("diffdup", field, row->diffdup);
-
-		PQ_GET_FLD(res, i, "diffhi", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("diffhi", field, row->diffhi);
-
-		PQ_GET_FLD(res, i, "diffrej", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("diffrej", field, row->diffrej);
-
-		PQ_GET_FLD(res, i, "shareacc", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("shareacc", field, row->shareacc);
-
-		PQ_GET_FLD(res, i, "sharesta", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("sharesta", field, row->sharesta);
-
-		PQ_GET_FLD(res, i, "sharedup", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("sharedup", field, row->sharedup);
-
-		PQ_GET_FLD(res, i, "sharehi", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("sharehi", field, row->sharehi);
-
-		PQ_GET_FLD(res, i, "sharerej", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("sharerej", field, row->sharerej);
-
-		PQ_GET_FLD(res, i, "sharecount", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("sharecount", field, row->sharecount);
-
-		PQ_GET_FLD(res, i, "errorcount", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_BIGINT("errorcount", field, row->errorcount);
-
-		row->countlastupdate = row->sharecount + row->errorcount;
-
-		PQ_GET_FLD(res, i, "firstshare", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_TV("firstshare", field, row->firstshare);
-
-		PQ_GET_FLD(res, i, "lastshare", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_TV("lastshare", field, row->lastshare);
-
-		PQ_GET_FLD(res, i, "lastdiffacc", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_DOUBLE("lastdiffacc", field, row->lastdiffacc);
-
-		PQ_GET_FLD(res, i, "complete", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_STR("complete", field, row->complete);
-
-		MODIFYDATEFLDPOINTERS(sharesummary_free, res, i, row, ok);
-		if (!ok)
-			break;
-
-		sharesummary_root = add_to_ktree(sharesummary_root, item, cmp_sharesummary);
-		sharesummary_workinfoid_root = add_to_ktree(sharesummary_workinfoid_root, item, cmp_sharesummary_workinfoid);
-		k_add_head(sharesummary_store, item);
-
-		// A share summary is shares in a single workinfo, at all 3 levels n,a,y
-		if (tolower(row->complete[0]) == SUMMARY_NEW) {
-			if (dbstatus.oldest_sharesummary_firstshare_n.tv_sec == 0 ||
-			    !tv_newer(&(dbstatus.oldest_sharesummary_firstshare_n), &(row->firstshare))) {
-				copy_tv(&(dbstatus.oldest_sharesummary_firstshare_n), &(row->firstshare));
-				dbstatus.oldest_workinfoid_n = row->workinfoid;
-			}
-		} else {
-			if (tv_newer(&(dbstatus.newest_sharesummary_firstshare_ay), &(row->firstshare)))
-				copy_tv(&(dbstatus.newest_sharesummary_firstshare_ay), &(row->firstshare));
-			if (tolower(row->complete[0]) == SUMMARY_COMPLETE) {
-				if (dbstatus.oldest_sharesummary_firstshare_a.tv_sec == 0 ||
-				    !tv_newer(&(dbstatus.oldest_sharesummary_firstshare_a), &(row->firstshare))) {
-					copy_tv(&(dbstatus.oldest_sharesummary_firstshare_a), &(row->firstshare));
-					dbstatus.oldest_workinfoid_a = row->workinfoid;
-				}
-				if (tv_newer(&(dbstatus.newest_sharesummary_firstshare_a), &(row->firstshare))) {
-					copy_tv(&(dbstatus.newest_sharesummary_firstshare_a), &(row->firstshare));
-					dbstatus.newest_workinfoid_a = row->workinfoid;
-				}
-			} else /* SUMMARY_CONFIRM */ {
-				if (tv_newer(&(dbstatus.newest_sharesummary_firstshare_y), &(row->firstshare))) {
-					copy_tv(&(dbstatus.newest_sharesummary_firstshare_y), &(row->firstshare));
-					dbstatus.newest_workinfoid_y = row->workinfoid;
-				}
-			}
-		}
-
-		p_item = find_sharesummary_p(row->workinfoid);
-		if (!p_item) {
-			p_item = k_unlink_head(sharesummary_free);
-			DATA_SHARESUMMARY(p_row, p_item);
-			bzero(p_row, sizeof(*p_row));
-			POOL_SS(p_row);
-			LIST_MEM_ADD(sharesummary_free, p_row->workername);
-			p_row->workinfoid = row->workinfoid;
-			sharesummary_pool_root = add_to_ktree(sharesummary_pool_root,
-							      p_item,
-							      cmp_sharesummary);
-			k_add_head(sharesummary_pool_store, p_item);
-		} else {
-			DATA_SHARESUMMARY(p_row, p_item);
-		}
-
-		sharesummary_to_pool(p_row, row);
-
-		tick();
-	}
-	if (!ok) {
-		FREENULL(row->workername);
-		k_add_head(sharesummary_free, item);
-	}
-
-	p_n = sharesummary_pool_store->count;
-	//K_WUNLOCK(sharesummary_free);
-	PQclear(res);
-
-	if (ok) {
-		LOGDEBUG("%s(): built", __func__);
-		LOGWARNING("%s(): loaded %d sharesummary records", __func__, n);
-		LOGWARNING("%s(): created %d sharesummary pool records", __func__, p_n);
-	}
-
-	return ok;
+	return true;
 }
 
 bool blocks_stats(PGconn *conn, int32_t height, char *blockhash,
@@ -4743,6 +4308,7 @@ bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			}
 			// We didn't use a Begin
 			ok = true;
+			userinfo_block(row, true);
 			goto unparam;
 			break;
 		case BLOCKS_ORPHAN:
@@ -4877,6 +4443,8 @@ bool blocks_add(PGconn *conn, char *height, char *blockhash,
 			}
 
 			update_old = true;
+			if (confirmed[0] == BLOCKS_ORPHAN)
+				userinfo_block(row, false);
 			break;
 		default:
 			LOGERR("%s(): %s.failed.invalid confirm='%s'",
@@ -5130,6 +4698,12 @@ bool blocks_fill(PGconn *conn)
 		if (pool.workinfoid < row->workinfoid) {
 			pool.workinfoid = row->workinfoid;
 			pool.height = row->height;
+		}
+
+		if (CURRENT(&(row->expirydate))) {
+			_userinfo_block(row, true, false);
+			if (row->confirmed[0] == BLOCKS_ORPHAN)
+				_userinfo_block(row, false, false);
 		}
 	}
 	if (!ok)
@@ -5512,6 +5086,245 @@ unparam:
 	return ok;
 }
 
+/* Expire the entire payout, miningpayouts and payments
+ * If it returns false, nothing was changed
+ *  and a console message will say why */
+K_ITEM *payouts_full_expire(PGconn *conn, int64_t payoutid, tv_t *now, bool lock)
+{
+	bool locked = false, conned = false, begun = false, ok = false;
+	K_TREE_CTX mp_ctx[1], pm_ctx[1];
+	K_ITEM *po_item = NULL, *mp_item, *pm_item, *next_item;
+	PAYMENTS *payments = NULL;
+	MININGPAYOUTS *mp = NULL;
+	PAYOUTS *payouts = NULL;
+	ExecStatusType rescode;
+	PGresult *res;
+	char *params[8];
+	int n, par = 0;
+	char *upd, *tuples = NULL;
+	int po_upd = -7, mp_upd = -7, pm_upd = -7;
+
+	// If not already done before calling
+	if (lock)
+		ck_wlock(&process_pplns_lock);
+
+	// This will be rare so a full lock is best
+	K_WLOCK(payouts_free);
+	K_WLOCK(miningpayouts_free);
+	K_WLOCK(payments_free);
+	locked = true;
+
+	po_item = find_payoutid(payoutid);
+	if (!po_item) {
+		LOGERR("%s(): unknown payoutid %"PRId64, __func__, payoutid);
+		goto matane;
+	}
+
+	conned = CKPQConn(&conn);
+
+	begun = CKPQBegin(conn);
+	if (!begun)
+		goto matane;
+
+	upd = "update payouts set "EDDB"=$1 where payoutid=$2 and "EDDB"=$3";
+	par = 0;
+	params[par++] = tv_to_buf(now, NULL, 0);
+	params[par++] = bigint_to_buf(payoutid, NULL, 0);
+	params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+	PARCHKVAL(par, 3, params);
+
+	res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	if (PGOK(rescode)) {
+		tuples = PQcmdTuples(res);
+		if (tuples && *tuples) {
+			po_upd = atoi(tuples);
+			if (po_upd != 1) {
+				LOGERR("%s() updated payouts should be 1"
+					" but updated=%d",
+					__func__, po_upd);
+				goto matane;
+			}
+		}
+	}
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Update payouts", rescode, conn);
+		goto matane;
+	}
+
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	upd = "update miningpayouts set "EDDB"=$1 where payoutid=$2 and "EDDB"=$3";
+	par = 0;
+	params[par++] = tv_to_buf(now, NULL, 0);
+	params[par++] = bigint_to_buf(payoutid, NULL, 0);
+	params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+	PARCHKVAL(par, 3, params);
+
+	res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	if (PGOK(rescode)) {
+		tuples = PQcmdTuples(res);
+		if (tuples && *tuples)
+			mp_upd = atoi(tuples);
+	}
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Update miningpayouts", rescode, conn);
+		goto matane;
+	}
+
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	upd = "update payments set "EDDB"=$1 where payoutid=$2 and "EDDB"=$3";
+	par = 0;
+	params[par++] = tv_to_buf(now, NULL, 0);
+	params[par++] = bigint_to_buf(payoutid, NULL, 0);
+	params[par++] = tv_to_buf((tv_t *)&default_expiry, NULL, 0);
+	PARCHKVAL(par, 3, params);
+
+	res = PQexecParams(conn, upd, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	if (PGOK(rescode)) {
+		tuples = PQcmdTuples(res);
+		if (tuples && *tuples)
+			pm_upd = atoi(tuples);
+	}
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Update payments", rescode, conn);
+		goto matane;
+	}
+
+	for (n = 0; n < par; n++)
+		free(params[n]);
+	par = 0;
+
+	// Check miningpayouts failure condition
+	mp_item = first_miningpayouts(payoutid, mp_ctx);
+	if (!mp_item) {
+		if (mp_upd != 0) {
+			LOGERR("%s() updated miningpayouts should be 0 but"
+				" updated=%d",
+				__func__, mp_upd);
+			goto matane;
+		}
+	} else {
+		int count = 0;
+		DATA_MININGPAYOUTS(mp, mp_item);
+		while (mp_item && mp->payoutid == payoutid) {
+			if (CURRENT(&(mp->expirydate)))
+				count++;
+			mp_item = next_in_ktree(mp_ctx);
+			DATA_MININGPAYOUTS_NULL(mp, mp_item);
+		}
+		if (count != mp_upd) {
+			LOGERR("%s() updated miningpayouts should be %d but"
+				" updated=%d",
+				__func__, count, mp_upd);
+			goto matane;
+		}
+	}
+
+	/* Check payments failure condition
+	 *
+	 * This does a full table search since there is no index
+	 * This should be so rare that adding an index/tree for it
+	 *  would be a waste */
+	pm_item = first_in_ktree(payments_root, pm_ctx);
+	if (!pm_item) {
+		if (pm_upd != 0) {
+			LOGERR("%s() updated payments should be 0 but"
+				" updated=%d",
+				__func__, pm_upd);
+			goto matane;
+		}
+	} else {
+		int count = 0;
+		DATA_PAYMENTS(payments, pm_item);
+		while (pm_item) {
+			if (payments->payoutid == payoutid &&
+			    CURRENT(&(payments->expirydate))) {
+				count++;
+			}
+			pm_item = next_in_ktree(pm_ctx);
+			DATA_PAYMENTS_NULL(payments, pm_item);
+		}
+		if (count != pm_upd) {
+			LOGERR("%s() updated payments should be %d but"
+				" updated=%d",
+				__func__, count, pm_upd);
+			goto matane;
+		}
+	}
+
+	// No more possible errors, so update the ram tables
+	DATA_PAYOUTS(payouts, po_item);
+	payouts_root = remove_from_ktree(payouts_root, po_item, cmp_payouts);
+	payouts_id_root = remove_from_ktree(payouts_id_root, po_item, cmp_payouts_id);
+	copy_tv(&(payouts->expirydate), now);
+	payouts_root = add_to_ktree(payouts_root, po_item, cmp_payouts);
+	payouts_id_root = add_to_ktree(payouts_id_root, po_item, cmp_payouts_id);
+
+	mp_item = first_miningpayouts(payoutid, mp_ctx);
+	DATA_MININGPAYOUTS_NULL(mp, mp_item);
+	while (mp_item && mp->payoutid == payoutid) {
+		if (CURRENT(&(mp->expirydate))) {
+			next_item = next_in_ktree(mp_ctx);
+			miningpayouts_root = remove_from_ktree(miningpayouts_root, mp_item, cmp_miningpayouts);
+			copy_tv(&(mp->expirydate), now);
+			miningpayouts_root = add_to_ktree(miningpayouts_root, mp_item, cmp_miningpayouts);
+			mp_item = next_item;
+		} else
+			mp_item = next_in_ktree(mp_ctx);
+
+		DATA_MININGPAYOUTS_NULL(mp, mp_item);
+	}
+
+	pm_item = first_in_ktree(payments_root, pm_ctx);
+	DATA_PAYMENTS_NULL(payments, pm_item);
+	while (pm_item) {
+		if (payments->payoutid == payoutid &&
+		    CURRENT(&(payments->expirydate))) {
+			next_item = next_in_ktree(pm_ctx);
+			payments_root = remove_from_ktree(payments_root, pm_item, cmp_payments);
+			copy_tv(&(payments->expirydate), now);
+			payments_root = add_to_ktree(payments_root, pm_item, cmp_payments);
+			pm_item = next_item;
+		} else
+			pm_item = next_in_ktree(pm_ctx);
+
+		DATA_PAYMENTS_NULL(payments, pm_item);
+	}
+
+	ok = true;
+matane:
+	if (begun)
+		CKPQEnd(conn, ok);
+
+	if (locked) {
+		K_WUNLOCK(payments_free);
+		K_WUNLOCK(miningpayouts_free);
+		K_WUNLOCK(payouts_free);
+	}
+
+	CKPQDisco(&conn, conned);
+
+	if (lock)
+		ck_wunlock(&process_pplns_lock);
+
+	for (n = 0; n < par; n++)
+		free(params[n]);
+
+	if (ok)
+		return po_item;
+	else
+		return NULL;
+}
+
 bool payouts_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
@@ -5836,7 +5649,15 @@ bool poolstats_add(PGconn *conn, bool store, char *poolinstance,
 		res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
 		rescode = PQresultStatus(res);
 		if (!PGOK(rescode)) {
-			PGLOGERR("Insert", rescode, conn);
+			bool show_msg = true;
+			char *code;
+			if (igndup) {
+				code = PQresultErrorField(res, PG_DIAG_SQLSTATE);
+				if (code && strcmp(code, SQL_UNIQUE_VIOLATION) == 0)
+					show_msg = false;
+			}
+			if (show_msg)
+				PGLOGERR("Insert", rescode, conn);
 			goto unparam;
 		}
 
@@ -6304,6 +6125,9 @@ bool markersummary_fill(PGconn *conn)
 
 	LOGDEBUG("%s(): select", __func__);
 
+	printf(TICK_PREFIX"ms 0\r");
+	fflush(stdout);
+
 	// TODO: limit how far back
 	sel = "select "
 		"markerid,userid,workername,diffacc,diffsta,diffdup,diffhi,"
@@ -6461,6 +6285,15 @@ bool markersummary_fill(PGconn *conn)
 
 		markersummary_to_pool(p_row, row);
 
+		_userinfo_update(NULL, NULL, row, false, false);
+
+		if (i == 0 || ((i+1) % 100000) == 0) {
+			printf(TICK_PREFIX"ms ");
+			pcom(i+1);
+			putchar('\r');
+			fflush(stdout);
+		}
+
 		tick();
 	}
 	if (!ok) {
@@ -6469,6 +6302,7 @@ bool markersummary_fill(PGconn *conn)
 	}
 
 	p_n = markersummary_pool_store->count;
+
 	//K_WUNLOCK(markersummary_free);
 	PQclear(res);
 
@@ -6728,7 +6562,8 @@ bool workmarkers_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
 	PGresult *res;
-	K_ITEM *item;
+	K_ITEM *item, *wi_item;
+	WORKINFO *workinfo;
 	int n, i;
 	WORKMARKERS *row;
 	char *field;
@@ -6814,6 +6649,23 @@ bool workmarkers_fill(PGconn *conn)
 		workmarkers_workinfoid_root = add_to_ktree(workmarkers_workinfoid_root,
 							   item, cmp_workmarkers_workinfoid);
 		k_add_head(workmarkers_store, item);
+
+		if (dbstatus.newest_workmarker_workinfoid < row->workinfoidend) {
+			dbstatus.newest_workmarker_workinfoid = row->workinfoidend;
+			wi_item = find_workinfo(row->workinfoidend, NULL);
+			if (!wi_item) {
+				LOGEMERG("%s(): FAILURE workmarkerid %"PRId64
+					 " wid end %"PRId64" doesn't exist! "
+					 "You should abort ckdb and fix it, "
+					 " since the reload may skip some data",
+					 __func__, row->markerid,
+					 row->workinfoidend);
+			} else {
+				DATA_WORKINFO(workinfo, wi_item);
+				copy_tv(&(dbstatus.newest_createdate_workmarker_workinfo),
+					&(workinfo->createdate));
+			}
+		}
 
 		tick();
 	}

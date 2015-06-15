@@ -386,6 +386,18 @@ function getBlocks($user)
  return repDecode($rep);
 }
 #
+function getUserInfo($user)
+{
+ if ($user == false)
+	showIndex();
+ $flds = array('username' => $user);
+ $msg = msgEncode('userinfo', 'usr', $flds, $user);
+ $rep = sendsockreply('getUserInfo', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
 # e.g. $atts = array('ua_Reset.str' => 'FortyTwo',
 #			'ua_Reset.date' => 'now+3600')
 #			'ua_Tanuki.str' => 'Meme',

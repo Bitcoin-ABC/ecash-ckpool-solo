@@ -683,7 +683,8 @@ static char *cmd_poolstats_do(PGconn *conn, char *cmd, char *id, char *by,
 					by, code, inet, cd, igndup, trf_root);
 
 	if (!ok) {
-		LOGERR("%s() %s.failed.DBE", __func__, id);
+		if (!igndup)
+			LOGERR("%s() %s.failed.DBE", __func__, id);
 		return strdup("failed.DBE");
 	}
 	LOGDEBUG("%s.ok.", id);
@@ -698,13 +699,11 @@ static char *cmd_poolstats(PGconn *conn, char *cmd, char *id,
 {
 	bool igndup = false;
 
-	// confirm_summaries() doesn't call this
-	if (reloading) {
-		if (tv_equal(cd, &(dbstatus.newest_createdate_blocks)))
-			igndup = true;
-		else if (tv_newer(cd, &(dbstatus.newest_createdate_blocks)))
-			return NULL;
-	}
+	/* confirm_summaries() doesn't call this
+	 * We don't care about dups during reload since poolstats_fill()
+	 * doesn't load all the data */
+	if (reloading)
+		igndup = true;
 
 	return cmd_poolstats_do(conn, cmd, id, by, code, inet, cd, igndup, trf_root);
 }
@@ -1965,20 +1964,18 @@ static char *cmd_sharelog(PGconn *conn, char *cmd, char *id,
 		K_ITEM *i_ntime, *i_reward;
 		bool igndup = false;
 
-		if (reloading && !confirm_sharesummary) {
-			if (tv_equal(cd, &(dbstatus.newest_createdate_workinfo)))
-				igndup = true;
-			else if (tv_newer(cd, &(dbstatus.newest_createdate_workinfo)))
-				return NULL;
-		}
-
 		i_workinfoid = require_name(trf_root, "workinfoid", 1, NULL, reply, siz);
 		if (!i_workinfoid)
 			return strdup(reply);
 
-		if (confirm_sharesummary) {
-			TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
+		TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
 
+		if (reloading && !confirm_sharesummary) {
+			if (workinfoid <= dbstatus.newest_workinfoid)
+				igndup = true;
+		}
+
+		if (confirm_sharesummary) {
 			if (workinfoid < confirm_first_workinfoid ||
 			    workinfoid > confirm_last_workinfoid)
 				goto wiconf;
@@ -2056,12 +2053,6 @@ wiconf:
 		K_ITEM *i_secondaryuserid;
 		bool ok;
 
-		// This just excludes the shares we certainly don't need
-		if (reloading && !confirm_sharesummary) {
-			if (tv_newer(cd, &(dbstatus.sharesummary_firstshare)))
-				return NULL;
-		}
-
 		i_nonce = require_name(trf_root, "nonce", 1, NULL, reply, siz);
 		if (!i_nonce)
 			return strdup(reply);
@@ -2070,9 +2061,28 @@ wiconf:
 		if (!i_workinfoid)
 			return strdup(reply);
 
-		if (confirm_sharesummary) {
-			TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
+		TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
 
+		if (reloading && !confirm_sharesummary) {
+			/* ISDR (Ignored shares during reload)
+			 * This will discard any shares older than the newest
+			 *  workinfoidend of any workmarker - including ready
+			 *  but not processed workmarkers
+			 * This means that if a workmarker needs re-processing
+			 *  and all of it's shares need to be redone, that will
+			 *  require a seperate procedure to the reload
+			 *  This would be the (as yet non-existant)
+			 *   confirm_markersummary which will replace the
+			 *   now unusable confirm_sharesummary code
+			 * However, if the workmarker simply just needs to be
+			 *  flagged as processed, this avoids the problem of
+			 *  duplicating shares before flagging it
+			 */
+			if (workinfoid <= dbstatus.newest_workmarker_workinfoid)
+				return NULL;
+		}
+
+		if (confirm_sharesummary) {
 			if (workinfoid < confirm_first_workinfoid ||
 			    workinfoid > confirm_last_workinfoid)
 				goto sconf;
@@ -2151,12 +2161,6 @@ sconf:
 		K_ITEM *i_error, *i_secondaryuserid;
 		bool ok;
 
-		// This just excludes the shareerrors we certainly don't need
-		if (reloading && !confirm_sharesummary) {
-			if (tv_newer(cd, &(dbstatus.sharesummary_firstshare)))
-				return NULL;
-		}
-
 		i_username = require_name(trf_root, "username", 1, NULL, reply, siz);
 		if (!i_username)
 			return strdup(reply);
@@ -2165,6 +2169,13 @@ sconf:
 		if (!i_workinfoid)
 			return strdup(reply);
 
+		TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
+
+		if (reloading && !confirm_sharesummary) {
+			// See comment 'ISDR' above for shares
+			if (workinfoid <= dbstatus.newest_workmarker_workinfoid)
+				return NULL;
+		}
 		if (confirm_sharesummary) {
 			TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
 
@@ -2216,14 +2227,17 @@ seconf:
 		tv_t ss_first, ss_last;
 		bool ok;
 
-		if (reloading && !confirm_sharesummary) {
-			if (tv_newer(cd, &(dbstatus.sharesummary_firstshare)))
-				return NULL;
-		}
-
 		i_workinfoid = require_name(trf_root, "workinfoid", 1, NULL, reply, siz);
 		if (!i_workinfoid)
 			return strdup(reply);
+
+		TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
+
+		if (reloading && !confirm_sharesummary) {
+			// This excludes any already summarised
+			if (workinfoid <= dbstatus.newest_workmarker_workinfoid)
+				return NULL;
+		}
 
 		if (confirm_sharesummary) {
 			TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
@@ -2237,27 +2251,19 @@ seconf:
 		if (!i_poolinstance)
 			return strdup(reply);
 
-		TXT_TO_BIGINT("workinfoid", transfer_data(i_workinfoid), workinfoid);
-
-		ok = workinfo_age(conn, workinfoid,
-					transfer_data(i_poolinstance),
-					by, code, inet, cd,
-					&ss_first, &ss_last,
-					&ss_count, &s_count, &s_diff);
-
+		ok = workinfo_age(workinfoid, transfer_data(i_poolinstance),
+				  by, code, inet, cd, &ss_first, &ss_last,
+				  &ss_count, &s_count, &s_diff);
 		if (!ok) {
 			LOGERR("%s(%s) %s.failed.DATA", __func__, cmd, id);
 			return strdup("failed.DATA");
 		} else {
-			/* Don't slow down the reload - do them later
-			 * N.B. this means if you abort/terminate the reload,
-			 * next restart will again go back to the oldest
-			 * unaged sharesummary due to a pool terminate */
+			/* Don't slow down the reload - do them later */
 			if (!reloading) {
 				// Aging is a queued item thus the reply is ignored
-				auto_age_older(conn, workinfoid,
-						     transfer_data(i_poolinstance),
-						     by, code, inet, cd);
+				auto_age_older(workinfoid,
+						transfer_data(i_poolinstance),
+						by, code, inet, cd);
 			}
 		}
 		LOGDEBUG("%s.ok.aged %"PRId64, id, workinfoid);
@@ -4514,34 +4520,27 @@ static char *cmd_payouts(PGconn *conn, char *cmd, char *id, tv_t *now,
 			 "%"PRId32"/%s",
 			 payoutid, old_payouts2->status, payouts2->status,
 			 payouts2->height, payouts2->blockhash);
-/*
 	} else if (strcasecmp(action, "expire") == 0) {
-		/ TODO: Expire the payout - effectively deletes it
+		/* Expire the payout - effectively deletes it
 		 * Require payoutid
-		 * If any payments are paid then don't allow it /
+		 * TODO: If any payments are paid then don't allow it */
 		i_payoutid = require_name(trf_root, "payoutid", 1,
 					  (char *)intpatt, reply, siz);
 		if (!i_payoutid)
 			return strdup(reply);
 		TXT_TO_BIGINT("payoutid", transfer_data(i_payoutid), payoutid);
 
-		K_WLOCK(payouts_free);
-		p_item = find_payoutid(payoutid);
+		p_item = payouts_full_expire(conn, payoutid, now, true);
 		if (!p_item) {
-			K_WUNLOCK(payouts_free);
-			snprintf(reply, siz,
-				 "no payout with id %"PRId64, payoutid);
+			snprintf(reply, siz, "failed payout %"PRId64, payoutid);
 			return strdup(reply);
 		}
-		p2_item = k_unlink_head(payouts_free);
-		K_WUNLOCK(payouts_free);
-
-		DATA_PAYOUTS(payouts2, p2_item);
-		bzero(payouts2, sizeof(*payouts2));
-		payouts2->payoutid = payouts->payoutid;
-
-		...
-*/
+		DATA_PAYOUTS(payouts, p_item);
+		snprintf(msg, sizeof(msg),
+			 "payout %"PRId64" block %"PRId32" reward %"PRId64
+			 " status '%s'",
+			 payouts->payoutid, payouts->height,
+			 payouts->minerreward, payouts->status);
 	} else if (strcasecmp(action, "process") == 0) {
 		/* Generate a payout
 		 * Require height, blockhash and addrdate
@@ -4809,7 +4808,7 @@ static char *cmd_shifts(__maybe_unused PGconn *conn, char *cmd, char *id,
 	tv_t marker_end = { 0L, 0L };
 	int rows, want, i, where_all;
 	int64_t maxrows;
-	double wm_count;
+	double wm_count, d;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -4893,8 +4892,14 @@ static char *cmd_shifts(__maybe_unused PGconn *conn, char *cmd, char *id,
 			while (ms_item && ms->markerid == wm->markerid &&
 			       ms->userid == users->userid) {
 				ms_add.diffacc += ms->diffacc;
+				ms_add.diffsta += ms->diffsta;
+				ms_add.diffdup += ms->diffdup;
+				ms_add.diffhi += ms->diffhi;
 				ms_add.diffrej += ms->diffrej;
 				ms_add.shareacc += ms->shareacc;
+				ms_add.sharesta += ms->sharesta;
+				ms_add.sharedup += ms->sharedup;
+				ms_add.sharehi += ms->sharehi;
 				ms_add.sharerej += ms->sharerej;
 
 				want = worker_offset(selects, ms->workername);
@@ -4905,8 +4910,10 @@ static char *cmd_shifts(__maybe_unused PGconn *conn, char *cmd, char *id,
 								   want, rows, reply, FLDSEP);
 					APPEND_REALLOC(buf, off, len, tmp);
 
-					double_to_buf(ms->diffrej, reply, sizeof(reply));
-					snprintf(tmp, sizeof(tmp), "%d_diffrej:%d=%s%c",
+					d = ms->diffsta + ms->diffdup +
+					    ms->diffhi + ms->diffrej;
+					double_to_buf(d, reply, sizeof(reply));
+					snprintf(tmp, sizeof(tmp), "%d_diffinv:%d=%s%c",
 								   want, rows, reply, FLDSEP);
 					APPEND_REALLOC(buf, off, len, tmp);
 
@@ -4915,8 +4922,10 @@ static char *cmd_shifts(__maybe_unused PGconn *conn, char *cmd, char *id,
 								   want, rows, reply, FLDSEP);
 					APPEND_REALLOC(buf, off, len, tmp);
 
-					double_to_buf(ms->sharerej, reply, sizeof(reply));
-					snprintf(tmp, sizeof(tmp), "%d_sharerej:%d=%s%c",
+					d = ms->sharesta + ms->sharedup +
+					    ms->sharehi + ms->sharerej;
+					double_to_buf(d, reply, sizeof(reply));
+					snprintf(tmp, sizeof(tmp), "%d_shareinv:%d=%s%c",
 								   want, rows, reply, FLDSEP);
 					APPEND_REALLOC(buf, off, len, tmp);
 				}
@@ -5000,8 +5009,10 @@ static char *cmd_shifts(__maybe_unused PGconn *conn, char *cmd, char *id,
 							   reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
-				double_to_buf(ms_add.diffrej, reply, sizeof(reply));
-				snprintf(tmp, sizeof(tmp), "%d_diffrej:%d=%s%c",
+				d = ms_add.diffsta + ms_add.diffdup +
+				    ms_add.diffhi + ms_add.diffrej;
+				double_to_buf(d, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "%d_diffinv:%d=%s%c",
 							   where_all, rows,
 							   reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
@@ -5012,8 +5023,10 @@ static char *cmd_shifts(__maybe_unused PGconn *conn, char *cmd, char *id,
 							   reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
-				double_to_buf(ms_add.sharerej, reply, sizeof(reply));
-				snprintf(tmp, sizeof(tmp), "%d_sharerej:%d=%s%c",
+				d = ms_add.sharesta + ms_add.sharedup +
+				    ms_add.sharehi + ms_add.sharerej;
+				double_to_buf(d, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "%d_shareinv:%d=%s%c",
 							   where_all, rows,
 							   reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
@@ -5038,7 +5051,7 @@ static char *cmd_shifts(__maybe_unused PGconn *conn, char *cmd, char *id,
 			APPEND_REALLOC(buf, off, len, tmp);
 			snprintf(tmp, sizeof(tmp),
 				 "%d_flds=%s%c", i,
-				 "diffacc,diffrej,shareacc,sharerej", FLDSEP);
+				 "diffacc,diffinv,shareacc,shareinv", FLDSEP);
 			APPEND_REALLOC(buf, off, len, tmp);
 		}
 	}
@@ -5194,6 +5207,7 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USEINFO(poolstats, 1, 1);
 	USEINFO(userstats, 2, 1);
 	USEINFO(workerstatus, 1, 1);
+	USEINFO(userinfo, 1, 1);
 	USEINFO(msgline, 1, 0);
 	USEINFO(workqueue, 1, 0);
 	USEINFO(transfer, 0, 0);
@@ -5666,7 +5680,7 @@ static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
 	tv_t marker_end = { 0L, 0L };
 	int rows;
 	int64_t maxrows;
-	double wm_count;
+	double wm_count, d;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -5728,8 +5742,10 @@ static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
 							   0, rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
-				double_to_buf(ms->diffrej, reply, sizeof(reply));
-				snprintf(tmp, sizeof(tmp), "%d_diffrej:%d=%s%c",
+				d = ms->diffsta + ms->diffdup + ms->diffhi +
+				    ms->diffrej;
+				double_to_buf(d, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "%d_diffinv:%d=%s%c",
 							   0, rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
@@ -5738,8 +5754,10 @@ static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
 							   0, rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 
-				double_to_buf(ms->sharerej, reply, sizeof(reply));
-				snprintf(tmp, sizeof(tmp), "%d_sharerej:%d=%s%c",
+				d = ms->sharesta + ms->sharedup + ms->sharehi +
+				    ms->sharerej;
+				double_to_buf(d, reply, sizeof(reply));
+				snprintf(tmp, sizeof(tmp), "%d_shareinv:%d=%s%c",
 							   0, rows, reply, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 			}
@@ -5824,7 +5842,7 @@ static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
 	snprintf(tmp, sizeof(tmp), "%d_pool=%s%c", 0, "all", FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "%d_flds=%s%c",
-		 0, "diffacc,diffrej,shareacc,sharerej", FLDSEP);
+		 0, "diffacc,diffinv,shareacc,shareinv", FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "prefix_all=%d_%c", 0, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
@@ -5861,6 +5879,88 @@ static char *cmd_shsta(__maybe_unused PGconn *conn, char *cmd, char *id,
 	snprintf(buf, sizeof(buf), "ok.%s", cmd);
 	LOGDEBUG("%s.%s", id, buf);
 	return strdup(buf);
+}
+
+static char *cmd_userinfo(__maybe_unused PGconn *conn, char *cmd, char *id,
+			  __maybe_unused tv_t *now, __maybe_unused char *by,
+			  __maybe_unused char *code, __maybe_unused char *inet,
+			  __maybe_unused tv_t *notcd,
+			  __maybe_unused K_TREE *trf_root)
+{
+	K_ITEM *ui_item;
+	USERINFO *userinfo;
+	char reply[1024] = "";
+	char tmp[1024];
+	size_t len, off;
+	double d;
+	char *buf;
+	int rows;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	APPEND_REALLOC_INIT(buf, off, len);
+	APPEND_REALLOC(buf, off, len, "ok.");
+
+	rows = 0;
+	K_RLOCK(userinfo_free);
+	ui_item = userinfo_store->head;
+	while (ui_item) {
+		DATA_USERINFO(userinfo, ui_item);
+
+		str_to_buf(userinfo->username, reply, sizeof(reply));
+		snprintf(tmp, sizeof(tmp), "username:%d=%s%c",
+			 rows, reply, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
+		snprintf(tmp, sizeof(tmp), "blocks:%d=%d%c", rows,
+			 userinfo->blocks - userinfo->orphans, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
+		snprintf(tmp, sizeof(tmp), "orphans:%d=%d%c", rows,
+			 userinfo->orphans, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
+		double_to_buf(userinfo->diffacc, reply, sizeof(reply));
+		snprintf(tmp, sizeof(tmp), "diffacc:%d=%s%c", rows, reply, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
+		d = userinfo->diffsta + userinfo->diffdup + userinfo->diffhi +
+		    userinfo->diffrej;
+		double_to_buf(d, reply, sizeof(reply));
+		snprintf(tmp, sizeof(tmp), "diffinv:%d=%s%c", rows, reply, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
+		double_to_buf(userinfo->shareacc, reply, sizeof(reply));
+		snprintf(tmp, sizeof(tmp), "shareacc:%d=%s%c", rows, reply, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
+		d = userinfo->sharesta + userinfo->sharedup + userinfo->sharehi +
+		    userinfo->sharerej;
+		double_to_buf(d, reply, sizeof(reply));
+		snprintf(tmp, sizeof(tmp), "shareinv:%d=%s%c", rows, reply, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
+		snprintf(tmp, sizeof(tmp), "lastblock=%ld%c",
+					   userinfo->last_block.tv_sec, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+
+		rows++;
+		ui_item = ui_item->next;
+	}
+	K_RUNLOCK(userinfo_free);
+
+	snprintf(tmp, sizeof(tmp),
+		 "rows=%d%cflds=%s%c",
+		 rows, FLDSEP,
+		 "username,blocks,orphans,diffacc,diffinv,shareacc,shareinv,"
+		 "lastblock", FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+
+	snprintf(tmp, sizeof(tmp), "arn=%s%carp=", "UserInfo", FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+
+	LOGDEBUG("%s.ok.%d_rows", id, rows);
+	return buf;
 }
 
 // TODO: limit access by having seperate sockets for each
@@ -5975,5 +6075,6 @@ struct CMDS ckdb_cmds[] = {
 	{ CMD_MARKS,	"marks",	false,	false,	cmd_marks,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_PSHIFT,	"pshift",	false,	false,	cmd_pshift,	SEQ_NONE,	ACCESS_SYSTEM ACCESS_WEB },
 	{ CMD_SHSTA,	"shsta",	true,	false,	cmd_shsta,	SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_USERINFO,	"userinfo",	false,	false,	cmd_userinfo,	SEQ_NONE,	ACCESS_WEB },
 	{ CMD_END,	NULL,		false,	false,	NULL,		SEQ_NONE,	NULL }
 };

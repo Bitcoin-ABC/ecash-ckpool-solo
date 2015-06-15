@@ -55,7 +55,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.0"
-#define CKDB_VERSION DB_VERSION"-1.091"
+#define CKDB_VERSION DB_VERSION"-1.112"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -105,6 +105,9 @@ extern int switch_state;
 #define BLANK " "
 extern char *EMPTY;
 
+// To ensure there's space for the ticker
+#define TICK_PREFIX "  "
+
 // Field patterns
 extern const char *userpatt;
 extern const char *mailpatt;
@@ -125,20 +128,12 @@ extern const char *addrpatt;
 #define MAX_PAYADDR '~'
 
 typedef struct loadstatus {
-	tv_t oldest_sharesummary_firstshare_n;
-	tv_t newest_sharesummary_firstshare_a;
-	tv_t newest_sharesummary_firstshare_ay;
-	tv_t sharesummary_firstshare; // whichever of above 2 used
-	tv_t oldest_sharesummary_firstshare_a;
-	tv_t newest_sharesummary_firstshare_y;
+	int64_t newest_workmarker_workinfoid;
+	int64_t newest_workinfoid;
+	tv_t newest_createdate_workmarker_workinfo;
 	tv_t newest_createdate_workinfo;
 	tv_t newest_createdate_poolstats;
-	tv_t newest_starttimeband_userstats;
 	tv_t newest_createdate_blocks;
-	int64_t oldest_workinfoid_n; // of oldest firstshare sharesummary n
-	int64_t oldest_workinfoid_a; // of oldest firstshare sharesummary a
-	int64_t newest_workinfoid_a; // of newest firstshare sharesummary a
-	int64_t newest_workinfoid_y; // of newest firstshare sharesummary y
 } LOADSTATUS;
 extern LOADSTATUS dbstatus;
 
@@ -403,6 +398,7 @@ enum cmd_values {
 	CMD_MARKS,
 	CMD_PSHIFT,
 	CMD_SHSTA,
+	CMD_USERINFO,
 	CMD_END
 };
 
@@ -1365,10 +1361,6 @@ typedef struct sharesummary {
 	double sharerej;
 	int64_t sharecount;
 	int64_t errorcount;
-	int64_t countlastupdate; // non-DB field
-	bool inserted; // non-DB field
-	bool saveaged; // non-DB field
-	bool reset; // non-DB field
 	tv_t firstshare;
 	tv_t lastshare;
 	double lastdiffacc;
@@ -1929,6 +1921,35 @@ extern const char *marktype_shift_end_skip;
 #define MARK_USED_STR "u"
 #define MUSED(_status) (tolower((_status)[0]) == MARK_USED)
 
+// USERINFO from various incoming data
+typedef struct userinfo {
+	int64_t userid;
+	char username[TXT_BIG+1];
+	int blocks;
+	int orphans; // How many blocks are orphans
+	tv_t last_block;
+	// For all time
+	double diffacc;
+	double diffsta;
+	double diffdup;
+	double diffhi;
+	double diffrej;
+	double shareacc;
+	double sharesta;
+	double sharedup;
+	double sharehi;
+	double sharerej;
+} USERINFO;
+
+#define ALLOC_USERINFO 1000
+#define LIMIT_USERINFO 0
+#define INIT_USERINFO(_item) INIT_GENERIC(_item, userinfo)
+#define DATA_USERINFO(_var, _item) DATA_GENERIC(_var, _item, userinfo, true)
+
+extern K_TREE *userinfo_root;
+extern K_LIST *userinfo_free;
+extern K_STORE *userinfo_store;
+
 extern void logmsg(int loglevel, const char *fmt, ...);
 extern void setnow(tv_t *now);
 extern void tick();
@@ -1952,6 +1973,8 @@ extern void sequence_report(bool lock);
 // optioncontrol names for PPLNS N diff calculation
 #define PPLNSDIFFTIMES "pplns_diff_times"
 #define PPLNSDIFFADD "pplns_diff_add"
+
+#define REWARDOVERRIDE "MinerReward"
 
 // Data free functions (first)
 extern void free_msgline_data(K_ITEM *item, bool t_lock, bool t_cull);
@@ -2101,10 +2124,10 @@ extern cmp_t _cmp_height(char *coinbase1a, char *coinbase1b, WHERE_FFL_ARGS);
 extern cmp_t cmp_workinfo_height(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_workinfo(int64_t workinfoid, K_TREE_CTX *ctx);
 extern K_ITEM *next_workinfo(int64_t workinfoid, K_TREE_CTX *ctx);
-extern bool workinfo_age(PGconn *conn, int64_t workinfoid, char *poolinstance,
-			 char *by, char *code, char *inet, tv_t *cd,
-			 tv_t *ss_first, tv_t *ss_last, int64_t *ss_count,
-			 int64_t *s_count, int64_t *s_diff);
+extern bool workinfo_age(int64_t workinfoid, char *poolinstance, char *by,
+			 char *code, char *inet, tv_t *cd, tv_t *ss_first,
+			 tv_t *ss_last, int64_t *ss_count, int64_t *s_count,
+			 int64_t *s_diff);
 extern cmp_t cmp_shares(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_shareerrors(K_ITEM *a, K_ITEM *b);
 extern void dsp_sharesummary(K_ITEM *item, FILE *stream);
@@ -2122,8 +2145,8 @@ extern void zero_sharesummary(SHARESUMMARY *row, tv_t *cd, double diff);
 extern K_ITEM *_find_sharesummary(int64_t userid, char *workername,
 				  int64_t workinfoid, bool pool);
 extern K_ITEM *find_last_sharesummary(int64_t userid, char *workername);
-extern void auto_age_older(PGconn *conn, int64_t workinfoid, char *poolinstance,
-			   char *by, char *code, char *inet, tv_t *cd);
+extern void auto_age_older(int64_t workinfoid, char *poolinstance, char *by,
+			   char *code, char *inet, tv_t *cd);
 #define dbhash2btchash(_hash, _buf, _siz) \
 	_dbhash2btchash(_hash, _buf, _siz, WHERE_FFL_HERE)
 void _dbhash2btchash(char *hash, char *buf, size_t siz, WHERE_FFL_ARGS);
@@ -2192,6 +2215,17 @@ extern bool _marks_description(char *description, size_t siz, char *marktype,
 				int32_t height, char *shift, char *other,
 				WHERE_FFL_ARGS);
 extern char *shiftcode(tv_t *createdate);
+extern cmp_t cmp_userinfo(K_ITEM *a, K_ITEM *b);
+#define get_userinfo(_userid) _get_userinfo(_userid, true)
+extern K_ITEM *_get_userinfo(int64_t userid, bool lock);
+#define find_userinfo(_userid) _find_create_userinfo(_userid, true, WHERE_FFL_HERE)
+#define _find_userinfo(_userid, _lock) _find_create_userinfo(_userid, _lock, WHERE_FFL_HERE)
+extern K_ITEM *_find_create_userinfo(int64_t userid, bool lock, WHERE_FFL_ARGS);
+#define userinfo_update(_s, _ss, _ms) _userinfo_update(_s, _ss, _ms, true, true)
+extern void _userinfo_update(SHARES *shares, SHARESUMMARY *sharesummary,
+			     MARKERSUMMARY *markersummary, bool ss_sub, bool lock);
+#define userinfo_block(_blocks, _isnew) _userinfo_block(_blocks, _isnew, true)
+extern void _userinfo_block(BLOCKS *blocks, bool isnew, bool lock);
 
 // ***
 // *** PostgreSQL functions ckdb_dbio.c
@@ -2203,6 +2237,8 @@ extern char *shiftcode(tv_t *createdate);
 #define PGOK(_res) ((_res) == PGRES_COMMAND_OK || \
 			(_res) == PGRES_TUPLES_OK || \
 			(_res) == PGRES_EMPTY_QUERY)
+
+#define SQL_UNIQUE_VIOLATION "23505"
 
 #define CKPQ_READ true
 #define CKPQ_WRITE false
@@ -2307,11 +2343,12 @@ extern bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmar
 						char *by, char *code, char *inet,
 						tv_t *cd, K_TREE *trf_root);
 extern char *ooo_status(char *buf, size_t siz);
-#define sharesummary_update(_conn, _s_row, _e_row, _ss_item, _by, _code, _inet, _cd) \
-		_sharesummary_update(_conn, _s_row, _e_row, _ss_item, _by, _code, _inet, _cd, \
+#define sharesummary_update(_s_row, _e_row, _ss_item, _by, _code, _inet, _cd) \
+		_sharesummary_update(_s_row, _e_row, _ss_item, _by, _code, _inet, _cd, \
 					WHERE_FFL_HERE)
-extern bool _sharesummary_update(PGconn *conn, SHARES *s_row, SHAREERRORS *e_row, K_ITEM *ss_item,
-				char *by, char *code, char *inet, tv_t *cd, WHERE_FFL_ARGS);
+extern bool _sharesummary_update(SHARES *s_row, SHAREERRORS *e_row, K_ITEM *ss_item,
+				 char *by, char *code, char *inet, tv_t *cd,
+				 WHERE_FFL_ARGS);
 extern bool sharesummary_fill(PGconn *conn);
 extern bool blocks_stats(PGconn *conn, int32_t height, char *blockhash,
 			 double diffacc, double diffinv, double shareacc,
@@ -2336,6 +2373,8 @@ extern void payouts_add_ram(bool ok, K_ITEM *p_item, K_ITEM *old_p_item,
 extern bool payouts_add(PGconn *conn, bool add, K_ITEM *p_item,
 			K_ITEM **old_p_item, char *by, char *code, char *inet,
 			tv_t *cd, K_TREE *trf_root, bool already);
+extern K_ITEM *payouts_full_expire(PGconn *conn, int64_t payoutid, tv_t *now,
+				bool lock);
 extern bool payouts_fill(PGconn *conn);
 extern bool auths_add(PGconn *conn, char *poolinstance, char *username,
 			char *workername, char *clientid, char *enonce1,

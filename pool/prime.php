@@ -84,7 +84,8 @@ function check()
 	'Pool' => array(
 		'Stats' => 'stats',
 		'Blocks' => 'blocks',
-		'Graph' => 'psperf'
+		'Graph' => 'psperf',
+		'Acclaim' => 'userinfo'
 	),
 	'Admin' => NULL,
 	'gap' => array( # options not shown

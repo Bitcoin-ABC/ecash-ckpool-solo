@@ -354,7 +354,7 @@ function logout()
 #
 function requestRegister()
 {
- $reg = getparam('Register', false);
+ $reg = getparam('Register', true);
  $reg2 = getparam('Reset', false);
  if ($reg !== NULL || $reg2 !== NULL)
  {
