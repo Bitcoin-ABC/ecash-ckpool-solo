@@ -2361,6 +2361,13 @@ static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, cons
 	return worker;
 }
 
+/* Braindead check to see if this btcaddress is an M of N script address which
+ * is currently unsupported as a generation address. */
+static bool script_address(const char *btcaddress)
+{
+	return btcaddress[0] == '3';
+}
+
 /* This simply strips off the first part of the workername and matches it to a
  * user or creates a new one. Needs to be entered with client holding a ref
  * count. */
@@ -2407,9 +2414,10 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	if (new_user && !ckp->proxy) {
 		/* Is this a btc address based username? */
 		if (len > 26 && len < 35) {
-			user->btcaddress = test_address(ckp, username);
-			if (user->btcaddress)
+			if (test_address(ckp, username) && !script_address(username)) {
+				user->btcaddress = true;
 				address_to_pubkeytxn(user->txnbin, username);
+			}
 		}
 		LOGNOTICE("Added new user %s%s", username, user->btcaddress ?
 			  " as address based registration" : "");
@@ -4647,13 +4655,6 @@ static void read_poolstats(ckpool_t *ckp)
 		decay_time(&stats->dsps1440, 0, tvsec_diff, 86400);
 		decay_time(&stats->dsps10080, 0, tvsec_diff, 604800);
 	}
-}
-
-/* Braindead check to see if this btcaddress is an M of N script address which
- * is currently unsupported as a generation address. */
-static bool script_address(const char *btcaddress)
-{
-	return btcaddress[0] == '3';
 }
 
 int stratifier(proc_instance_t *pi)
