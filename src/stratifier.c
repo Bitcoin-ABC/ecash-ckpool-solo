@@ -3510,6 +3510,8 @@ static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_va
 /* Needs to be entered with client holding a ref count. */
 static void update_client(sdata_t *sdata, const stratum_instance_t *client, const int64_t client_id)
 {
+	if (client->ckp->btcsolo)
+		return;
 	stratum_send_update(sdata, client_id, true);
 	stratum_send_diff(sdata, client);
 }
@@ -3641,7 +3643,7 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 		json_object_set_nocheck(val, "id", id_val);
 		json_object_set_new_nocheck(val, "error", json_null());
 		stratum_add_send(sdata, val, client_id);
-		if (!client->ckp->btcsolo && likely(client->subscribed))
+		if (likely(client->subscribed))
 			update_client(sdata, client, client_id);
 		return;
 	}
