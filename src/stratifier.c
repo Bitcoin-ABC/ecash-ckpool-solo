@@ -28,6 +28,14 @@
 #include "uthash.h"
 #include "utlist.h"
 
+#define MIN1	60
+#define MIN5	300
+#define MIN15	900
+#define HOUR	3600
+#define HOUR6	21600
+#define DAY	86400
+#define WEEK	604800
+
 /* Consistent across all pool instances */
 static const char *workpadding = "000000800000000000000000000000000000000000000000000000000000000000000000000000000000000080020000";
 static const char *scriptsig_header = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff";
@@ -214,6 +222,7 @@ struct worker_instance {
 	double dsps5;
 	double dsps60;
 	double dsps1440;
+	double dsps10080;
 	tv_t last_share;
 	tv_t last_update;
 	time_t start_time;
@@ -2262,11 +2271,11 @@ static void read_userstats(ckpool_t *ckp, user_instance_t *user)
 	if (tvsec_diff > 60) {
 		LOGINFO("Old user stats indicate not logged for %d seconds, decaying stats",
 			tvsec_diff);
-		decay_time(&user->dsps1, 0, tvsec_diff, 60);
-		decay_time(&user->dsps5, 0, tvsec_diff, 300);
-		decay_time(&user->dsps60, 0, tvsec_diff, 3600);
-		decay_time(&user->dsps1440, 0, tvsec_diff, 86400);
-		decay_time(&user->dsps10080, 0, tvsec_diff, 604800);
+		decay_time(&user->dsps1, 0, tvsec_diff, MIN1);
+		decay_time(&user->dsps5, 0, tvsec_diff, MIN5);
+		decay_time(&user->dsps60, 0, tvsec_diff, HOUR);
+		decay_time(&user->dsps1440, 0, tvsec_diff, DAY);
+		decay_time(&user->dsps10080, 0, tvsec_diff, WEEK);
 	}
 }
 
@@ -2304,6 +2313,7 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 	worker->dsps5 = dsps_from_key(val, "hashrate5m");
 	worker->dsps60 = dsps_from_key(val, "hashrate1d");
 	worker->dsps1440 = dsps_from_key(val, "hashrate1d");
+	worker->dsps10080 = dsps_from_key(val, "hashrate7d");
 	json_get_double(&worker->best_diff, val, "bestshare");
 	json_get_int64(&worker->last_update.tv_sec, val, "lastupdate");
 	LOGINFO("Successfully read worker %s stats %f %f %f %f %f", worker->workername,
@@ -2314,10 +2324,10 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 	if (tvsec_diff > 60) {
 		LOGINFO("Old worker stats indicate not logged for %d seconds, decaying stats",
 			tvsec_diff);
-		decay_time(&worker->dsps1, 0, tvsec_diff, 60);
-		decay_time(&worker->dsps5, 0, tvsec_diff, 300);
-		decay_time(&worker->dsps60, 0, tvsec_diff, 3600);
-		decay_time(&worker->dsps1440, 0, tvsec_diff, 86400);
+		decay_time(&worker->dsps1, 0, tvsec_diff, MIN1);
+		decay_time(&worker->dsps5, 0, tvsec_diff, MIN5);
+		decay_time(&worker->dsps60, 0, tvsec_diff, HOUR);
+		decay_time(&worker->dsps1440, 0, tvsec_diff, DAY);
 	}
 }
 
@@ -2833,27 +2843,28 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const int diff
 	}
 
 	tdiff = sane_tdiff(&now_t, &client->last_share);
-	decay_time(&client->dsps1, diff, tdiff, 60);
-	decay_time(&client->dsps5, diff, tdiff, 300);
-	decay_time(&client->dsps60, diff, tdiff, 3600);
-	decay_time(&client->dsps1440, diff, tdiff, 86400);
-	decay_time(&client->dsps10080, diff, tdiff, 604800);
+	decay_time(&client->dsps1, diff, tdiff, MIN1);
+	decay_time(&client->dsps5, diff, tdiff, MIN5);
+	decay_time(&client->dsps60, diff, tdiff, HOUR);
+	decay_time(&client->dsps1440, diff, tdiff, DAY);
+	decay_time(&client->dsps10080, diff, tdiff, WEEK);
 	copy_tv(&client->last_share, &now_t);
 
 	tdiff = sane_tdiff(&now_t, &worker->last_share);
-	decay_time(&worker->dsps1, diff, tdiff, 60);
-	decay_time(&worker->dsps5, diff, tdiff, 300);
-	decay_time(&worker->dsps60, diff, tdiff, 3600);
-	decay_time(&worker->dsps1440, diff, tdiff, 86400);
+	decay_time(&worker->dsps1, diff, tdiff, MIN1);
+	decay_time(&worker->dsps5, diff, tdiff, MIN5);
+	decay_time(&worker->dsps60, diff, tdiff, HOUR);
+	decay_time(&worker->dsps1440, diff, tdiff, DAY);
+	decay_time(&worker->dsps10080, diff, tdiff, WEEK);
 	copy_tv(&worker->last_share, &now_t);
 	worker->idle = false;
 
 	tdiff = sane_tdiff(&now_t, &user->last_share);
-	decay_time(&user->dsps1, diff, tdiff, 60);
-	decay_time(&user->dsps5, diff, tdiff, 300);
-	decay_time(&user->dsps60, diff, tdiff, 3600);
-	decay_time(&user->dsps1440, diff, tdiff, 86400);
-	decay_time(&user->dsps10080, diff, tdiff, 604800);
+	decay_time(&user->dsps1, diff, tdiff, MIN1);
+	decay_time(&user->dsps5, diff, tdiff, MIN5);
+	decay_time(&user->dsps60, diff, tdiff, HOUR);
+	decay_time(&user->dsps1440, diff, tdiff, DAY);
+	decay_time(&user->dsps10080, diff, tdiff, WEEK);
 	copy_tv(&user->last_share, &now_t);
 	client->idle = false;
 
@@ -4339,11 +4350,11 @@ static void *statsupdate(void *arg)
 			/* Decay times per connected instance */
 			if (per_tdiff > 60) {
 				/* No shares for over a minute, decay to 0 */
-				decay_time(&client->dsps1, 0, per_tdiff, 60);
-				decay_time(&client->dsps5, 0, per_tdiff, 300);
-				decay_time(&client->dsps60, 0, per_tdiff, 3600);
-				decay_time(&client->dsps1440, 0, per_tdiff, 86400);
-				decay_time(&client->dsps10080, 0, per_tdiff, 604800);
+				decay_time(&client->dsps1, 0, per_tdiff, MIN1);
+				decay_time(&client->dsps5, 0, per_tdiff, MIN5);
+				decay_time(&client->dsps60, 0, per_tdiff, HOUR);
+				decay_time(&client->dsps1440, 0, per_tdiff, DAY);
+				decay_time(&client->dsps10080, 0, per_tdiff, WEEK);
 				idle_workers++;
 				if (per_tdiff > 600)
 					client->idle = true;
@@ -4362,10 +4373,11 @@ static void *statsupdate(void *arg)
 			DL_FOREACH(user->worker_instances, worker) {
 				per_tdiff = tvdiff(&now, &worker->last_share);
 				if (per_tdiff > 60) {
-					decay_time(&worker->dsps1, 0, per_tdiff, 60);
-					decay_time(&worker->dsps5, 0, per_tdiff, 300);
-					decay_time(&worker->dsps60, 0, per_tdiff, 3600);
-					decay_time(&worker->dsps1440, 0, per_tdiff, 86400);
+					decay_time(&worker->dsps1, 0, per_tdiff, MIN1);
+					decay_time(&worker->dsps5, 0, per_tdiff, MIN5);
+					decay_time(&worker->dsps60, 0, per_tdiff, HOUR);
+					decay_time(&worker->dsps1440, 0, per_tdiff, DAY);
+					decay_time(&worker->dsps10080, 0, per_tdiff, WEEK);
 					worker->idle = true;
 				}
 				ghs = worker->dsps1 * nonces;
@@ -4380,13 +4392,17 @@ static void *statsupdate(void *arg)
 				ghs = worker->dsps1440 * nonces;
 				suffix_string(ghs, suffix1440, 16, 0);
 
+				ghs = worker->dsps10080 * nonces;
+				suffix_string(ghs, suffix10080, 16, 0);
+
 				copy_tv(&worker->last_update, &now);
 
-				JSON_CPACK(val, "{ss,ss,ss,ss,si,sf}",
+				JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,sf}",
 						"hashrate1m", suffix1,
 						"hashrate5m", suffix5,
 						"hashrate1hr", suffix60,
 						"hashrate1d", suffix1440,
+						"hashrate7d", suffix10080,
 						"lastupdate", now.tv_sec,
 						"bestshare", worker->best_diff);
 
@@ -4399,11 +4415,11 @@ static void *statsupdate(void *arg)
 			/* Decay times per user */
 			per_tdiff = tvdiff(&now, &user->last_share);
 			if (per_tdiff > 60) {
-				decay_time(&user->dsps1, 0, per_tdiff, 60);
-				decay_time(&user->dsps5, 0, per_tdiff, 300);
-				decay_time(&user->dsps60, 0, per_tdiff, 3600);
-				decay_time(&user->dsps1440, 0, per_tdiff, 86400);
-				decay_time(&user->dsps10080, 0, per_tdiff, 604800);
+				decay_time(&user->dsps1, 0, per_tdiff, MIN1);
+				decay_time(&user->dsps5, 0, per_tdiff, MIN5);
+				decay_time(&user->dsps60, 0, per_tdiff, HOUR);
+				decay_time(&user->dsps1440, 0, per_tdiff, DAY);
+				decay_time(&user->dsps10080, 0, per_tdiff, WEEK);
 				idle = true;
 			}
 			ghs = user->dsps1 * nonces;
@@ -4552,18 +4568,18 @@ static void *statsupdate(void *arg)
 			stats->accounted_diff_shares += stats->unaccounted_diff_shares;
 			stats->accounted_rejects += stats->unaccounted_rejects;
 
-			decay_time(&stats->sps1, stats->unaccounted_shares, 1.875, 60);
-			decay_time(&stats->sps5, stats->unaccounted_shares, 1.875, 300);
-			decay_time(&stats->sps15, stats->unaccounted_shares, 1.875, 900);
-			decay_time(&stats->sps60, stats->unaccounted_shares, 1.875, 3600);
+			decay_time(&stats->sps1, stats->unaccounted_shares, 1.875, MIN1);
+			decay_time(&stats->sps5, stats->unaccounted_shares, 1.875, MIN5);
+			decay_time(&stats->sps15, stats->unaccounted_shares, 1.875, MIN15);
+			decay_time(&stats->sps60, stats->unaccounted_shares, 1.875, HOUR);
 
-			decay_time(&stats->dsps1, stats->unaccounted_diff_shares, 1.875, 60);
-			decay_time(&stats->dsps5, stats->unaccounted_diff_shares, 1.875, 300);
-			decay_time(&stats->dsps15, stats->unaccounted_diff_shares, 1.875, 900);
-			decay_time(&stats->dsps60, stats->unaccounted_diff_shares, 1.875, 3600);
-			decay_time(&stats->dsps360, stats->unaccounted_diff_shares, 1.875, 21600);
-			decay_time(&stats->dsps1440, stats->unaccounted_diff_shares, 1.875, 86400);
-			decay_time(&stats->dsps10080, stats->unaccounted_diff_shares, 1.875, 604800);
+			decay_time(&stats->dsps1, stats->unaccounted_diff_shares, 1.875, MIN1);
+			decay_time(&stats->dsps5, stats->unaccounted_diff_shares, 1.875, MIN5);
+			decay_time(&stats->dsps15, stats->unaccounted_diff_shares, 1.875, MIN15);
+			decay_time(&stats->dsps60, stats->unaccounted_diff_shares, 1.875, HOUR);
+			decay_time(&stats->dsps360, stats->unaccounted_diff_shares, 1.875, HOUR6);
+			decay_time(&stats->dsps1440, stats->unaccounted_diff_shares, 1.875, DAY);
+			decay_time(&stats->dsps10080, stats->unaccounted_diff_shares, 1.875, WEEK);
 
 			stats->unaccounted_shares =
 			stats->unaccounted_diff_shares =
@@ -4682,18 +4698,18 @@ static void read_poolstats(ckpool_t *ckp)
 	if (tvsec_diff > 60) {
 		LOGNOTICE("Old pool stats indicate pool down for %d seconds, decaying stats",
 			  tvsec_diff);
-		decay_time(&stats->sps1, 0, tvsec_diff, 60);
-		decay_time(&stats->sps5, 0, tvsec_diff, 300);
-		decay_time(&stats->sps15, 0, tvsec_diff, 900);
-		decay_time(&stats->sps60, 0, tvsec_diff, 3600);
+		decay_time(&stats->sps1, 0, tvsec_diff, MIN1);
+		decay_time(&stats->sps5, 0, tvsec_diff, MIN5);
+		decay_time(&stats->sps15, 0, tvsec_diff, MIN15);
+		decay_time(&stats->sps60, 0, tvsec_diff, HOUR);
 
-		decay_time(&stats->dsps1, 0, tvsec_diff, 60);
-		decay_time(&stats->dsps5, 0, tvsec_diff, 300);
-		decay_time(&stats->dsps15, 0, tvsec_diff, 900);
-		decay_time(&stats->dsps60, 0, tvsec_diff, 3600);
-		decay_time(&stats->dsps360, 0, tvsec_diff, 21600);
-		decay_time(&stats->dsps1440, 0, tvsec_diff, 86400);
-		decay_time(&stats->dsps10080, 0, tvsec_diff, 604800);
+		decay_time(&stats->dsps1, 0, tvsec_diff, MIN1);
+		decay_time(&stats->dsps5, 0, tvsec_diff, MIN5);
+		decay_time(&stats->dsps15, 0, tvsec_diff, MIN15);
+		decay_time(&stats->dsps60, 0, tvsec_diff, HOUR);
+		decay_time(&stats->dsps360, 0, tvsec_diff, HOUR6);
+		decay_time(&stats->dsps1440, 0, tvsec_diff, DAY);
+		decay_time(&stats->dsps10080, 0, tvsec_diff, WEEK);
 	}
 }
 
