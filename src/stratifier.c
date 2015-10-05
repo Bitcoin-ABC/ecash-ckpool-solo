@@ -1665,12 +1665,12 @@ static void reset_bestshares(sdata_t *sdata)
 static void block_solve(ckpool_t *ckp, const char *blockhash)
 {
 	ckmsg_t *block, *tmp, *found = NULL;
+	char *msg, *workername = NULL;
 	sdata_t *sdata = ckp->data;
 	char cdfield[64];
 	int height = 0;
 	ts_t ts_now;
 	json_t *val;
-	char *msg;
 
 	update_base(ckp, GEN_PRIORITY);
 
@@ -1689,6 +1689,7 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 		}
 		if (!strcmp(solvehash, blockhash)) {
 			dealloc(solvehash);
+			json_get_string(&workername, val, "workername");
 			found = block;
 			DL_DELETE(sdata->block_solves, block);
 			break;
@@ -1710,11 +1711,16 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 	ckdbq_add(ckp, ID_BLOCK, val);
 	free(found);
 
-	ASPRINTF(&msg, "Block %d solved by %s!", height, ckp->name);
+	if (unlikely(!workername))
+		workername = strdup("");
+
+	ASPRINTF(&msg, "Block %d solved by %s @ %s!", height, workername, ckp->name);
 	stratum_broadcast_message(sdata, msg);
 	free(msg);
 
-	LOGWARNING("Solved and confirmed block %d", height);
+	LOGWARNING("Solved and confirmed block %d by %s", height, workername);
+	free(workername);
+
 	reset_bestshares(sdata);
 }
 
