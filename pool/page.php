@@ -51,21 +51,60 @@ function addCSS($css)
  $page_css .= $css;
 }
 #
+global $added_gbase;
+$added_gbase = false;
 function addGBase()
 {
- $g = GBaseJS();
- addScript($g);
+ global $added_gbase;
+ if ($added_gbase == false)
+ {
+	$added_gbase = true;
+	$g = GBaseJS();
+	addScript($g);
+ }
 }
 #
+global $added_tips;
+$added_tips = false;
 function addTips()
 {
- $t = TipsJS();
- addScript($t);
-
- $tcss = TipsCSS();
- addCSS($tcss);
+ global $added_tips;
+ if ($added_tips == false)
+ {
+	$added_tips = true;
+	$t = TipsJS();
+	addScript($t);
+	$tcss = TipsCSS();
+	addCSS($tcss);
+ }
 }
 #
+global $added_sort;
+$added_sort = false;
+function addSort()
+{
+ global $added_sort;
+ if ($added_sort == false)
+ {
+	$added_sort = true;
+	$s = SortJS();
+	addScript($s);
+ }
+}
+#
+global $added_qr;
+$added_qr = false;
+function addQR()
+{
+ global $added_qr;
+ if ($added_qr == false)
+ {
+	$added_qr = true;
+	addGBase();
+	$q = QRJS();
+	addScript($q);
+ }
+}
 #
 function makeURL($page)
 {
@@ -75,6 +114,7 @@ function makeURL($page)
 	$page = '?k='.$page;
  return "/index.php$page";
 }
+#
 function makeLink($page, $rest = '')
 {
  $href = "<a href='".makeURL($page)."'";
@@ -113,19 +153,9 @@ function trm_force($html)
  return dotrm($html, false);
 }
 #
-function isCrap()
-{
- if (isset($_SERVER['HTTP_USER_AGENT']))
-	return strpos($_SERVER['HTTP_USER_AGENT'],'iP');
- else
-	return false;
-}
-#
 function pghead($css_marker, $script_marker, $name)
 {
  global $page_title;
-
- $iCrap = isCrap();
 
  $head = "<!DOCTYPE html>\n";
 
@@ -138,7 +168,7 @@ function pghead($css_marker, $script_marker, $name)
  $head .= HeadJS();
  $head .= "\n</script>\n";
  $head .= "<style type='text/css'>\n";
- $head .= HeadCSS($iCrap);
+ $head .= HeadCSS();
  $head .= "\n$css_marker\n</style>\n";
 
  $head .= '<meta name="robots" content="noindex">';
@@ -159,6 +189,7 @@ function pgtop($info, $dotop, $user, $douser)
  $nlb = '?';
  $pac = '0';
  $per = '0';
+ $perset = false;
  $uhr = '?GHs';
  $u1hr = '';
  if ($info !== false)
@@ -238,12 +269,46 @@ function pgtop($info, $dotop, $user, $douser)
 		}
 	}
 
+	if (isset($info['blockshareinv']))
+	{
+		$shinv = $info['blockshareinv'];
+		$per = siprefmt($shinv, 1);
+		$perset = true;
+		if (isset($info['blockshareacc']))
+		{
+			$shacc = $info['blockshareacc'];
+			if (($shacc+$shinv) > 0)
+			{
+				$amt = 100.0 * $shinv / ($shacc + $shinv);
+				if (round($amt, 2) > 9.99)
+					$per .= ' ('.number_format($amt, 1).'%)';
+				else
+					$per .= ' ('.number_format($amt, 2).'%)';
+			}
+		}
+	}
+
 	if (isset($info['blockerr']))
 	{
-		$rej = $info['blockerr'];
-		$per = number_format($info['blockerr'], 0);
-		if (isset($info['blockacc']) && ($acc+$rej) > 0)
-			$per .= ' ('.number_format(100.0*$rej/($acc+$rej), 3).'%)';
+		if ($perset == false)
+			$per = '';
+		else
+			$per .= ' &#183; ';
+
+		$inv = $info['blockerr'];
+		$per .= siprefmt($inv, 1);
+		if (isset($info['blockacc']))
+		{
+			$acc = $info['blockacc'];
+			if (($acc+$inv) > 0)
+			{
+				$amt = 100.0 * $inv / ($acc + $inv);
+				if (round($amt, 2) > 9.99)
+					$per .= ' ('.number_format($amt, 1).'%)';
+				else
+					$per .= ' ('.number_format($amt, 2).'%)';
+			}
+		}
 	}
 
 	if (isset($info['u_hashrate5m']))
@@ -344,7 +409,7 @@ function pgtop($info, $dotop, $user, $douser)
 	$top .= "<td class=topdat>&nbsp;$phr</td></tr>";
 	$top .= '<tr><td class=topdes>Shares:&nbsp;</td>';
 	$top .= "<td class=topdat>&nbsp;$pac</td></tr>";
-	$top .= '<tr id=mini1><td class=topdes>Invalid:&nbsp;</td>';
+	$top .= '<tr id=mini1><td class=topdes>Invalids:&nbsp;</td>';
 	$top .= "<td class=topdat>&nbsp;$per</td></tr></table>";
 	$top .= '</td><td>';
 	$top .= '<table cellpadding=1 cellspacing=0 border=0 width=100%>';
@@ -368,34 +433,24 @@ function pgtop($info, $dotop, $user, $douser)
 		list($who, $whoid) = validate();
 		if ($who == false)
 		{
-			$top .= makeForm('')."
-<table cellpadding=0 cellspacing=0 border=0><tr><td>
-<table cellpadding=0 cellspacing=0 border=0><tr>
-<td>User:</td><td><input type=text name=User size=10 value=''></td>
-</tr><tr>
-<td>Pass:</td><td><input type=password name=Pass size=10 value=''></td>
-</tr></table></td><td>
-<table cellpadding=0 cellspacing=0 border=0><tr>
-<td>&nbsp;<input type=submit name=Login value=Login></td></tr><tr>
-<td>&nbsp;&nbsp;<input type=submit name=Register value='Register/Reset'></td></tr></table>
-</td></tr></table></form>";
+			$top .= '<table cellpadding=0 cellspacing=0 border=0><tr><td>';
+			$top .= '<a href="https://' . $_SERVER['SERVER_NAME'];
+			$top .= '/index.php?Register=1">Login<br>Register</a>';
+			$top .= '</td></tr></table>';
 		}
 		else
 		{
 			$extra = '';
-			$first = substr($who, 0, 1);
-			if (($first == '1' || $first == '3') && strlen($who) > 12)
+			if (strlen($who) > 12)
 			{
-				$who = substr($who, 0, 11);
+				$who = substr($who, 0, 12);
 				$extra = '&#133;';
 			}
-			$top .= "
-<span class=topwho>".htmlspecialchars($who)."$extra&nbsp;</span><br>
-<span class=topdes>Hash&nbsp;Rate:</span>
-<span class=topdat>$uhr$u1hr</span><br>";
-			$top .= makeForm('')."
-<input type=submit name=Logout value=Logout>
-</form>";
+			$top .= "<span class=topwho>".htmlspecialchars($who)."$extra&nbsp;</span>";
+			$top .= makeForm('');
+			$top .= "<input type=submit name=Logout value=Logout></form>";
+			$top .= "<br><span class=topdes>Hash&nbsp;Rate:</span>";
+			$top .= "<span class=topdat>$uhr$u1hr</span><br>";
 		}
 
 		$top .= '</span>';
@@ -411,8 +466,6 @@ function pgtop($info, $dotop, $user, $douser)
 #
 function pgmenu($menus)
 {
- $iCrap = isCrap();
-
  $ret = "\n<table cellpadding=0 cellspacing=0 border=0 width=100% id=n42>";
  $ret .= '<tr><td width=100%>';
  $ret .= '<table cellpadding=0 cellspacing=0 border=0 width=100%>';
@@ -428,35 +481,27 @@ function pgmenu($menus)
 	$side = 'r';
 	continue;
   }
-  if ($iCrap)
+  $ret .= "<td class=navbox$side><table cellpadding=0 cellspacing=0 border=0>";
+  $first = true;
+  foreach ($submenus as $submenu => $item)
   {
-   foreach ($submenus as $submenu => $item)
-	$ret .= "<td class=nav>".makeLink($item)."$submenu</a></td>";
-  }
-  else
-  {
-   $ret .= "<td class=navbox$side><table cellpadding=0 cellspacing=0 border=0>";
-   $first = true;
-   foreach ($submenus as $submenu => $item)
-   {
 	if ($first == true)
 	{
 		$first = false;
 		if ($submenu == $menu)
 		{
-			$ret .= "<tr><td class=nav>".makeLink($item)."$menu</a>";
+			$ret .= "<tr><td class=nav0>".makeLink($item)."$menu</a>";
 			$ret .= '<div class=sub><table cellpadding=0 cellspacing=0 border=0 width=100%>';
 			continue;
 		}
-		$ret .= "<tr><td class=nav><a>$menu</a>";
+		$ret .= "<tr><td class=nav onclick=''><a>$menu</a>";
 		$ret .= '<div class=sub><table cellpadding=0 cellspacing=0 border=0 width=100%>';
 	}
 	$ret .= "<tr><td class=ts>".makeLink($item,'class=as')."$submenu</a></td></tr>";
-   }
-   if ($first == false)
-	$ret .= '</table></div></td></tr></table>';
-   $ret .= '</td>';
   }
+  if ($first == false)
+	$ret .= '</table></div></td></tr></table>';
+  $ret .= '</td>';
  }
  $ret .= "</tr></table></td></tr></table>\n";
  return $ret;

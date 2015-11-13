@@ -15,7 +15,37 @@ function doregres($data, $u)
  else
 	$mail = '';
 
- $pg = '<br><br><table cellpadding=5 cellspacing=0 border=1><tr><td class=dc>';
+ $pg = makeForm('')."<br>
+<table cellpadding=0 cellspacing=0 border=0><tr>
+<td>User:</td><td><input type=text name=User size=10 value=''></td>
+<td>&nbsp;Pass:</td><td><input type=password name=Pass size=10 value=''></td>
+<td>&nbsp;<input type=submit name=Login value=Login></td>
+</tr></table></form>";
+
+ $pg .= '<br><h1>or choose one:</h1>';
+
+ $pg .= '<table cellpadding=5 cellspacing=0 border=1><tr><td class=dc>';
+
+ $pg .= '<h1>Login</h1>';
+ if (isset($data['data']['error']))
+	$pg .= "<br><b>".$data['data']['error']." - please try again</b><br><br>";
+ $pg .= makeForm('');
+ $pg .= "
+<table>
+<tr><td class=dr>Username:</td>
+ <td class=dl><input name=User value=''></td></tr>
+<tr><td class=dr>Password:</td>
+ <td class=dl><input type=password name=Pass value=''></td></tr>
+<tr><td class=dr><span class=st1>*</span>2nd Authentication:</td>
+ <td class=dl><input type=password name=2fa size=10></td></tr>
+<tr><td colspan=2 class=dc><font size=-1><span class=st1>*</span>
+ Leave blank if you haven't enabled it</font></td></tr>
+<tr><td>&nbsp;</td>
+ <td class=dl><input type=submit name=Login value=Login></td></tr>
+</table>
+</form>";
+
+ $pg.= '</td></tr><tr><td class=dc>';
 
  $pg .= '<h1>Register</h1>';
  if (isset($data['data']['error']))
@@ -28,14 +58,15 @@ function doregres($data, $u)
 <tr><td class=dr>Email:</td>
  <td class=dl><input name=mail value=\"$mail\"></td></tr>
 <tr><td class=dr>Password:</td>
- <td class=dl><input type=password name=pass></td></tr>
+ <td class=dl><input type=password name=pass value=''></td></tr>
 <tr><td class=dr>Retype Password:</td>
- <td class=dl><input type=password name=pass2></td></tr>
+ <td class=dl><input type=password name=pass2 value=''></td></tr>
 <tr><td>&nbsp;</td>
  <td class=dl><input type=submit name=Register value=Register></td></tr>
 <tr><td colspan=2 class=dc><br><font size=-1><span class=st1>*</span>
- All fields are required</font></td></tr>
-<tr><td colspan=2 class=dc><br>". passrequires() . "</font></td></tr>
+ All fields are required<br>Your Username can't be a BTC address</font></td></tr>
+<tr><td colspan=2 class=dc><font size=-1><br>Note: your username is upper/lowercase sensitive,<br>
+and you must also have upper/lowercase correct on all your miners<br><br>" . passrequires() . "</font></td></tr>
 </table>
 </form>";
 
@@ -51,10 +82,9 @@ function doregres($data, $u)
  <td class=dl><input name=mail value=''></td></tr>
 <tr><td>&nbsp;</td>
  <td class=dl><input type=submit name=Reset value=Reset></td></tr>
-<tr><td colspan=2 class=dc><br><font size=-1><span class=st1>*</span>
- All fields are required</font></td></tr>
 <tr><td colspan=2 class=dc><br><font size=-1>
-An Email will be sent to you, to let you reset your password</font></td></tr>
+If you enter the details correctly,<br>
+an Email will be sent to you to let you reset your password</font></td></tr>
 </table>
 </form>";
 
@@ -103,6 +133,12 @@ function try_reg($info, $page, $menu, $name, $u)
 	$ok = false;
  else
  {
+	if (stripos($mail, 'hotmail') !== false)
+	{
+		$ok = false;
+		$data['error'] = "hotmail not allowed";
+	}
+
 	if (safepass($pass) !== true)
 	{
 		$ok = false;
@@ -184,9 +220,6 @@ function try_reset($info, $page, $menu, $name, $u)
  $user = getparam('user', false);
  $mail = trim(getparam('mail', false));
 
- // Slow this right down
- usleep(500000);
-
  $data = array();
 
  if (!nuem($user))
@@ -208,6 +241,9 @@ function try_reset($info, $page, $menu, $name, $u)
 #
 function show_reg($info, $page, $menu, $name, $u)
 {
+ // Slow this right down
+ usleep(1000000);
+
  $reg = getparam('Register', false);
  if ($reg !== NULL)
 	try_reg($info, $page, $menu, $name, $u);

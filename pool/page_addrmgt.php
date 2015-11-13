@@ -10,15 +10,21 @@ function addrmgtuser($data, $user, $err)
  $pg .= makeForm('addrmgt');
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<tr class=title>';
+ $pg .= '<td class=dc>#</td>';
  $pg .= '<td class=dl>Address</td>';
+ $pg .= '<td class=dl>ID</td>';
  $pg .= '<td class=dr>Ratio</td>';
  $pg .= '<td class=dr>%</td>';
  $pg .= '</tr>';
 
  # new row template for '+'
  $pg .= '<tr class=hid id=bs>';
+ $pg .= '<td class=dc> </td>';
  $pg .= '<td class=dl>';
- $pg .= "<input type=text size=42 name='addr:' value=''>";
+ $pg .= "<input type=text size=36 name='addr:' value=''>";
+ $pg .= '</td>';
+ $pg .= '<td class=dl>';
+ $pg .= "<input type=text size=16 name='payname:' value=''>";
  $pg .= '</td>';
  $pg .= '<td class=dr>';
  $pg .= "<input type=text size=6 name='ratio:' value='0' id=rat onchange='repc()'>";
@@ -34,7 +40,12 @@ function addrmgtuser($data, $user, $err)
  $count = 0;
  if ($ans['STATUS'] == 'ok')
  {
+	if (isset($ans['limit']))
+		$limit = $ans['limit'];
+	else
+		$limit = 1;
 	$count = $ans['rows'];
+	# this will output any DB rows > limit but DB update will ignore extras
 	for ($i = 0; $i < $count; $i++)
 	{
 		if ((($offset) % 2) == 0)
@@ -44,8 +55,13 @@ function addrmgtuser($data, $user, $err)
 
 		$pg .= "<tr class=$row>";
 		$addr = $ans['addr:'.$i];
+		$pg .= '<td class=dc>'.($i+1).'</td>';
 		$pg .= '<td class=dl>';
-		$pg .= "<input type=text size=42 name='addr:$i' value='$addr'>";
+		$pg .= "<input type=text size=36 name='addr:$i' value='$addr'>";
+		$pg .= '</td>';
+		$nam = htmlspecialchars($ans['payname:'.$i]);
+		$pg .= '<td class=dl>';
+		$pg .= "<input type=text size=16 name='payname:$i' value='$nam'>";
 		$pg .= '</td>';
 		$ratio = intval($ans['ratio:'.$i]);
 		$pg .= '<td class=dr>';
@@ -58,38 +74,57 @@ function addrmgtuser($data, $user, $err)
 
 		$offset++;
 	}
-	if ((($offset++) % 2) == 0)
-		$row = 'even';
-	else
-		$row = 'odd';
-	$pg .= "<tr class=$row id=plus>";
-	$pg .= '<td colspan=3 class=dl>';
-	$pg .= "<input type=button value='+' onclick='return adrw();'>";
-	$pg .= '</td></tr>';
+	if ($offset < $limit) {
+		if ((($offset++) % 2) == 0)
+			$row = 'even';
+		else
+			$row = 'odd';
+		$pg .= "<tr class=$row id=plus><td class=dc>";
+		$pg .= "<input type=button value='+' onclick='return adrw($limit);'>";
+		$pg .= "</td><td colspan=4 class=dl><font size=-1>limit $limit</font></td></tr>";
+	}
 
 	if ((($offset++) % 2) == 0)
 		$row = 'even';
 	else
 		$row = 'odd';
 	$pg .= "<tr class=$row>";
-	$pg .= '<td colspan=3 class=dc>';
-	$pg .= 'Password: <input type=password name=pass size=20>';
-	$pg .= '&nbsp;<input type=submit name=OK value=Save></td></tr>';
+	$pg .= '<td class=dr>&nbsp;</td>';
+	$pg .= '<td class=dr>Password:</td>';
+	$pg .= '<td class=dl><input type=password name=pass size=20></td>';
+	$pg .= '<td colspan=2>&nbsp;</td></tr>';
+
+	if ((($offset++) % 2) == 0)
+		$row = 'even';
+	else
+		$row = 'odd';
+	$pg .= "<tr class=$row>";
+	$pg .= '<td class=dr>&nbsp;</td>';
+	$pg .= '<td class=dr><span class=st1>*</span>2nd Authentication:</td>';
+	$pg .= '<td class=dl><input type=password name=2fa size=10>';
+	$pg .= ' <input type=submit name=OK value=Save></td>';
+	$pg .= '<td colspan=3 class=dl>&nbsp;</td></tr>';
+
+	$pg .= '<tr><td colspan=5 class=dc><font size=-1>';
+	$pg .= "<span class=st1>*</span>Leave blank if you haven't enabled it<br>";
+	$pg .= 'You must enter your password to save changes<br>';
+	$pg .= 'A ratio of 0, will remove the address from the payouts</td></tr>';
  }
- $pg .= '<tr><td colspan=3 class=dc><font size=-1><span class=st1>*</span>';
- $pg .= ' You must enter your password to save changes<br>';
- $pg .= 'A ratio of 0, will remove the address from the payouts</font></td></tr>';
  $pg .= "</table><input type=hidden name=rows value=$count id=rows></form>\n";
 
+ # TODO - adrw() update the odd/even class for the new row and rows below it
+ # TODO - move the js functions into inc.php
  $pg .= "<script type='text/javascript'>\n";
- $pg .= "function adrw(){var p=document.getElementById('plus');";
+ $pg .= "function adrw(l){var p=document.getElementById('plus');";
  $pg .=  "var r=document.getElementById('rows');var c=parseInt(r.value);";
  $pg .=  "var bs=document.getElementById('bs');var n=bs.cloneNode(true);n.id='z';";
- $pg .=  "n.className='odd';var ia=n.childNodes[0].firstChild;ia.name='addr:'+c;ia.value='';";
- $pg .=  "var ir=n.childNodes[1].firstChild;ir.id='rat'+c;ir.name='ratio:'+c;ir.value='0';";
- $pg .=  "var ip=n.childNodes[2].firstChild;ip.id='per'+c;ip.innerHTML='0.00%';";
+ $pg .=  "var ia=n.childNodes[1].firstChild;ia.name='addr:'+c;ia.value='';";
+ $pg .=  "var ipn=n.childNodes[2].firstChild;ipn.name='payname:'+c;ipn.value='';";
+ $pg .=  "var ir=n.childNodes[3].firstChild;ir.id='rat'+c;ir.name='ratio:'+c;ir.value='0';";
+ $pg .=  "var ip=n.childNodes[4].firstChild;ip.id='per'+c;ip.innerHTML='0.00%';";
  $pg .=  "p.parentNode.insertBefore(n, p);";
- $pg .=  "c++;r.value=c;return true}\n";
+ $pg .=  "c++;r.value=c;if(c>=l){p.parentNode.removeChild(p)}";
+ $pg .=  "n.childNodes[0].innerHTML=''+c;n.className='odd';return true}\n";
  $pg .= "function repc(){var c=parseInt(document.getElementById('rows').value);";
  $pg .=  "if(!isNaN(c)&&c>0&&c<1000){var v=[],tot=0;for(i=0;i<c;i++){";
  $pg .=  "var o=document.getElementById('rat'+i);var ov=parseInt(o.value);if(!isNaN(ov)&&ov>0)";
@@ -107,6 +142,7 @@ function doaddrmgt($data, $user)
  $OK = getparam('OK', false);
  $count = getparam('rows', false);
  $pass = getparam('pass', false);
+ $twofa = getparam('2fa', false);
  if ($OK == 'Save' && !nuem($count) && !nuem($pass))
  {
 	if ($count > 0 && $count < 1000)
@@ -115,11 +151,14 @@ function doaddrmgt($data, $user)
 		for ($i = 0; $i < $count; $i++)
 		{
 			$addr = getparam('addr:'.$i, false);
+			$nam = getparam('payname:'.$i, false);
+			if (nuem($nam))
+				$nam = '';
 			$ratio = getparam('ratio:'.$i, false);
 			if (!nuem($addr) && !nuem($ratio))
-				$addrarr[] = array('addr' => $addr, 'ratio' => $ratio);
+				$addrarr[] = array('addr' => $addr, 'payname' => $nam, 'ratio' => $ratio);
 		}
-		$ans = userSettings($user, null, $addrarr, $pass);
+		$ans = userSettings($user, null, $addrarr, $pass, $twofa);
 		if ($ans['STATUS'] != 'ok')
 			$err = $ans['ERROR'];
 	}

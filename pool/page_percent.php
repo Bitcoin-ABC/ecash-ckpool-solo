@@ -4,6 +4,7 @@ function pertitle($data, $user)
 {
  $pg  = '<tr class=title>';
  $pg .= '<td class=dl>Address</td>';
+ $pg .= '<td class=dl>ID</td>';
  $pg .= '<td class=dr>Shares</td>';
  $pg .= '<td class=dr>Diff</td>';
  $pg .= '<td class=dr>Invalid</td>';
@@ -40,6 +41,7 @@ function peruser($data, $user, &$offset, &$totshare, &$totdiff,
 		$all[] = array('payaddress' => $ans['payaddress:'.$i],
 				'payratio' => $ans['payratio:'.$i],
 				'paypercent' => $ans['paypercent:'.$i],
+				'payname' => $ans['payname:'.$i],
 				'p_shareacc' => $ans['p_shareacc:'.$i],
 				'p_diffacc' => $ans['p_diffacc:'.$i],
 				'p_diffinv' => $ans['p_diffinv:'.$i],
@@ -58,6 +60,7 @@ function peruser($data, $user, &$offset, &$totshare, &$totdiff,
 
 		$pg .= "<tr class=$row>";
 		$pg .= '<td class=dl>'.$all[$i]['payaddress'].'</td>';
+		$pg .= '<td class=dl>'.$all[$i]['payname'].'</td>';
 
 		$shareacc = number_format($all[$i]['p_shareacc'], 0);
 		$totshare += $all[$i]['p_shareacc'];
@@ -113,6 +116,7 @@ function pertotal($offset, $totshare, $totdiff, $totinvalid, $totrate, $blockacc
  else
 	$row = 'odd';
  $pg .= "<tr class=$row><td class=dl>Total:</td>";
+ $pg .= "<td class=dl>&nbsp;</td>";
  $shareacc = number_format($totshare, 0);
  $pg .= "<td class=dr>$shareacc</td>";
  $diffacc = number_format($totdiff, 0);
@@ -156,7 +160,7 @@ function dopercent($data, $user)
  if ($blockacc > 0 && $blockreward > 0)
  {
 	$btc = btcfmt($totdiff / $blockacc * $blockreward);
-	$pg .= '<tr><td colspan=8 class=dc>';
+	$pg .= '<tr><td colspan=9 class=dc>';
 	$pg .= "<br>Payout est if block found at 100%: ~$btc BTC";
 	$pg .= '</td></tr>';
  }

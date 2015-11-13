@@ -864,6 +864,7 @@ retry:
 	} else if (cmdmatch(buf, "reject")) {
 		LOGDEBUG("Connector received reject signal");
 		cdata->accept = false;
+		send_proc(ckp->stratifier, "dropall");
 	} else if (cmdmatch(buf, "stats")) {
 		char *msg;
 

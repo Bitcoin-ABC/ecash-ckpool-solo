@@ -202,6 +202,7 @@ struct user_instance {
 	double dsps1440;
 	double dsps10080;
 	tv_t last_share;
+	tv_t last_decay;
 	tv_t last_update;
 
 	bool authorised; /* Has this username ever been authorised? */
@@ -226,6 +227,7 @@ struct worker_instance {
 	double dsps1440;
 	double dsps10080;
 	tv_t last_share;
+	tv_t last_decay;
 	tv_t last_update;
 	time_t start_time;
 
@@ -266,6 +268,7 @@ struct stratum_instance {
 	int ssdc; /* Shares since diff change */
 	tv_t first_share;
 	tv_t last_share;
+	tv_t last_decay;
 	time_t first_invalid; /* Time of first invalid in run of non stale rejects */
 	time_t start_time;
 
@@ -941,7 +944,7 @@ static char *__send_recv_generator(ckpool_t *ckp, const char *msg, const int pri
 		set = true;
 	} else
 		set = false;
-	buf = send_recv_proc(ckp->generator, msg);
+	buf = _send_recv_proc(ckp->generator, msg, UNIX_WRITE_TIMEOUT, RPC_TIMEOUT, __FILE__, __func__, __LINE__);
 	if (unlikely(!buf))
 		buf = strdup("failed");
 	if (set)
@@ -1176,7 +1179,7 @@ static void drop_allclients(ckpool_t *ckp)
 	ck_wunlock(&sdata->instance_lock);
 
 	if (kills)
-		LOGNOTICE("Dropped %d instances", kills);
+		LOGNOTICE("Dropped %d instances for dropall request", kills);
 }
 
 static void update_subscribe(ckpool_t *ckp)
@@ -1403,9 +1406,11 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, bool lazil
 
 	if (client->workername) {
 		if (user) {
-			ASPRINTF(msg, "Dropped client %"PRId64" %s %suser %s worker %s %s",
-				 client->id, client->address, user->throttled ? "throttled " : "",
-				 user->username, client->workername, lazily ? "lazily" : "");
+			if (!user->throttled) {
+				ASPRINTF(msg, "Dropped client %"PRId64" %s user %s worker %s %s",
+					 client->id, client->address, user->username,
+					 client->workername, lazily ? "lazily" : "");
+			}
 		} else {
 			ASPRINTF(msg, "Dropped client %"PRId64" %s no user worker %s %s",
 				 client->id, client->address, client->workername,
@@ -1424,7 +1429,7 @@ static void _dec_instance_ref(sdata_t *sdata, stratum_instance_t *client, const 
 			      const char *func, const int line)
 {
 	char_entry_t *entries = NULL;
-	char *msg;
+	char *msg = NULL;
 	int ref;
 
 	ck_wlock(&sdata->instance_lock);
@@ -1433,7 +1438,10 @@ static void _dec_instance_ref(sdata_t *sdata, stratum_instance_t *client, const 
 	 * moved due to holding a reference and drop them now. */
 	if (unlikely(client->dropped && !ref)) {
 		__drop_client(sdata, client, true, &msg);
-		add_msg_entry(&entries, &msg);
+		/* Make sure there is a message as throttled users don't
+		 * generate a message */
+		if (msg)
+			add_msg_entry(&entries, &msg);
 	}
 	ck_wunlock(&sdata->instance_lock);
 
@@ -1482,6 +1490,12 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t i
 	return client;
 }
 
+/* passthrough subclients have client_ids in the high bits */
+static inline bool passthrough_subclient(const int64_t client_id)
+{
+	return (client_id > 0xffffffffll);
+}
+
 static uint64_t disconnected_sessionid_exists(sdata_t *sdata, const char *sessionid,
 					      int *session_id, const int64_t id)
 {
@@ -1489,6 +1503,10 @@ static uint64_t disconnected_sessionid_exists(sdata_t *sdata, const char *sessio
 	int64_t old_id = 0;
 	uint64_t ret = 0;
 	int slen;
+
+	/* Don't allow passthrough subclients to resume */
+	if (passthrough_subclient(id))
+		goto out;
 
 	if (!sessionid)
 		goto out;
@@ -1897,7 +1915,7 @@ retry:
 				LOGDEBUG("%ds elapsed in strat_loop, updating gbt base",
 					 ckp->update_interval);
 				update_base(ckp, GEN_NORMAL);
-			} else {
+			} else if (!ckp->passthrough) {
 				LOGDEBUG("%ds elapsed in strat_loop, pinging miners",
 					 ckp->update_interval);
 				broadcast_ping(sdata);
@@ -2233,6 +2251,52 @@ static double dsps_from_key(json_t *val, const char *key)
 	return ret;
 }
 
+/* Sanity check to prevent clock adjustments backwards from screwing up stats */
+static double sane_tdiff(tv_t *end, tv_t *start)
+{
+	double tdiff = tvdiff(end, start);
+
+	if (unlikely(tdiff < 0.001))
+		tdiff = 0.001;
+	return tdiff;
+}
+
+static void decay_client(stratum_instance_t *client, double diff, tv_t *now_t)
+{
+	double tdiff = sane_tdiff(now_t, &client->last_decay);
+
+	decay_time(&client->dsps1, diff, tdiff, MIN1);
+	decay_time(&client->dsps5, diff, tdiff, MIN5);
+	decay_time(&client->dsps60, diff, tdiff, HOUR);
+	decay_time(&client->dsps1440, diff, tdiff, DAY);
+	decay_time(&client->dsps10080, diff, tdiff, WEEK);
+	copy_tv(&client->last_decay, now_t);
+}
+
+static void decay_worker(worker_instance_t *worker, double diff, tv_t *now_t)
+{
+	double tdiff = sane_tdiff(now_t, &worker->last_decay);
+
+	decay_time(&worker->dsps1, diff, tdiff, MIN1);
+	decay_time(&worker->dsps5, diff, tdiff, MIN5);
+	decay_time(&worker->dsps60, diff, tdiff, HOUR);
+	decay_time(&worker->dsps1440, diff, tdiff, DAY);
+	decay_time(&worker->dsps10080, diff, tdiff, WEEK);
+	copy_tv(&worker->last_decay, now_t);
+}
+
+static void decay_user(user_instance_t *user, double diff, tv_t *now_t)
+{
+	double tdiff = sane_tdiff(now_t, &user->last_decay);
+
+	decay_time(&user->dsps1, diff, tdiff, MIN1);
+	decay_time(&user->dsps5, diff, tdiff, MIN5);
+	decay_time(&user->dsps60, diff, tdiff, HOUR);
+	decay_time(&user->dsps1440, diff, tdiff, DAY);
+	decay_time(&user->dsps10080, diff, tdiff, WEEK);
+	copy_tv(&user->last_decay, now_t);
+}
+
 /* Enter holding a reference count */
 static void read_userstats(ckpool_t *ckp, user_instance_t *user)
 {
@@ -2263,6 +2327,7 @@ static void read_userstats(ckpool_t *ckp, user_instance_t *user)
 
 	tv_time(&now);
 	copy_tv(&user->last_share, &now);
+	copy_tv(&user->last_decay, &now);
 	user->dsps1 = dsps_from_key(val, "hashrate1m");
 	user->dsps5 = dsps_from_key(val, "hashrate5m");
 	user->dsps60 = dsps_from_key(val, "hashrate1hr");
@@ -2280,11 +2345,7 @@ static void read_userstats(ckpool_t *ckp, user_instance_t *user)
 	if (tvsec_diff > 60) {
 		LOGINFO("Old user stats indicate not logged for %d seconds, decaying stats",
 			tvsec_diff);
-		decay_time(&user->dsps1, 0, tvsec_diff, MIN1);
-		decay_time(&user->dsps5, 0, tvsec_diff, MIN5);
-		decay_time(&user->dsps60, 0, tvsec_diff, HOUR);
-		decay_time(&user->dsps1440, 0, tvsec_diff, DAY);
-		decay_time(&user->dsps10080, 0, tvsec_diff, WEEK);
+		decay_user(user, 0, &now);
 	}
 }
 
@@ -2318,6 +2379,7 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 
 	tv_time(&now);
 	copy_tv(&worker->last_share, &now);
+	copy_tv(&worker->last_decay, &now);
 	worker->dsps1 = dsps_from_key(val, "hashrate1m");
 	worker->dsps5 = dsps_from_key(val, "hashrate5m");
 	worker->dsps60 = dsps_from_key(val, "hashrate1d");
@@ -2334,10 +2396,7 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 	if (tvsec_diff > 60) {
 		LOGINFO("Old worker stats indicate not logged for %d seconds, decaying stats",
 			tvsec_diff);
-		decay_time(&worker->dsps1, 0, tvsec_diff, MIN1);
-		decay_time(&worker->dsps5, 0, tvsec_diff, MIN5);
-		decay_time(&worker->dsps60, 0, tvsec_diff, HOUR);
-		decay_time(&worker->dsps1440, 0, tvsec_diff, DAY);
+		decay_worker(worker, 0, &now);
 	}
 }
 
@@ -2804,16 +2863,6 @@ static double time_bias(const double tdiff, const double period)
 	return 1.0 - 1.0 / exp(dexp);
 }
 
-/* Sanity check to prevent clock adjustments backwards from screwing up stats */
-static double sane_tdiff(tv_t *end, tv_t *start)
-{
-	double tdiff = tvdiff(end, start);
-
-	if (unlikely(tdiff < 0.001))
-		tdiff = 0.001;
-	return tdiff;
-}
-
 /* Needs to be entered with client holding a ref count. */
 static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const int diff, const bool valid,
 		       const bool submit)
@@ -2855,29 +2904,14 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const int diff
 		copy_tv(&client->ldc, &now_t);
 	}
 
-	tdiff = sane_tdiff(&now_t, &client->last_share);
-	decay_time(&client->dsps1, diff, tdiff, MIN1);
-	decay_time(&client->dsps5, diff, tdiff, MIN5);
-	decay_time(&client->dsps60, diff, tdiff, HOUR);
-	decay_time(&client->dsps1440, diff, tdiff, DAY);
-	decay_time(&client->dsps10080, diff, tdiff, WEEK);
+	decay_client(client, diff, &now_t);
 	copy_tv(&client->last_share, &now_t);
 
-	tdiff = sane_tdiff(&now_t, &worker->last_share);
-	decay_time(&worker->dsps1, diff, tdiff, MIN1);
-	decay_time(&worker->dsps5, diff, tdiff, MIN5);
-	decay_time(&worker->dsps60, diff, tdiff, HOUR);
-	decay_time(&worker->dsps1440, diff, tdiff, DAY);
-	decay_time(&worker->dsps10080, diff, tdiff, WEEK);
+	decay_worker(worker, diff, &now_t);
 	copy_tv(&worker->last_share, &now_t);
 	worker->idle = false;
 
-	tdiff = sane_tdiff(&now_t, &user->last_share);
-	decay_time(&user->dsps1, diff, tdiff, MIN1);
-	decay_time(&user->dsps5, diff, tdiff, MIN5);
-	decay_time(&user->dsps60, diff, tdiff, HOUR);
-	decay_time(&user->dsps1440, diff, tdiff, DAY);
-	decay_time(&user->dsps10080, diff, tdiff, WEEK);
+	decay_user(user, diff, &now_t);
 	copy_tv(&user->last_share, &now_t);
 	client->idle = false;
 
@@ -4363,11 +4397,7 @@ static void *statsupdate(void *arg)
 			/* Decay times per connected instance */
 			if (per_tdiff > 60) {
 				/* No shares for over a minute, decay to 0 */
-				decay_time(&client->dsps1, 0, per_tdiff, MIN1);
-				decay_time(&client->dsps5, 0, per_tdiff, MIN5);
-				decay_time(&client->dsps60, 0, per_tdiff, HOUR);
-				decay_time(&client->dsps1440, 0, per_tdiff, DAY);
-				decay_time(&client->dsps10080, 0, per_tdiff, WEEK);
+				decay_client(client, 0, &now);
 				idle_workers++;
 				if (per_tdiff > 600)
 					client->idle = true;
@@ -4386,11 +4416,7 @@ static void *statsupdate(void *arg)
 			DL_FOREACH(user->worker_instances, worker) {
 				per_tdiff = tvdiff(&now, &worker->last_share);
 				if (per_tdiff > 60) {
-					decay_time(&worker->dsps1, 0, per_tdiff, MIN1);
-					decay_time(&worker->dsps5, 0, per_tdiff, MIN5);
-					decay_time(&worker->dsps60, 0, per_tdiff, HOUR);
-					decay_time(&worker->dsps1440, 0, per_tdiff, DAY);
-					decay_time(&worker->dsps10080, 0, per_tdiff, WEEK);
+					decay_worker(worker, 0, &now);
 					worker->idle = true;
 				}
 				ghs = worker->dsps1 * nonces;
@@ -4429,11 +4455,7 @@ static void *statsupdate(void *arg)
 			/* Decay times per user */
 			per_tdiff = tvdiff(&now, &user->last_share);
 			if (per_tdiff > 60) {
-				decay_time(&user->dsps1, 0, per_tdiff, MIN1);
-				decay_time(&user->dsps5, 0, per_tdiff, MIN5);
-				decay_time(&user->dsps60, 0, per_tdiff, HOUR);
-				decay_time(&user->dsps1440, 0, per_tdiff, DAY);
-				decay_time(&user->dsps10080, 0, per_tdiff, WEEK);
+				decay_user(user, 0, &now);
 				idle = true;
 			}
 			ghs = user->dsps1 * nonces;

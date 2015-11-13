@@ -6,6 +6,7 @@ $g = "function gdrw(c,d,cbx){gc(c);ghrs(c);gopt(c,cbx);
 gfs(c,'white');gss(c,'#0000c0');glw(c,2);gbd(c);
 var rows=d['rows'],ymin=-1,ymax=0,xmin=-1,xmax=0,tda=[];
 var w=d['arp'].split(',');var cols=d['cols'].split(',');
+gsh(c,w);
 for(var j=1;j<w.length;j++){tda[j-1]=0}
 for(var i=0;i<rows;i++){var s=parseFloat(d['start:'+i]);var e=parseFloat(d['end:'+i]);d['nx:'+i]=sn(i,d['shift:'+i]);if(xmin==-1||xmin>s){xmin=s}if(xmax<e){xmax=e}d['vx:'+i]=(s+e)/2.0;
 for(var j=1;j<w.length;j++){var pre=w[j];var ths=0,nam=pre+'diffacc:'+i;if(d[nam]){var da=parseFloat(d[nam]);ths=(da/(e-s))*Math.pow(2,32)/Math.pow(10,12);tda[j-1]+=da}d[pre+'ths:'+i]=ths;if(ymin==-1||ymin>ths){ymin=ths}if(ths>ymax)ymax=ths;document.getElementById('worker'+j).value=d[pre+'worker']}
@@ -72,7 +73,8 @@ function dousperf($data, $user)
 	$pg .= '<form>';
 
 	$tt = "<ul class=tip><li>all = all workers</li><li>noname = worker with no workername</li>";
-	$tt .= "<li>or full workername without the username i.e. .worker or _worker</li></ul>";
+	$tt .= "<li>or full workername without the username i.e. .worker or _worker</li>";
+	$tt .= "<li>add a '*' on the end to match multiple workers e.g. .S3*</li></ul>";
 	$pg .= "<span class=q onclick='tip(\"wtip\",6000)'>?</span>";
 	$pg .= "<span class=tip0><span class=notip id=wtip>$tt</span></span>";
 
@@ -82,7 +84,8 @@ function dousperf($data, $user)
 	foreach ($cols as $col)
 	{
 		$i++;
-		$pg .= " <span class=nb><font color=$col>Worker$i:</font>";
+		$pg .= " <span class=nb><font color=$col>Worker$i";
+		$pg .= "<input type=checkbox id=lin$i checked onclick='godrw(0)'>:</font>";
 		$pg .= "<input type=text size=10 id=worker$i$onch> </span>";
 
 		if ($i > 1)

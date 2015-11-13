@@ -1,5 +1,36 @@
 <?php
 #
+function erlcolour($erl)
+{
+ if ($erl <= 0.5)
+ {
+	$grn = (-0.3 - log10($erl)) * 383;
+	if ($grn < 0)
+		$grn = 0;
+	if ($grn > 255)
+		$grn = 255;
+
+	if ($grn > 190)
+		$fg = 'blue';
+	else
+		$fg = 'white';
+	$bg = sprintf("#00%02x00", $grn);
+ }
+ else # ($erl > 0.5)
+ {
+	$red = (-0.3 - log10(1.0 - $erl)) * 255;
+	if ($red < 0)
+		$red = 0;
+	if ($red > 255)
+		$red = 255;
+
+	$fg = 'white';
+	$bg = sprintf("#%02x0000", $red);
+ }
+
+ return array($fg, $bg);
+}
+#
 function pctcolour($pct)
 {
  if ($pct == 100)
@@ -62,11 +93,15 @@ function doblocks($data, $user)
 		$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
 		$pg .= "<tr class=title>";
 		$pg .= "<td class=dl>Description</td>";
+		$pg .= "<td class=dr>Time</td>";
+		$pg .= "<td class=dr>MeanTx%</td>";
 		$pg .= "<td class=dr>Diff%</td>";
 		$pg .= "<td class=dr>Mean%</td>";
 		$pg .= "<td class=dr>CDF[Erl]</td>";
 		$pg .= "<td class=dr>Luck%</td>";
 		$pg .= "</tr>\n";
+
+		$since = $data['info']['lastblock'];
 
 		$count = $ans['s_rows'];
 		for ($i = 0; $i < $count; $i++)
@@ -77,16 +112,25 @@ function doblocks($data, $user)
 				$row = 'odd';
 
 			$desc = $ans['s_desc:'.$i];
+			$age = daysago($since - $ans['s_prevcreatedate:'.$i]);
 			$diff = number_format(100 * $ans['s_diffratio:'.$i], 2);
 			$mean = number_format(100 * $ans['s_diffmean:'.$i], 2);
-			$cdferl = number_format($ans['s_cdferl:'.$i], 4);
+
+			$cdferl = $ans['s_cdferl:'.$i];
+			list($fg, $bg) = erlcolour($cdferl);
+			$cdferldsp = "<font color=$fg>".number_format($cdferl, 4).'</font>';
+			$bg = " bgcolor=$bg";
+
 			$luck = number_format(100 * $ans['s_luck:'.$i], 2);
+			$txm = number_format(100 * $ans['s_txmean:'.$i], 1);
 
 			$pg .= "<tr class=$row>";
 			$pg .= "<td class=dl>$desc Blocks</td>";
+			$pg .= "<td class=dr>$age</td>";
+			$pg .= "<td class=dr>$txm%</td>";
 			$pg .= "<td class=dr>$diff%</td>";
 			$pg .= "<td class=dr>$mean%</td>";
-			$pg .= "<td class=dr>$cdferl</td>";
+			$pg .= "<td class=dr$bg>$cdferldsp</td>";
 			$pg .= "<td class=dr>$luck%</td>";
 			$pg .= "</tr>\n";
 		}
@@ -137,11 +181,13 @@ function doblocks($data, $user)
 	$pg .= "<td class=dr>Diff</td>";
 	$pg .= "<td class=dr>Diff%</td>";
 	$pg .= "<td class=dr>CDF</td>";
+	$pg .= "<td class=dr>B</td>";
 	$pg .= "</tr>\n";
  }
  $blktot = 0;
  $nettot = 0;
  $i = 0;
+ $cnt = 0;
  $orph = false;
  $csv = "Sequence,Height,Status,Timestamp,DiffAcc,NetDiff,Hash\n";
  if ($ans['STATUS'] == 'ok')
@@ -158,28 +204,55 @@ function doblocks($data, $user)
 		$hifld = "$blink$hi>$hi</a>";
 
 		$ex = '';
+		$conf = $ans['confirmed:'.$i];
 		$stat = $ans['status:'.$i];
-		if ($stat == 'Orphan')
+		$inf = $ans['info:'.$i];
+		$tt = '';
+		if ($conf == 'O' or $conf == 'R')
 		{
 			$ex = 's';
 			$orph = true;
 			$seq = '';
+			$nn = $cnt;
+			if ($conf == 'R')
+			{
+				addTips();
+				$in = explode(':', $inf, 2);
+				if (trim($in[0]) != '')
+					$stat = trim($in[0]);
+				if (count($in) < 2 or trim($in[1]) == '')
+				{
+					$tip = 'Share diff was VERY close<br>';
+					$tip .= 'so we tested it,<br>';
+					$tip .= "but it wasn't worthy<br>";
+				}
+				else
+					$tip = str_replace('+', '<br>', trim($in[1]));
+
+				$tt = "<span class=q onclick='tip(\"btip$i\",6000)'>";
+				$tt .= '?</span><span class=tip0>';
+				$tt .= "<span class=notip id=btip$i>";
+				$tt .= "$tip</span></span>";
+			}
 		}
 		else
+		{
 			$seq = $ans['seq:'.$i];
-		if ($stat == '1-Confirm')
+			$nn = ++$cnt;
+		}
+		if ($conf == '1')
 		{
 			if (isset($data['info']['lastheight']))
 			{
-				$conf = 1 + $data['info']['lastheight'] - $hi;
-				$stat = '+'.$conf.' Confirms';
+				$confn = 1 + $data['info']['lastheight'] - $hi;
+				$stat = '+'.$confn.' Confirms';
 			}
 			else
 				$stat = 'Conf';
 		}
 
 		$stara = '';
-		if ($stat == 'Orphan')
+		if ($conf == 'O' or $conf == 'R')
 			$stara = '<span class=st1>*</span>';
 
 		if (isset($ans['statsconf:'.$i]))
@@ -204,10 +277,10 @@ function doblocks($data, $user)
 		{
 			$pct = 100.0 * $diffratio;
 			list($fg, $bg) = pctcolour($pct);
-			$bpct = "<font color=$fg>".number_format($pct, 2).'%</font>';
+			$bpct = "<font color=$fg>$approx".number_format($pct, 3).'%</font>';
 			$bg = " bgcolor=$bg";
 			$blktot += $diffacc;
-			if ($stat != 'Orphan')
+			if ($conf != 'O' and $conf != 'R')
 				$nettot += $netdiff;
 
 			$cdfdsp = number_format($cdf, 3);
@@ -228,10 +301,11 @@ function doblocks($data, $user)
 			$pg .= "<td class=dl$ex>".htmlspecialchars($ans['workername:'.$i]).'</td>';
 		 $pg .= "<td class=dr$ex>".btcfmt($ans['reward:'.$i]).'</td>';
 		 $pg .= "<td class=dl$ex>".utcd($ans['firstcreatedate:'.$i]).'</td>';
-		 $pg .= "<td class=dr$ex>$stat</td>";
+		 $pg .= "<td class=dr$ex>$tt$stat</td>";
 		 $pg .= "<td class=dr>$stara$approx$acc</td>";
-		 $pg .= "<td class=dr$bg>$approx$bpct</td>";
+		 $pg .= "<td class=dr$bg>$bpct</td>";
 		 $pg .= "<td class=dr>$cdfdsp</td>";
+		 $pg .= "<td class=dr>$nn</td>";
 		 $pg .= "</tr>\n";
 		}
 		else
@@ -259,7 +333,7 @@ function doblocks($data, $user)
 	else
 		$pg .= '8';
 	$pg .= ' class=dc><font size=-1><span class=st1>*</span>';
-	$pg .= "Orphans count as shares but not as a block in calculations";
+	$pg .= 'Orphans/Rejects count as shares but not as a block in calculations';
 	$pg .= '</font></td></tr>';
  }
  $pg .= "</table>\n";

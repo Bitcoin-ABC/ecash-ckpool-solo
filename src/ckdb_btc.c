@@ -32,9 +32,11 @@ static char *btc_data(char *json, size_t *len)
 
 	APPEND_REALLOC_INIT(buf, off, *len);
 	APPEND_REALLOC(buf, off, *len, "POST / HTTP/1.1\n");
+	ck_wlock(&btc_lock);
 	snprintf(tmp, sizeof(tmp), "Authorization: Basic %s\n", btc_auth);
 	APPEND_REALLOC(buf, off, *len, tmp);
 	snprintf(tmp, sizeof(tmp), "Host: %s/\n", btc_server);
+	ck_wunlock(&btc_lock);
 	APPEND_REALLOC(buf, off, *len, tmp);
 	APPEND_REALLOC(buf, off, *len, "Content-Type: application/json\n");
 	snprintf(tmp, sizeof(tmp), "Content-Length: %d\n\n", (int)strlen(json));
@@ -306,7 +308,6 @@ bool btc_valid_address(char *addr)
 void btc_blockstatus(BLOCKS *blocks)
 {
 	char hash[TXT_BIG+1];
-	char height_str[32];
 	char *blockhash;
 	int32_t confirms;
 	size_t len;
@@ -346,16 +347,14 @@ void btc_blockstatus(BLOCKS *blocks)
 		return;
 
 	if (strcmp(blockhash, hash) != 0) {
-		snprintf(height_str, sizeof(height_str), "%d", blocks->height);
-		LOGERR("%s() flagging block %d(%s) as %s pool=%s btc=%s",
-			__func__,
-			blocks->height, height_str,
+		LOGERR("%s() flagging block %d as %s pool=%s btc=%s",
+			__func__, blocks->height,
 			blocks_confirmed(BLOCKS_ORPHAN_STR),
 			hash, blockhash);
 
-		ok = blocks_add(NULL, height_str,
+		ok = blocks_add(NULL, blocks->height,
 				      blocks->blockhash,
-				      BLOCKS_ORPHAN_STR,
+				      BLOCKS_ORPHAN_STR, EMPTY,
 				      EMPTY, EMPTY, EMPTY, EMPTY,
 				      EMPTY, EMPTY, EMPTY, EMPTY,
 				      by_default, (char *)__func__, inet_default,
@@ -369,16 +368,14 @@ void btc_blockstatus(BLOCKS *blocks)
 
 	confirms = btc_confirms(hash);
 	if (confirms >= BLOCKS_42_VALUE) {
-		snprintf(height_str, sizeof(height_str), "%d", blocks->height);
-		LOGERR("%s() flagging block %d(%s) as %s confirms=%d(%d)",
-			__func__,
-			blocks->height, height_str,
+		LOGERR("%s() flagging block %d as %s confirms=%d(%d)",
+			__func__, blocks->height,
 			blocks_confirmed(BLOCKS_42_STR),
 			confirms, BLOCKS_42_VALUE);
 
-		ok = blocks_add(NULL, height_str,
+		ok = blocks_add(NULL, blocks->height,
 				      blocks->blockhash,
-				      BLOCKS_42_STR,
+				      BLOCKS_42_STR, EMPTY,
 				      EMPTY, EMPTY, EMPTY, EMPTY,
 				      EMPTY, EMPTY, EMPTY, EMPTY,
 				      by_default, (char *)__func__, inet_default,

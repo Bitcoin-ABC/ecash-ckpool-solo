@@ -80,11 +80,14 @@ sudo apt-get install build-essential
 make
 
 
-Building with ckdb requires installation of the postgresql development library.
+Building with ckdb requires installation of the postgresql, gsl and ssl
+development libraries.
 
-sudo apt-get install build-essential libpq-dev
+sudo apt-get install build-essential libpq-dev libgsl0ldbl libgsl0-dev
 ./configure
 make
+
+N.B. ckdb also requires libssl-dev but libpq-dev depends on it and installs it
 
 
 Building from git also requires autoconf and automake

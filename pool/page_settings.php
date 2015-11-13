@@ -29,6 +29,14 @@ function settings($data, $user, $email, $addr, $err)
  $pg .= '</td><td class=dl>';
  $pg .= '<input type=password name=pass size=20>';
  $pg .= '</td></tr>';
+ $pg .= '<tr class=dc><td class=dr nowrap>';
+ $pg .= '<span class=st1>*</span>2nd Authentication:';
+ $pg .= '</td><td class=dl>';
+ $pg .= '<input type=password name=2fa size=10>';
+ $pg .= '</td></tr>';
+ $pg .= '<tr class=dc><td colspan=2 class=dc><font size=-1>';
+ $pg .= "<span class=st1>*</span>Leave blank if you haven't enabled it</font>";
+ $pg .= '</td></tr>';
  $pg .= '<tr class=dc><td class=dr colspan=2>';
  $pg .= 'Change: <input type=submit name=Change value=EMail>';
  $pg .= '</td></tr>';
@@ -53,6 +61,14 @@ function settings($data, $user, $email, $addr, $err)
   $pg .= 'Password:';
   $pg .= '</td><td class=dl>';
   $pg .= '<input type=password name=pass size=20>';
+  $pg .= '</td></tr>';
+  $pg .= '<tr class=dc><td class=dr nowrap>';
+  $pg .= '<span class=st1>*</span>2nd Authentication:';
+  $pg .= '</td><td class=dl>';
+  $pg .= '<input type=password name=2fa size=10>';
+  $pg .= '</td></tr>';
+  $pg .= '<tr class=dc><td colspan=2 class=dc><font size=-1>';
+  $pg .= "<span class=st1>*</span>Leave blank if you haven't enabled it</font>";
   $pg .= '</td></tr>';
   $pg .= '<tr class=dc><td class=dr colspan=2>';
   $pg .= 'Change: <input type=submit name=Change value=Address>';
@@ -83,6 +99,14 @@ function settings($data, $user, $email, $addr, $err)
  $pg .= '</td><td class=dl>';
  $pg .= '<input type=password name=pass2 size=20>';
  $pg .= '</td></tr>';
+ $pg .= '<tr class=dc><td class=dr nowrap>';
+ $pg .= '<span class=st1>*</span>2nd Authentication:';
+ $pg .= '</td><td class=dl>';
+ $pg .= '<input type=password name=2fa size=10>';
+ $pg .= '</td></tr>';
+ $pg .= '<tr class=dc><td colspan=2 class=dc><font size=-1>';
+ $pg .= "<span class=st1>*</span>Leave blank if you haven't enabled it</font>";
+ $pg .= '</td></tr>';
  $pg .= '<tr class=dc><td class=dr colspan=2>';
  $pg .= 'Change: <input type=submit name=Change value=Password>';
  $pg .= '</td></tr>';
@@ -103,10 +127,16 @@ function dosettings($data, $user)
  {
   case 'EMail':
 	$email = getparam('email', false);
-	$pass = getparam('pass', false);
-	$ans = userSettings($user, $email, null, $pass);
-	$err = 'EMail changed';
-	$check = true;
+	if (stripos($email, 'hotmail') !== false)
+		$err = 'hotmail not allowed';
+	else
+	{
+		$pass = getparam('pass', false);
+		$twofa = getparam('2fa', false);
+		$ans = userSettings($user, $email, null, $pass, $twofa);
+		$err = 'EMail changed';
+		$check = true;
+	}
 	break;
   case 'Address':
 	if (!isset($data['info']['u_multiaddr']))
@@ -114,7 +144,8 @@ function dosettings($data, $user)
 		$addr = getparam('baddr', false);
 		$addrarr = array(array('addr' => $addr));
 		$pass = getparam('pass', false);
-		$ans = userSettings($user, null, $addrarr, $pass);
+		$twofa = getparam('2fa', false);
+		$ans = userSettings($user, null, $addrarr, $pass, $twofa);
 		$err = 'Payout address changed';
 		$check = true;
 	}
@@ -123,16 +154,14 @@ function dosettings($data, $user)
 	$oldpass = getparam('oldpass', false);
 	$pass1 = getparam('pass1', false);
 	$pass2 = getparam('pass2', false);
+	$twofa = getparam('2fa', false);
 	if (!safepass($pass1))
-	{
-		$err = "Password is unsafe - requires 6 or more characters, including<br>" .
-			"at least one of each uppercase, lowercase and digits, but not Tab";
-	}
+		$err = 'Unsafe password. ' . passrequires();
 	elseif ($pass1 != $pass2)
 		$err = "Passwords don't match";
 	else
 	{
-		$ans = setPass($user, $oldpass, $pass1);
+		$ans = setPass($user, $oldpass, $pass1, $twofa);
 		$err = 'Password changed';
 		$check = true;
 	}

@@ -10,6 +10,7 @@ function doallwork($data, $user)
 
  $totshare = 0;
  $totdiff = 0;
+ $totshrate = 0;
  $totinvalid = 0;
  $totrate = 0;
  $offset = 0;
@@ -26,13 +27,13 @@ function doallwork($data, $user)
 	{
 		$pg .= workuser($data, $ans['username:'.$i],
 				$offset, $totshare, $totdiff,
-				$totinvalid, $totrate,
+				$totshrate, $totinvalid, $totrate,
 				$blockacc, $blockreward, 3600);
 	}
  }
 
- $pg .= worktotal($offset, $totshare, $totdiff, $totinvalid, $totrate,
-		  $blockacc, $blockreward);
+ $pg .= worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
+		  $totrate, $blockacc, $blockreward);
 
  $pg .= "</table>\n";
 

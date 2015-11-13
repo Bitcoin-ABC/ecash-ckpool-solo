@@ -28,6 +28,42 @@ function dq($str)
  return str_replace('"', "\\\"", $str);
 }
 #
+function daysago($val)
+{
+ if ($val < -13)
+	return '';
+
+ if ($val < 60)
+	$des = number_format($val,0).'s';
+ else
+ {
+	$val = $val/60;
+	if ($val < 60)
+		$des = number_format($val,1).'min';
+	else
+	{
+		$val = $val/60;
+		if ($val < 24)
+			$des = number_format($val,1).'hrs';
+		else
+		{
+			$val = $val/24;
+			if ($val < 43)
+				$des = number_format($val,1).'days';
+			else
+			{
+				$val = $val/7;
+				if ($val < 10000)
+					$des = number_format($val,1).'wks';
+				else
+					$des = '';
+			}
+		}
+	}
+ }
+ return $des;
+}
+#
 function howlongago($sec)
 {
  if ($sec < 60)
@@ -63,7 +99,7 @@ function howlongago($sec)
  return $des;
 }
 #
-function howmanyhrs($tot)
+function howmanyhrs($tot, $days = false)
 {
  $sec = round($tot);
  if ($sec < 60)
@@ -78,7 +114,14 @@ function howmanyhrs($tot)
 	{
 		$hr = floor($min / 60);
 		$min -= $hr * 60;
-		$des = $hr.'hr '.$min.'m '.$sec.'s';
+		if ($days && $hr > 23)
+		{
+			$dy = floor($hr / 24);
+			$hr -= $dy * 24;
+			$des = $dy.'d '.$hr.'hr '.$min.'m '.$sec.'s';
+		}
+		else
+			$des = $hr.'hr '.$min.'m '.$sec.'s';
 	}
  }
  return $des;
@@ -90,9 +133,12 @@ function btcfmt($amt)
  return number_format($amt, 8);
 }
 #
-function utcd($when)
+function utcd($when, $brief = false)
 {
- return gmdate('Y-m-d H:i:s+00', round($when));
+ if ($brief)
+	 return gmdate('M-d H:i:s', round($when));
+ else
+	 return gmdate('Y-m-d H:i:s+00', round($when));
 }
 #
 global $sipre;
@@ -323,12 +369,12 @@ session_start();
 #
 include_once('db.php');
 #
-function validUserPass($user, $pass)
+function validUserPass($user, $pass, $twofa)
 {
- $rep = checkPass($user, $pass);
+ $rep = checkPass($user, $pass, $twofa);
  if ($rep != null)
 	$ans = repDecode($rep);
- usleep(100000); // Max 10x per second
+ usleep(500000); // Max twice per second
  if ($rep != null && $ans['STATUS'] == 'ok')
  {
 	$key = 'ckp'.rand(1000000,9999999);
@@ -352,7 +398,7 @@ function logout()
  }
 }
 #
-function requestRegister()
+function requestLoginRegReset()
 {
  $reg = getparam('Register', true);
  $reg2 = getparam('Reset', false);
@@ -397,7 +443,9 @@ function tryLogInOut()
 		return;
 	}
 
-	$valid = validUserPass($user, $pass);
+	$twofa = getparam('2fa', false);
+
+	$valid = validUserPass($user, $pass, $twofa);
 	if (!$valid)
 		$loginfailed = true;
  }

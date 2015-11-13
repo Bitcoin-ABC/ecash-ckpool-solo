@@ -948,17 +948,19 @@ char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, co
 {
 	char *buf = NULL;
 	uint32_t msglen;
-	int ret;
+	int ret, ern;
 
 	ret = wait_read_select(sockd, timeout1);
 	if (unlikely(ret < 1)) {
-		LOGERR("Select1 failed in recv_unix_msg");
+		ern = errno;
+		LOGERR("Select1 failed in recv_unix_msg (%d)", ern);
 		goto out;
 	}
 	/* Get message length */
 	ret = read_length(sockd, &msglen, 4);
 	if (unlikely(ret < 4)) {
-		LOGERR("Failed to read 4 byte length in recv_unix_msg");
+		ern = errno;
+		LOGERR("Failed to read 4 byte length in recv_unix_msg (%d?)", ern);
 		goto out;
 	}
 	msglen = le32toh(msglen);
@@ -968,13 +970,15 @@ char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, co
 	}
 	ret = wait_read_select(sockd, timeout2);
 	if (unlikely(ret < 1)) {
-		LOGERR("Select2 failed in recv_unix_msg");
+		ern = errno;
+		LOGERR("Select2 failed in recv_unix_msg (%d)", ern);
 		goto out;
 	}
 	buf = ckzalloc(msglen + 1);
 	ret = read_length(sockd, buf, msglen);
 	if (unlikely(ret < (int)msglen)) {
-		LOGERR("Failed to read %u bytes in recv_unix_msg", msglen);
+		ern = errno;
+		LOGERR("Failed to read %u bytes in recv_unix_msg (%d?)", msglen, ern);
 		dealloc(buf);
 	}
 out:
@@ -1003,27 +1007,36 @@ out:
 	return ret;
 }
 
-int write_length(int sockd, const void *buf, int len)
+int _write_length(int sockd, const void *buf, int len, const char *file, const char *func, const int line)
 {
-	int ret, ofs = 0;
+	int ret, ofs = 0, ern;
 
 	if (unlikely(len < 1)) {
-		LOGWARNING("Invalid write length of %d requested in write_length", len);
+		LOGWARNING("Invalid write length of %d requested in write_length from %s %s:%d",
+			   len, file, func, line);
 		return -1;
 	}
-	if (unlikely(sockd < 0))
+	if (unlikely(sockd < 0)) {
+		ern = errno;
+		LOGWARNING("Attempt to write to invalidated sock in write_length from %s %s:%d",
+			   file, func, line);
 		return -1;
+	}
 	while (len) {
 		ret = write(sockd, buf + ofs, len);
-		if (unlikely(ret < 0))
+		if (unlikely(ret < 0)) {
+			ern = errno;
+			LOGERR("Failed to write %d bytes in write_length (%d) from %s %s:%d",
+			       len, ern, file, func, line);
 			return -1;
+		}
 		ofs += ret;
 		len -= ret;
 	}
 	return ofs;
 }
 
-bool _send_unix_msg(int sockd, const char *buf, const char *file, const char *func, const int line)
+bool _send_unix_msg(int sockd, const char *buf, int timeout, const char *file, const char *func, const int line)
 {
 	uint32_t msglen, len;
 	bool retval = false;
@@ -1043,28 +1056,26 @@ bool _send_unix_msg(int sockd, const char *buf, const char *file, const char *fu
 		goto out;
 	}
 	msglen = htole32(len);
-	ret = wait_write_select(sockd, 5);
+	ret = wait_write_select(sockd, timeout);
 	if (unlikely(ret < 1)) {
 		ern = errno;
 		LOGERR("Select1 failed in send_unix_msg (%d)", ern);
 		goto out;
 	}
-	ret = write_length(sockd, &msglen, 4);
+	ret = _write_length(sockd, &msglen, 4, file, func, line);
 	if (unlikely(ret < 4)) {
-		ern = errno;
-		LOGERR("Failed to write 4 byte length in send_unix_msg (%d)", ern);
+		LOGERR("Failed to write 4 byte length in send_unix_msg");
 		goto out;
 	}
-	ret = wait_write_select(sockd, 5);
+	ret = wait_write_select(sockd, timeout);
 	if (unlikely(ret < 1)) {
 		ern = errno;
 		LOGERR("Select2 failed in send_unix_msg (%d)", ern);
 		goto out;
 	}
-	ret = write_length(sockd, buf, len);
+	ret = _write_length(sockd, buf, len, file, func, line);
 	if (unlikely(ret < 0)) {
-		ern = errno;
-		LOGERR("Failed to write %d bytes in send_unix_msg (%d)", len, ern);
+		LOGERR("Failed to write %d bytes in send_unix_msg", len);
 		goto out;
 	}
 	retval = true;
@@ -1084,7 +1095,7 @@ bool _send_unix_data(int sockd, const struct msghdr *msg, const char *file, cons
 		LOGWARNING("Null message sent to send_unix_data");
 		goto out;
 	}
-	ret = wait_write_select(sockd, 5);
+	ret = wait_write_select(sockd, UNIX_WRITE_TIMEOUT);
 	if (unlikely(ret < 1)) {
 		LOGERR("Select1 failed in send_unix_data");
 		goto out;
@@ -1107,7 +1118,7 @@ bool _recv_unix_data(int sockd, struct msghdr *msg, const char *file, const char
 	bool retval = false;
 	int ret;
 
-	ret = wait_read_select(sockd, 5);
+	ret = wait_read_select(sockd, UNIX_READ_TIMEOUT);
 	if (unlikely(ret < 1)) {
 		LOGERR("Select1 failed in recv_unix_data");
 		goto out;

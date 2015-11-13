@@ -39,6 +39,7 @@ AC_CHECK_HEADERS(sys/types.h sys/socket.h sys/stat.h linux/un.h netdb.h)
 AC_CHECK_HEADERS(stdint.h netinet/in.h netinet/tcp.h sys/ioctl.h getopt.h)
 AC_CHECK_HEADERS(sys/epoll.h libpq-fe.h postgresql/libpq-fe.h grp.h)
 AC_CHECK_HEADERS(gsl/gsl_math.h gsl/gsl_cdf.h)
+AC_CHECK_HEADERS(openssl/x509.h openssl/hmac.h)
 
 PTHREAD_LIBS="-lpthread"
 MATH_LIBS="-lm"
@@ -64,13 +65,17 @@ if test "x$ckdb" != "xno"; then
 		not found. Install it or disable support with --without-ckdb" && exit 1)
 	AC_CHECK_LIB([gslcblas], [main],[GSLCBLAS=-lgslcblas],echo "Error: Required library gslcblas
 		not found. Install it or disable support with --without-ckdb" && exit 1)
+	AC_CHECK_LIB([ssl], [main],[SSL=-lssl],echo "Error: Required library ssl
+		not found. Install it or disable support with --without-ckdb" && exit 1)
+	AC_CHECK_LIB([crypto], [main],[SSL=-lcrypto],echo "Error: Required library crypto
+		not found. Install it or disable support with --without-ckdb" && exit 1)
 	AC_DEFINE([USE_CKDB], [1], [Defined to 1 if ckdb support required])
-	PQ_LIBS="-lpq -lgsl -lgslcblas"
+	DB_LIBS="-lpq -lgsl -lgslcblas -lssl -lcrypto"
 else
-	PQ_LIBS=""
+	DB_LIBS=""
 fi
 AM_CONDITIONAL([WANT_CKDB], [test "x$ckdb" != "xno"])
-AC_SUBST(PQ_LIBS)
+AC_SUBST(DB_LIBS)
 
 AC_OUTPUT([Makefile] [src/Makefile])
 
@@ -80,7 +85,7 @@ echo "  CPPFLAGS.............: $CPPFLAGS"
 echo "  CFLAGS...............: $CFLAGS"
 echo "  LDFLAGS..............: $LDFLAGS"
 echo "  LDADD................: $PTHREAD_LIBS $MATH_LIBS $RT_LIBS $JANSSON_LIBS"
-echo "  db LDADD.............: $PQ_LIBS"
+echo "  db LDADD.............: $DB_LIBS"
 echo
 echo "Installation...........: make install (as root if needed, with 'su' or 'sudo')"
 echo "  prefix...............: $prefix"

@@ -517,8 +517,9 @@ static char *cached_proxy_line(proxy_instance_t *proxi)
 static char *next_proxy_line(connsock_t *cs, proxy_instance_t *proxi)
 {
 	char *buf = cached_proxy_line(proxi);
+	float timeout = 10;
 
-	if (!buf && read_socket_line(cs, 5) > 0)
+	if (!buf && read_socket_line(cs, &timeout) > 0)
 		buf = strdup(cs->buf);
 	return buf;
 }
@@ -534,9 +535,10 @@ static void append_proxy_line(proxy_instance_t *proxi, const char *buf)
 /* Get a new line from the connsock and return a copy of it */
 static char *new_proxy_line(connsock_t *cs)
 {
+	float timeout = 10;
 	char *buf = NULL;
 
-	if (read_socket_line(cs, 5) < 1)
+	if (read_socket_line(cs, &timeout) < 1)
 		goto out;
 	buf = strdup(cs->buf);
 out:
@@ -719,6 +721,7 @@ out:
 static bool passthrough_stratum(connsock_t *cs, proxy_instance_t *proxi)
 {
 	json_t *req, *val = NULL, *res_val, *err_val;
+	float timeout = 10;
 	bool ret = false;
 
 	JSON_CPACK(req, "{s:s,s:[s]}",
@@ -730,7 +733,7 @@ static bool passthrough_stratum(connsock_t *cs, proxy_instance_t *proxi)
 		LOGWARNING("Failed to send message in passthrough_stratum");
 		goto out;
 	}
-	if (read_socket_line(cs, 5) < 1) {
+	if (read_socket_line(cs, &timeout) < 1) {
 		LOGWARNING("Failed to receive line in passthrough_stratum");
 		goto out;
 	}
@@ -1258,8 +1261,9 @@ static void *proxy_recv(void *arg)
 	while (42) {
 		notify_instance_t *ni, *tmp;
 		share_msg_t *share, *tmpshare;
-		int retries = 0, ret;
+		float timeout;
 		time_t now;
+		int ret;
 
 		now = time(NULL);
 
@@ -1286,13 +1290,14 @@ static void *proxy_recv(void *arg)
 
 		/* If we don't get an update within 10 minutes the upstream pool
 		 * has likely stopped responding. */
+		timeout = 600;
 		do {
 			if (cs->fd == -1) {
 				ret = -1;
 				break;
 			}
-			ret = read_socket_line(cs, 5);
-		} while (ret == 0 && ++retries < 120);
+			ret = read_socket_line(cs, &timeout);
+		} while (ret == 0 && timeout > 0);
 
 		if (ret < 1) {
 			/* Send ourselves a reconnect message */
@@ -1393,11 +1398,12 @@ static void *passthrough_recv(void *arg)
 	rename_proc("passrecv");
 
 	while (42) {
+		float timeout = 60;
 		int ret;
 
 		do {
-			ret = read_socket_line(cs, 60);
-		} while (ret == 0);
+			ret = read_socket_line(cs, &timeout);
+		} while (ret == 0 && timeout > 0);
 
 		if (ret < 1) {
 			/* Send ourselves a reconnect message */
@@ -1413,7 +1419,7 @@ static void *passthrough_recv(void *arg)
 	return NULL;
 }
 
-static void passthrough_send(ckpool_t __maybe_unused *ckp, pass_msg_t *pm)
+static void passthrough_send(ckpool_t *ckp, pass_msg_t *pm)
 {
 	int len, sent;
 
@@ -1421,8 +1427,9 @@ static void passthrough_send(ckpool_t __maybe_unused *ckp, pass_msg_t *pm)
 	len = strlen(pm->msg);
 	sent = write_socket(pm->cs->fd, pm->msg, len);
 	if (sent != len) {
-		/* FIXME: Do something about this? */
-		LOGWARNING("Failed to passthrough %d bytes of message %s", len, pm->msg);
+		LOGWARNING("Failed to passthrough %d bytes of message %s, attempting reconnect",
+			   len, pm->msg);
+		send_proc(ckp->generator, "reconnect");
 	}
 	free(pm->msg);
 	free(pm);
@@ -1531,12 +1538,13 @@ retry:
 	}
 
 	cs = alive->cs;
-	LOGNOTICE("Connected to upstream server %s:%s as proxy%s", cs->url, cs->port,
-		  ckp->passthrough ? " in passthrough mode" : "");
 	if (ckp->passthrough) {
+		LOGWARNING("Connected to upstream server %s:%s as proxy in passthrough mode",
+			   cs->url, cs->port);
 		create_pthread(&alive->pth_precv, passthrough_recv, alive);
 		alive->passsends = create_ckmsgq(ckp, "passsend", &passthrough_send);
 	} else {
+		LOGNOTICE("Connected to upstream server %s:%s as proxy", cs->url, cs->port);
 		create_pthread(&alive->pth_precv, proxy_recv, alive);
 		mutex_init(&alive->psend_lock);
 		cond_init(&alive->psend_cond);

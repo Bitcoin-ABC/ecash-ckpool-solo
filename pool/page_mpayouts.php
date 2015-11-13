@@ -14,6 +14,7 @@ function dompayouts($data, $user)
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
  $pg .= "<tr class=title>";
  $pg .= "<td class=dr>Block</td>";
+ $pg .= "<td class=dr>Block UTC</td>";
  $pg .= "<td class=dr>Miner Reward</td>";
  $pg .= "<td class=dr>N Diff</td>";
  $pg .= "<td class=dr>N Range</td>";
@@ -36,6 +37,7 @@ function dompayouts($data, $user)
 
 		$pg .= "<tr class=$row>";
 		$pg .= '<td class=dr>'.$ans['height:'.$i].'</td>';
+		$pg .= '<td class=dr>'.gmdate('j/M H:i',$ans['blockcreatedate:'.$i]).'</td>';
 		$pg .= '<td class=dr>'.btcfmt($ans['minerreward:'.$i]).'</td>';
 		$diffused = $ans['diffused:'.$i];
 		$pg .= '<td class=dr>'.difffmt($diffused).'</td>';
@@ -63,7 +65,7 @@ function dompayouts($data, $user)
 
 		$pg .= "<tr class=$row>";
 		$pg .= '<td class=dr>Total:</td>';
-		$pg .= '<td class=dl colspan=7></td>';
+		$pg .= '<td class=dl colspan=8></td>';
 		$pg .= '<td class=dr>'.btcfmt($totamt).'</td>';
 		$pg .= "</tr>\n";
 	}

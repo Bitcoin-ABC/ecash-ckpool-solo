@@ -172,6 +172,85 @@ function passChanged($to, $whoip, $emailinfo)
  return sendnoheader($to, "Password Change", $message, $emailinfo);
 }
 #
+function twofaSetup($to, $whoip, $emailinfo)
+{
+ global $eol;
+
+ if (!isset($emailinfo['KWebURL']))
+	return false;
+
+ $web = $emailinfo['KWebURL'];
+
+ $ret = emailEnd('2fa change', $whoip, $emailinfo);
+ if ($ret === false)
+	return false;
+
+ $message = "2FA is ready to be tested.$eol";
+ $message .= "It will be enabled once you test it.$eol$eol";
+ $message .= $ret;
+
+ return sendnoheader($to, "2FA is Ready to be Enabled", $message, $emailinfo);
+}
+#
+function twofaEnabled($to, $whoip, $emailinfo)
+{
+ global $eol;
+
+ if (!isset($emailinfo['KWebURL']))
+	return false;
+
+ $web = $emailinfo['KWebURL'];
+
+ $ret = emailEnd('2fa change', $whoip, $emailinfo);
+ if ($ret === false)
+	return false;
+
+ $message = "2FA is enabled on your account.$eol$eol";
+ $message .= $ret;
+
+ return sendnoheader($to, "2FA is Enabled", $message, $emailinfo);
+}
+#
+function twofaCancel($to, $whoip, $emailinfo)
+{
+ global $eol;
+
+ if (!isset($emailinfo['KWebURL']))
+	return false;
+
+ $web = $emailinfo['KWebURL'];
+
+ $ret = emailEnd('2fa change', $whoip, $emailinfo);
+ if ($ret === false)
+	return false;
+
+ $message = "2FA setup was cancelled on your account.$eol";
+ $message .= "You can set it up later if you want.$eol$eol";
+ $message .= $ret;
+
+ return sendnoheader($to, "2FA was Cancelled", $message, $emailinfo);
+}
+#
+function twofaRemove($to, $whoip, $emailinfo)
+{
+ global $eol;
+
+ if (!isset($emailinfo['KWebURL']))
+	return false;
+
+ $web = $emailinfo['KWebURL'];
+
+ $ret = emailEnd('2fa change', $whoip, $emailinfo);
+ if ($ret === false)
+	return false;
+
+ $message = "2FA was removed from your account.$eol";
+ $message .= "You can set it up again later if you want.$eol$eol";
+ $message .= $ret;
+
+ return sendnoheader($to, "2FA was Removed", $message, $emailinfo);
+}
+#
 # getOpts required for email
 # If they aren't all setup in the DB then email functions will return false
 function emailOptList()

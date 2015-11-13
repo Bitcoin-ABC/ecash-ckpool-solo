@@ -19,6 +19,8 @@
 #include "libckpool.h"
 #include "uthash.h"
 
+#define RPC_TIMEOUT 60
+
 struct ckpool_instance;
 typedef struct ckpool_instance ckpool_t;
 
@@ -245,11 +247,12 @@ ckpool_t *global_ckp;
 
 bool ping_main(ckpool_t *ckp);
 void empty_buffer(connsock_t *cs);
-int read_socket_line(connsock_t *cs, float timeout);
+int read_socket_line(connsock_t *cs, float *timeout);
 void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
 #define send_proc(pi, msg) _send_proc(pi, msg, __FILE__, __func__, __LINE__)
-char *_send_recv_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
-#define send_recv_proc(pi, msg) _send_recv_proc(pi, msg, __FILE__, __func__, __LINE__)
+char *_send_recv_proc(proc_instance_t *pi, const char *msg, int writetimeout, int readtimedout,
+		      const char *file, const char *func, const int line);
+#define send_recv_proc(pi, msg) _send_recv_proc(pi, msg, UNIX_WRITE_TIMEOUT, UNIX_READ_TIMEOUT, __FILE__, __func__, __LINE__)
 char *_send_recv_ckdb(const ckpool_t *ckp, const char *msg, const char *file, const char *func, const int line);
 #define send_recv_ckdb(ckp, msg) _send_recv_ckdb(ckp, msg, __FILE__, __func__, __LINE__)
 char *_ckdb_msg_call(const ckpool_t *ckp, const char *msg,  const char *file, const char *func,

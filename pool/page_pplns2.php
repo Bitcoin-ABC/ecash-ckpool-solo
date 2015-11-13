@@ -121,6 +121,9 @@ function fmtdata($code, $val)
  case '.':
 	$ret = number_format($val, 1);
 	break;
+ case '@':
+	$ret = howmanyhrs($val, true);
+	break;
  default:
 	$ret = $val;
  }
@@ -186,6 +189,7 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 			'PPLNS Wanted' => '.diff_want',
 			'PPLNS Used' => '.diffacc_total',
 			'Elapsed Seconds' => ',pplns_elapsed',
+			'Elapsed Time' => '@pplns_elapsed',
 			'Users' => 'rows',
 			'Oldest Workinfoid' => 'begin_workinfoid',
 			'Oldest Time' => 'begin_stamp',
@@ -241,6 +245,7 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 		{
 			case ',':
 			case '.':
+			case '@':
 				$nm = substr($name, 1);
 				$fmt = fmtdata($name[0], $ans[$nm]);
 				break;

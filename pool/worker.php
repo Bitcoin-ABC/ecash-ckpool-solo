@@ -8,7 +8,8 @@ include_once('param.php');
 function go()
 {
  $a = getparam('a', true);
- if (substr($a, 0, 1) != '1')
+ $f = substr($a, 0, 1);
+ if ($f != '1' and $f != '3')
 	return;
  if (preg_match('/^[a-zA-Z0-9]{24,}[\._]?[a-zA-Z0-9\._]*$/', $a) === false)
 	return;
