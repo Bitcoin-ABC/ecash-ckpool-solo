@@ -469,8 +469,11 @@ struct json_entry {
  * to the log outside of lock */
 static void add_msg_entry(char_entry_t **entries, char **buf)
 {
-	char_entry_t *entry = ckalloc(sizeof(char_entry_t));
+	char_entry_t *entry;
 
+	if (!*buf)
+		return;
+	entry = ckalloc(sizeof(char_entry_t));
 	entry->buf = *buf;
 	*buf = NULL;
 	DL_APPEND(*entries, entry);
@@ -1438,10 +1441,7 @@ static void _dec_instance_ref(sdata_t *sdata, stratum_instance_t *client, const 
 	 * moved due to holding a reference and drop them now. */
 	if (unlikely(client->dropped && !ref)) {
 		__drop_client(sdata, client, true, &msg);
-		/* Make sure there is a message as throttled users don't
-		 * generate a message */
-		if (msg)
-			add_msg_entry(&entries, &msg);
+		add_msg_entry(&entries, &msg);
 	}
 	ck_wunlock(&sdata->instance_lock);
 
