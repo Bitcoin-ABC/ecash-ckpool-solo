@@ -1469,7 +1469,8 @@ static bool send_recv_path(const char *path, const char *msg)
 		ret = true;
 		LOGWARNING("Received: %s in response to %s request", response, msg);
 		dealloc(response);
-	}
+	} else
+		LOGWARNING("Received not response to %s request", msg);
 	Close(sockd);
 	return ret;
 }
@@ -1715,6 +1716,7 @@ int main(int argc, char **argv)
 
 		if (send_recv_path(path, "ping")) {
 			for (i = 0; i < ckp.serverurls; i++) {
+				char oldurl[INET6_ADDRSTRLEN], oldport[8];
 				char getfd[16];
 				int sockd;
 
@@ -1726,10 +1728,16 @@ int main(int argc, char **argv)
 					break;
 				ckp.oldconnfd[i] = get_fd(sockd);
 				Close(sockd);
-				if (!ckp.oldconnfd[i])
+				sockd = ckp.oldconnfd[i];
+				if (!sockd)
 					break;
-				LOGWARNING("Inherited old server socket %d with new file descriptor %d!",
-					   i, ckp.oldconnfd[i]);
+				if (url_from_socket(sockd, oldurl, oldport)) {
+					LOGWARNING("Inherited old server socket %d url %s:%s !",
+						   i, oldurl, oldport);
+				} else {
+					LOGWARNING("Inherited old server socket %d with new file descriptor %d!",
+						   i, ckp.oldconnfd[i]);
+				}
 			}
 			send_recv_path(path, "reject");
 			send_recv_path(path, "reconnect");

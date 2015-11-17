@@ -1409,11 +1409,9 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, bool lazil
 
 	if (client->workername) {
 		if (user) {
-			if (!user->throttled) {
-				ASPRINTF(msg, "Dropped client %"PRId64" %s user %s worker %s %s",
-					 client->id, client->address, user->username,
-					 client->workername, lazily ? "lazily" : "");
-			}
+			ASPRINTF(msg, "Dropped client %"PRId64" %s %suser %s worker %s %s",
+				 client->id, client->address, user->throttled ? "throttled " : "",
+				 user->username, client->workername, lazily ? "lazily" : "");
 		} else {
 			ASPRINTF(msg, "Dropped client %"PRId64" %s no user worker %s %s",
 				 client->id, client->address, client->workername,
@@ -1432,7 +1430,7 @@ static void _dec_instance_ref(sdata_t *sdata, stratum_instance_t *client, const 
 			      const char *func, const int line)
 {
 	char_entry_t *entries = NULL;
-	char *msg = NULL;
+	char *msg;
 	int ref;
 
 	ck_wlock(&sdata->instance_lock);

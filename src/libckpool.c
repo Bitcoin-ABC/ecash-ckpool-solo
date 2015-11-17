@@ -570,14 +570,15 @@ out:
  * INET6_ADDRSTRLEN size, port at least a string of 6 bytes */
 bool url_from_socket(const int sockd, char *url, char *port)
 {
-	socklen_t addrlen = sizeof(struct sockaddr);
-	struct sockaddr addr;
+	struct sockaddr_storage storage;
+	socklen_t addrlen = sizeof(struct sockaddr_storage);
+	struct sockaddr *addr = (struct sockaddr *)&storage;
 
 	if (sockd < 1)
 		return false;
-	if (getsockname(sockd, &addr, &addrlen))
+	if (getsockname(sockd, addr, &addrlen))
 		return false;
-	if (!url_from_sockaddr(&addr, url, port))
+	if (!url_from_sockaddr(addr, url, port))
 		return false;
 	return true;
 }
