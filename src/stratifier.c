@@ -1680,6 +1680,85 @@ static void reset_bestshares(sdata_t *sdata)
 	ck_runlock(&sdata->instance_lock);
 }
 
+static user_instance_t *get_user(sdata_t *sdata, const char *username);
+
+static user_instance_t *user_by_workername(sdata_t *sdata, const char *workername)
+{
+	char *username = strdupa(workername), *ignore;
+	user_instance_t *user;
+
+	ignore = username;
+	strsep(&ignore, "._");
+
+	/* Find the user first */
+	user = get_user(sdata, username);
+	return user;
+}
+
+static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, const char *workername);
+
+static const double nonces = 4294967296;
+
+static json_t *worker_stats(const worker_instance_t *worker)
+{
+	char suffix1[16], suffix5[16], suffix60[16], suffix1440[16], suffix10080[16];
+	json_t *val;
+	double ghs;
+
+	ghs = worker->dsps1 * nonces;
+	suffix_string(ghs, suffix1, 16, 0);
+
+	ghs = worker->dsps5 * nonces;
+	suffix_string(ghs, suffix5, 16, 0);
+
+	ghs = worker->dsps60 * nonces;
+	suffix_string(ghs, suffix60, 16, 0);
+
+	ghs = worker->dsps1440 * nonces;
+	suffix_string(ghs, suffix1440, 16, 0);
+
+	ghs = worker->dsps10080 * nonces;
+	suffix_string(ghs, suffix10080, 16, 0);
+
+	JSON_CPACK(val, "{ss,ss,ss,ss,ss}",
+			"hashrate1m", suffix1,
+			"hashrate5m", suffix5,
+			"hashrate1hr", suffix60,
+			"hashrate1d", suffix1440,
+			"hashrate7d", suffix10080);
+	return val;
+}
+
+static json_t *user_stats(const user_instance_t *user)
+{
+	char suffix1[16], suffix5[16], suffix60[16], suffix1440[16], suffix10080[16];
+	json_t *val;
+	double ghs;
+
+	ghs = user->dsps1 * nonces;
+	suffix_string(ghs, suffix1, 16, 0);
+
+	ghs = user->dsps5 * nonces;
+	suffix_string(ghs, suffix5, 16, 0);
+
+	ghs = user->dsps60 * nonces;
+	suffix_string(ghs, suffix60, 16, 0);
+
+	ghs = user->dsps1440 * nonces;
+	suffix_string(ghs, suffix1440, 16, 0);
+
+	ghs = user->dsps10080 * nonces;
+	suffix_string(ghs, suffix10080, 16, 0);
+
+	JSON_CPACK(val, "{ss,ss,ss,ss,ss}",
+			"hashrate1m", suffix1,
+			"hashrate5m", suffix5,
+			"hashrate1hr", suffix60,
+			"hashrate1d", suffix1440,
+			"hashrate7d", suffix10080);
+	return val;
+}
+
 static void block_solve(ckpool_t *ckp, const char *blockhash)
 {
 	ckmsg_t *block, *tmp, *found = NULL;
@@ -1729,14 +1808,38 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 	ckdbq_add(ckp, ID_BLOCK, val);
 	free(found);
 
-	if (unlikely(!workername))
-		workername = strdup("");
+	if (unlikely(!workername)) {
+		/* This should be impossible! */
+		ASPRINTF(&msg, "Block %d solved by %s!", height, ckp->name);
+		LOGWARNING("Solved and confirmed block %d", height);
+	} else {
+		json_t *user_val, *worker_val;
+		worker_instance_t *worker;
+		user_instance_t *user;
+		char *s;
 
-	ASPRINTF(&msg, "Block %d solved by %s @ %s!", height, workername, ckp->name);
+		ASPRINTF(&msg, "Block %d solved by %s @ %s!", height, workername, ckp->name);
+		LOGWARNING("Solved and confirmed block %d by %s", height, workername);
+		user = user_by_workername(sdata, workername);
+		worker = get_worker(sdata, user, workername);
+
+		ck_rlock(&sdata->instance_lock);
+		user_val = user_stats(user);
+		worker_val = worker_stats(worker);
+		ck_runlock(&sdata->instance_lock);
+
+		s = json_dumps(user_val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
+		json_decref(user_val);
+		LOGWARNING("User %s:%s", user->username, s);
+		dealloc(s);
+		s = json_dumps(worker_val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
+		json_decref(worker_val);
+		LOGWARNING("Worker %s:%s", workername, s);
+		dealloc(s);
+	}
 	stratum_broadcast_message(sdata, msg);
 	free(msg);
 
-	LOGWARNING("Solved and confirmed block %d by %s", height, workername);
 	free(workername);
 
 	reset_bestshares(sdata);
@@ -2217,8 +2320,6 @@ static bool test_address(ckpool_t *ckp, const char *address)
 	dealloc(buf);
 	return ret;
 }
-
-static const double nonces = 4294967296;
 
 static double dsps_from_key(json_t *val, const char *key)
 {
@@ -3599,17 +3700,13 @@ static json_params_t
 
 static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff)
 {
-	char *username = strdupa(workername), *ignore;
 	stratum_instance_t *client;
 	sdata_t *sdata = ckp->data;
 	worker_instance_t *worker;
 	user_instance_t *user;
 
-	ignore = username;
-	strsep(&ignore, "._");
-
 	/* Find the user first */
-	user = get_user(sdata, username);
+	user = user_by_workername(sdata, workername);
 
 	/* Then find the matching worker user */
 	worker = get_worker(sdata, user, workername);
