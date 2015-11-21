@@ -45,7 +45,8 @@ struct client_instance {
 	client_instance_t *next;
 	client_instance_t *prev;
 
-	struct sockaddr address;
+	struct sockaddr_storage address_storage;
+	struct sockaddr *address;
 	char address_name[INET6_ADDRSTRLEN];
 
 	/* Which serverurl is this instance connected to */
@@ -195,8 +196,9 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	sockd = cdata->serverfd[server];
 	client = recruit_client(cdata);
 	client->server = server;
-	address_len = sizeof(client->address);
-	fd = accept(sockd, &client->address, &address_len);
+	client->address = (struct sockaddr *)&client->address_storage;
+	address_len = sizeof(client->address_storage);
+	fd = accept(sockd, client->address, &address_len);
 	if (unlikely(fd < 0)) {
 		/* Handle these errors gracefully should we ever share this
 		 * socket */
@@ -209,17 +211,17 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 		return -1;
 	}
 
-	switch (client->address.sa_family) {
+	switch (client->address->sa_family) {
 		const struct sockaddr_in *inet4_in;
 		const struct sockaddr_in6 *inet6_in;
 
 		case AF_INET:
-			inet4_in = (struct sockaddr_in *)&client->address;
+			inet4_in = (struct sockaddr_in *)client->address;
 			inet_ntop(AF_INET, &inet4_in->sin_addr, client->address_name, INET6_ADDRSTRLEN);
 			port = htons(inet4_in->sin_port);
 			break;
 		case AF_INET6:
-			inet6_in = (struct sockaddr_in6 *)&client->address;
+			inet6_in = (struct sockaddr_in6 *)client->address;
 			inet_ntop(AF_INET6, &inet6_in->sin6_addr, client->address_name, INET6_ADDRSTRLEN);
 			port = htons(inet6_in->sin6_port);
 			break;
