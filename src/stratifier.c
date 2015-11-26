@@ -40,6 +40,7 @@
 static const char *workpadding = "000000800000000000000000000000000000000000000000000000000000000000000000000000000000000080020000";
 static const char *scriptsig_header = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff";
 static uchar scriptsig_header_bin[41];
+static const double nonces = 4294967296;
 
 /* Add unaccounted shares when they arrive, remove them with each update of
  * rolling stats. */
@@ -746,10 +747,15 @@ static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char 
 
 	now_t = time(NULL);
 	if (now_t != time_counter) {
+		pool_stats_t *stats = &sdata->stats;
+		char hashrate[16];
+
 		/* Rate limit to 1 update per second */
 		time_counter = now_t;
+		suffix_string(stats->dsps1 * nonces, hashrate, 16, 0);
 		ch = status_chars[(counter++) & 0x3];
-		fprintf(stdout, "%c\r", ch);
+		fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers",
+			ch, hashrate, stats->sps1, stats->users, stats->workers);
 		fflush(stdout);
 	}
 
@@ -1696,8 +1702,6 @@ static user_instance_t *user_by_workername(sdata_t *sdata, const char *workernam
 }
 
 static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, const char *workername);
-
-static const double nonces = 4294967296;
 
 static json_t *worker_stats(const worker_instance_t *worker)
 {

@@ -84,6 +84,7 @@ void logmsg(int loglevel, const char *fmt, ...) {
 				tm.tm_min,
 				tm.tm_sec, ms);
 		if (loglevel <= LOG_WARNING) {
+			fprintf(stderr, "\33[2K\r");
 			if (loglevel <= LOG_ERR && errno != 0)
 				fprintf(stderr, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
 			else
