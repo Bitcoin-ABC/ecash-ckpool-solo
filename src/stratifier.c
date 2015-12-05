@@ -2490,7 +2490,7 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 	copy_tv(&worker->last_decay, &now);
 	worker->dsps1 = dsps_from_key(val, "hashrate1m");
 	worker->dsps5 = dsps_from_key(val, "hashrate5m");
-	worker->dsps60 = dsps_from_key(val, "hashrate1d");
+	worker->dsps60 = dsps_from_key(val, "hashrate1hr");
 	worker->dsps1440 = dsps_from_key(val, "hashrate1d");
 	worker->dsps10080 = dsps_from_key(val, "hashrate7d");
 	json_get_double(&worker->best_diff, val, "bestshare");

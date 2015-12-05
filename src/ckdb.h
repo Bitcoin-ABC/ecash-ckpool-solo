@@ -55,7 +55,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.4"
-#define CKDB_VERSION DB_VERSION"-1.505"
+#define CKDB_VERSION DB_VERSION"-1.600"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -112,6 +112,12 @@ extern enum free_modes free_mode;
 
 #define BLANK " "
 extern char *EMPTY;
+extern const char *nullstr;
+
+extern const char *true_str;
+extern const char *false_str;
+
+#define TFSTR(_b) ((_b) ? true_str : false_str)
 
 #define FREENULL(mem) do { \
 		if ((mem) && (void *)(mem) != (void *)EMPTY) { \
@@ -424,6 +430,7 @@ enum cmd_values {
 	CMD_USERINFO,
 	CMD_BTCSET,
 	CMD_QUERY,
+	CMD_LOCKS,
 	CMD_END
 };
 
@@ -1026,12 +1033,8 @@ typedef struct seqset {
 #define INIT_SEQSET(_item) INIT_GENERIC(_item, seqset)
 #define DATA_SEQSET(_var, _item) DATA_GENERIC(_var, _item, seqset, true)
 
+// other variables are static in ckdb.c
 extern K_LIST *seqset_free;
-// each new seqset is added to the head, so head is the current one
-extern K_STORE *seqset_store;
-
-// Initialised when seqset_free is allocated
-extern char *seqnam[SEQ_MAX];
 
 // SEQTRANS also used for reload_lost
 typedef struct seqtrans {
@@ -1168,6 +1171,8 @@ typedef struct workers {
 extern K_TREE *workers_root;
 extern K_LIST *workers_free;
 extern K_STORE *workers_store;
+// Emulate a list for lock checking
+extern K_LIST *workers_db_free;
 
 // Currently no workerbits attributes
 
@@ -1598,6 +1603,7 @@ extern const char *blocks_unknown;
 extern K_TREE *blocks_root;
 extern K_LIST *blocks_free;
 extern K_STORE *blocks_store;
+// Access both under blocks_free lock
 extern tv_t blocks_stats_time;
 extern bool blocks_stats_rebuild;
 
@@ -1656,7 +1662,8 @@ extern K_TREE *payouts_id_root;
 extern K_TREE *payouts_wid_root;
 extern K_LIST *payouts_free;
 extern K_STORE *payouts_store;
-extern cklock_t process_pplns_lock;
+// Emulate a list for lock checking
+extern K_LIST *process_pplns_free;
 
 // N.B. status should be checked under r/w lock
 #define PAYOUTS_GENERATED 'G'
@@ -2156,8 +2163,8 @@ extern void free_optioncontrol_data(K_ITEM *item);
 extern void free_markersummary_data(K_ITEM *item);
 extern void free_workmarkers_data(K_ITEM *item);
 extern void free_marks_data(K_ITEM *item);
-#define free_seqset_data(_item) _free_seqset_data(_item, false)
-extern void _free_seqset_data(K_ITEM *item, bool lock);
+#define free_seqset_data(_item) _free_seqset_data(_item)
+extern void _free_seqset_data(K_ITEM *item);
 
 // Data copy functions
 #define COPY_DATA(_new, _old) memcpy(_new, _old, sizeof(*(_new)))
@@ -2244,16 +2251,15 @@ extern K_ITEM *_optional_name(K_TREE *trf_root, char *name, int len, char *patt,
 extern K_ITEM *_require_name(K_TREE *trf_root, char *name, int len, char *patt,
 				char *reply, size_t siz, WHERE_FFL_ARGS);
 extern cmp_t cmp_workerstatus(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *get_workerstatus(bool lock, int64_t userid, char *workername);
-#define find_create_workerstatus(_l, _u, _w, _file, _func, _line) \
-	_find_create_workerstatus(_l, _u, _w, true, _file, _func, _line, WHERE_FFL_HERE)
-#define find_workerstatus(_l, _u, _w, _file, _func, _line) \
-	 _find_create_workerstatus(_l, _u, _w, false, _file, _func, _line, WHERE_FFL_HERE)
-
-extern K_ITEM *_find_create_workerstatus(bool lock, int64_t userid,
-					 char *workername, bool create,
-					 const char *file2, const char *func2,
-					 const int line2, WHERE_FFL_ARGS);
+extern K_ITEM *find_workerstatus(bool gotlock, int64_t userid, char *workername);
+#define find_create_workerstatus(_gl, _ac, _u, _w, _hw, _file, _func, _line) \
+	_find_create_workerstatus(_gl, _ac, _u, _w, _hw, _file, _func, _line, \
+				  WHERE_FFL_HERE)
+extern K_ITEM *_find_create_workerstatus(bool gotlock, bool alertcreate,
+					 int64_t userid, char *workername,
+					 bool hasworker, const char *file2,
+					 const char *func2, const int line2,
+					 WHERE_FFL_ARGS);
 extern void zero_all_active(tv_t *when);
 extern void workerstatus_ready();
 #define workerstatus_update(_auths, _shares, _userstats) \
@@ -2297,7 +2303,7 @@ extern void _users_userdata_add_bin(USERS *users, char *name, int64_t bit,
 extern cmp_t cmp_useratts(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_useratts(int64_t userid, char *attname);
 extern cmp_t cmp_workers(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *find_workers(int64_t userid, char *workername);
+extern K_ITEM *find_workers(bool gotlock, int64_t userid, char *workername);
 extern K_ITEM *first_workers(int64_t userid, K_TREE_CTX *ctx);
 extern K_ITEM *new_worker(PGconn *conn, bool update, int64_t userid, char *workername,
 			  char *diffdef, char *idlenotificationenabled,
@@ -2327,14 +2333,15 @@ extern cmp_t cmp_workinfo(K_ITEM *a, K_ITEM *b);
 #define coinbase1height(_wi) _coinbase1height(_wi, WHERE_FFL_HERE)
 extern int32_t _coinbase1height(WORKINFO *wi, WHERE_FFL_ARGS);
 extern cmp_t cmp_workinfo_height(K_ITEM *a, K_ITEM *b);
-extern K_ITEM *find_workinfo(int64_t workinfoid, K_TREE_CTX *ctx);
+#define find_workinfo(_wid, _ctx) _find_workinfo(_wid, false, _ctx);
+extern K_ITEM *_find_workinfo(int64_t workinfoid, bool gotlock, K_TREE_CTX *ctx);
 extern K_ITEM *next_workinfo(int64_t workinfoid, K_TREE_CTX *ctx);
 extern bool workinfo_age(int64_t workinfoid, char *poolinstance, char *by,
 			 char *code, char *inet, tv_t *cd, tv_t *ss_first,
 			 tv_t *ss_last, int64_t *ss_count, int64_t *s_count,
 			 int64_t *s_diff);
 extern double coinbase_reward(int32_t height);
-extern double workinfo_pps(K_ITEM *w_item, int64_t workinfoid, bool lock);
+extern double workinfo_pps(K_ITEM *w_item, int64_t workinfoid);
 extern cmp_t cmp_shares(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_shareerrors(K_ITEM *a, K_ITEM *b);
 extern void dsp_sharesummary(K_ITEM *item, FILE *stream);
@@ -2367,19 +2374,19 @@ extern cmp_t cmp_blocks(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_blocks(int32_t height, char *blockhash, K_TREE_CTX *ctx);
 extern K_ITEM *find_prev_blocks(int32_t height, K_TREE_CTX *ctx);
 extern const char *blocks_confirmed(char *confirmed);
-extern void zero_on_new_block(bool lock);
+extern void zero_on_new_block(bool gotlock);
 extern void set_block_share_counters();
 extern bool check_update_blocks_stats(tv_t *stats);
 #define set_blockcreatedate(_h) _set_blockcreatedate(_h, WHERE_FFL_HERE)
 extern bool _set_blockcreatedate(int32_t oldest_height, WHERE_FFL_ARGS);
-#define set_prevcreatedate(_h) _set_prevcreatedate(_h, WHERE_FFL_HERE)
+#define set_prevcreatedate(_oh) _set_prevcreatedate(_oh, WHERE_FFL_HERE)
 extern bool _set_prevcreatedate(int32_t oldest_height, WHERE_FFL_ARGS);
 extern cmp_t cmp_miningpayouts(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_miningpayouts(int64_t payoutid, int64_t userid);
 extern K_ITEM *first_miningpayouts(int64_t payoutid, K_TREE_CTX *ctx);
 extern cmp_t cmp_mu(K_ITEM *a, K_ITEM *b);
-extern K_TREE *upd_add_mu(K_TREE *mu_root, K_STORE *mu_store, int64_t userid,
-			  double diffacc);
+extern void upd_add_mu(K_TREE *mu_root, K_STORE *mu_store, int64_t userid,
+			double diffacc);
 extern cmp_t cmp_payouts(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_payouts_id(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_payouts_wid(K_ITEM *a, K_ITEM *b);
@@ -2420,7 +2427,7 @@ extern K_ITEM *find_workmarkerid(int64_t markerid, bool anystatus, char status);
 extern bool workmarkers_generate(PGconn *conn, char *err, size_t siz,
 				 char *by, char *code, char *inet, tv_t *cd,
 				 K_TREE *trf_root, bool none_error);
-extern bool reward_shifts(PAYOUTS *payouts, bool lock, int delta);
+extern bool reward_shifts(PAYOUTS *payouts, int delta);
 extern bool shift_rewards(K_ITEM *wm_item);
 extern cmp_t cmp_marks(K_ITEM *a, K_ITEM *b);
 extern K_ITEM *find_marks(int64_t workinfoid);
@@ -2432,16 +2439,12 @@ extern bool _marks_description(char *description, size_t siz, char *marktype,
 				WHERE_FFL_ARGS);
 extern char *shiftcode(tv_t *createdate);
 extern cmp_t cmp_userinfo(K_ITEM *a, K_ITEM *b);
-#define get_userinfo(_userid) _get_userinfo(_userid, true)
-extern K_ITEM *_get_userinfo(int64_t userid, bool lock);
-#define find_userinfo(_userid) _find_create_userinfo(_userid, true, WHERE_FFL_HERE)
-#define _find_userinfo(_userid, _lock) _find_create_userinfo(_userid, _lock, WHERE_FFL_HERE)
-extern K_ITEM *_find_create_userinfo(int64_t userid, bool lock, WHERE_FFL_ARGS);
-#define userinfo_update(_s, _ss, _ms) _userinfo_update(_s, _ss, _ms, true, true)
-extern void _userinfo_update(SHARES *shares, SHARESUMMARY *sharesummary,
-			     MARKERSUMMARY *markersummary, bool ss_sub, bool lock);
-#define userinfo_block(_blocks, _isnew, _delta) _userinfo_block(_blocks, _isnew, _delta, true)
-extern void _userinfo_block(BLOCKS *blocks, enum info_type isnew, int delta, bool lock);
+extern K_ITEM *get_userinfo(int64_t userid);
+#define find_create_userinfo(_userid) _find_create_userinfo(_userid, WHERE_FFL_HERE)
+extern K_ITEM *_find_create_userinfo(int64_t userid, WHERE_FFL_ARGS);
+extern void userinfo_update(SHARES *shares, SHARESUMMARY *sharesummary,
+			    MARKERSUMMARY *markersummary, bool ss_sub);
+extern void userinfo_block(BLOCKS *blocks, enum info_type isnew, int delta);
 
 // ***
 // *** PostgreSQL functions ckdb_dbio.c
@@ -2516,8 +2519,8 @@ extern K_ITEM *useratts_add(PGconn *conn, char *username, char *attname,
 				bool begun);
 extern bool useratts_item_expire(PGconn *conn, K_ITEM *ua_item, tv_t *cd);
 extern bool useratts_fill(PGconn *conn);
-extern K_ITEM *workers_add(PGconn *conn, bool lock, int64_t userid,
-			   char *workername, char *difficultydefault,
+extern K_ITEM *workers_add(PGconn *conn, int64_t userid, char *workername,
+			   bool add_ws, char *difficultydefault,
 			   char *idlenotificationenabled,
 			   char *idlenotificationtime, char *by,
 			   char *code, char *inet, tv_t *cd, K_TREE *trf_root);

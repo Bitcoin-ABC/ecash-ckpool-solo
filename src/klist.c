@@ -1,5 +1,6 @@
 /*
  * Copyright 2013-2014 Andrew Smith - BlackArrow Ltd
+ * Copyright 2015 Andrew Smith
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -8,6 +9,29 @@
  */
 
 #include "klist.h"
+
+#if LOCK_CHECK
+bool check_locks = true;
+const char *thread_noname = "UNSET";
+int next_thread_id = 0;
+bool lock_check_init = false;
+cklock_t lock_check_lock;
+__thread int my_thread_id = -1;
+__thread char *my_thread_name = NULL;
+__thread bool my_check_locks = true;
+
+bool auto_check_deadlocks = true;
+// Must be false to start with
+bool check_deadlocks = false;
+__thread int my_locks[MAX_LOCKDEPTH];
+__thread const char *my_locks_n[MAX_LOCKDEPTH];
+__thread const char *my_locks_fl[MAX_LOCKDEPTH];
+__thread const char *my_locks_f[MAX_LOCKDEPTH];
+__thread int my_locks_l[MAX_LOCKDEPTH];
+__thread int my_lock_level = 0;
+__thread bool my_check_deadlocks = true;
+K_LISTS *all_klists;
+#endif
 
 #define _CHKLIST(_list, _name) do {\
 		if (!_list) { \
@@ -111,6 +135,7 @@ K_STORE *_k_new_store(K_LIST *list, KLIST_FFL_ARGS)
 	if (!store)
 		quithere(1, "Failed to calloc store for %s", list->name);
 
+	store->master = list;
 	store->is_store = true;
 	store->lock = list->lock;
 	store->name = list->name;
@@ -119,7 +144,8 @@ K_STORE *_k_new_store(K_LIST *list, KLIST_FFL_ARGS)
 	return store;
 }
 
-K_LIST *_k_new_list(const char *name, size_t siz, int allocate, int limit, bool do_tail, KLIST_FFL_ARGS)
+K_LIST *_k_new_list(const char *name, size_t siz, int allocate, int limit,
+		    bool do_tail, bool lock_only, KLIST_FFL_ARGS)
 {
 	K_LIST *list;
 
@@ -133,7 +159,9 @@ K_LIST *_k_new_list(const char *name, size_t siz, int allocate, int limit, bool 
 	if (!list)
 		quithere(1, "Failed to calloc list %s", name);
 
+	list->master = list;
 	list->is_store = false;
+	list->is_lock_only = lock_only;
 
 	list->lock = calloc(1, sizeof(*(list->lock)));
 	if (!(list->lock))
@@ -147,7 +175,29 @@ K_LIST *_k_new_list(const char *name, size_t siz, int allocate, int limit, bool 
 	list->limit = limit;
 	list->do_tail = do_tail;
 
-	k_alloc_items(list, KLIST_FFL_PASS);
+	if (!(list->is_lock_only))
+		k_alloc_items(list, KLIST_FFL_PASS);
+
+#if LOCK_CHECK
+	K_LISTS *klists;
+
+	// not locked :P
+	if (!lock_check_init) {
+		quitfrom(1, file, func, line,
+			 "in %s(), lock_check_lock has not been initialised!",
+			 __func__);
+	}
+
+	klists = calloc(1, sizeof(*klists));
+	if (!klists)
+		quithere(1, "Failed to calloc klists %s", name);
+
+	klists->klist = list;
+	ck_wlock(&lock_check_lock);
+	klists->next = all_klists;
+	all_klists = klists;
+	ck_wunlock(&lock_check_lock);
+#endif
 
 	return list;
 }
@@ -159,11 +209,12 @@ K_LIST *_k_new_list(const char *name, size_t siz, int allocate, int limit, bool 
  * 2) alloc a new list and return the head -
  *	which is NULL if the list limit has been reached
  */
-K_ITEM *_k_unlink_head(K_LIST *list, KLIST_FFL_ARGS)
+K_ITEM *_k_unlink_head(K_LIST *list, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	K_ITEM *item;
 
 	CHKLS(list);
+	_LIST_WRITE(list, chklock, file, func, line);
 
 	if (!(list->head) && !(list->is_store))
 		k_alloc_items(list, KLIST_FFL_PASS);
@@ -188,13 +239,14 @@ K_ITEM *_k_unlink_head(K_LIST *list, KLIST_FFL_ARGS)
 }
 
 // Zeros the head returned
-K_ITEM *_k_unlink_head_zero(K_LIST *list, KLIST_FFL_ARGS)
+K_ITEM *_k_unlink_head_zero(K_LIST *list, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	K_ITEM *item;
 
 	CHKLS(list);
+	_LIST_WRITE(list, chklock, file, func, line);
 
-	item = _k_unlink_head(list, KLIST_FFL_PASS);
+	item = _k_unlink_head(list, false, KLIST_FFL_PASS);
 
 	if (item)
 		memset(item->data, 0, list->siz);
@@ -203,11 +255,12 @@ K_ITEM *_k_unlink_head_zero(K_LIST *list, KLIST_FFL_ARGS)
 }
 
 // Returns NULL if empty
-K_ITEM *_k_unlink_tail(K_LIST *list, KLIST_FFL_ARGS)
+K_ITEM *_k_unlink_tail(K_LIST *list, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	K_ITEM *item;
 
 	CHKLS(list);
+	_LIST_WRITE(list, chklock, file, func, line);
 
 	if (!(list->do_tail)) {
 		quithere(1, "List %s can't %s() - do_tail is false" KLIST_FFL,
@@ -231,11 +284,11 @@ K_ITEM *_k_unlink_tail(K_LIST *list, KLIST_FFL_ARGS)
 	return item;
 }
 
-void _k_add_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
+void _k_add_head(K_LIST *list, K_ITEM *item, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	CHKLS(list);
-
 	CHKITEM(item, list);
+	_LIST_WRITE(list, chklock, file, func, line);
 
 	if (item->name != list->name) {
 		quithere(1, "List %s can't %s() a %s item" KLIST_FFL,
@@ -264,22 +317,22 @@ void _k_add_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 }
 
 /* slows it down (of course) - only for debugging
-void _k_free_head(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
+void _k_free_head(K_LIST *list, K_ITEM *item, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	CHKLS(list);
-
 	CHKITEM(item, list);
+	_LIST_WRITE(list, chklock, file, func, line);
 
 	memset(item->data, 0xff, list->siz);
 	_k_add_head(list, item, KLIST_FFL_PASS);
 }
 */
 
-void _k_add_tail(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
+void _k_add_tail(K_LIST *list, K_ITEM *item, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	CHKLS(list);
-
 	CHKITEM(item, list);
+	_LIST_WRITE(list, chklock, file, func, line);
 
 	if (item->name != list->name) {
 		quithere(1, "List %s can't %s() a %s item" KLIST_FFL,
@@ -311,13 +364,12 @@ void _k_add_tail(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 }
 
 // Insert item into the list next after 'after'
-void _k_insert_after(K_LIST *list, K_ITEM *item, K_ITEM *after, KLIST_FFL_ARGS)
+void _k_insert_after(K_LIST *list, K_ITEM *item, K_ITEM *after, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	CHKLS(list);
-
 	CHKITEM(item, list);
-
 	_CHKITEM(item, after, "after");
+	_LIST_WRITE(list, chklock, file, func, line);
 
 	if (item->name != list->name) {
 		quithere(1, "List %s can't %s() a %s item" KLIST_FFL,
@@ -349,11 +401,11 @@ void _k_insert_after(K_LIST *list, K_ITEM *item, K_ITEM *after, KLIST_FFL_ARGS)
 	list->count_up++;
 }
 
-void _k_unlink_item(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
+void _k_unlink_item(K_LIST *list, K_ITEM *item, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	CHKLS(list);
-
 	CHKITEM(item, list);
+	_LIST_WRITE(list, chklock, file, func, line);
 
 	if (item->name != list->name) {
 		quithere(1, "List %s can't %s() a %s item" KLIST_FFL,
@@ -379,16 +431,18 @@ void _k_unlink_item(K_LIST *list, K_ITEM *item, KLIST_FFL_ARGS)
 	list->count--;
 }
 
-void _k_list_transfer_to_head(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS)
+void _k_list_transfer_to_head(K_LIST *from, K_LIST *to, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	_CHKLIST(from, "from list/store");
-
 	_CHKLIST(to, "to list/store");
 
 	if (from->name != to->name) {
 		quithere(1, "List %s can't %s() to a %s list" KLIST_FFL,
 				from->name, __func__, to->name, KLIST_FFL_PASS);
 	}
+
+	// from and to are the same lock
+	_LIST_WRITE(to, chklock, file, func, line);
 
 	if (!(from->do_tail)) {
 		quithere(1, "List %s can't %s() - do_tail is false" KLIST_FFL,
@@ -413,16 +467,18 @@ void _k_list_transfer_to_head(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS)
 	from->count_up = 0;
 }
 
-void _k_list_transfer_to_tail(K_LIST *from, K_LIST *to, KLIST_FFL_ARGS)
+void _k_list_transfer_to_tail(K_LIST *from, K_LIST *to, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	_CHKLIST(from, "from list/store");
-
 	_CHKLIST(to, "to list/store");
 
 	if (from->name != to->name) {
 		quithere(1, "List %s can't %s() to a %s list" KLIST_FFL,
 				from->name, __func__, to->name, KLIST_FFL_PASS);
 	}
+
+	// from and to are the same lock
+	_LIST_WRITE(to, chklock, file, func, line);
 
 	if (!(from->do_tail)) {
 		quithere(1, "List %s can't %s() - do_tail is false" KLIST_FFL,
@@ -470,6 +526,36 @@ K_LIST *_k_free_list(K_LIST *list, KLIST_FFL_ARGS)
 
 	free(list->lock);
 
+#if LOCK_CHECK
+	K_LISTS *klists, *klists_prev = NULL;
+
+	// not locked :P
+	if (!lock_check_init) {
+		quitfrom(1, file, func, line,
+			 "in %s(), lock_check_lock has not been initialised!",
+			 __func__);
+	}
+
+	ck_wlock(&lock_check_lock);
+	klists = all_klists;
+	while (klists && klists->klist != list) {
+		klists_prev = klists;
+		klists = klists->next;
+	}
+	if (!klists) {
+		quitfrom(1, file, func, line,
+			 "in %s(), list %s not in klists",
+			 __func__, list->name);
+	} else {
+		if (klists_prev)
+			klists_prev->next = klists->next;
+		else
+			all_klists = klists->next;
+		free(klists);
+	}
+	ck_wunlock(&lock_check_lock);
+#endif
+
 	free(list);
 
 	return NULL;
@@ -490,11 +576,12 @@ K_STORE *_k_free_store(K_STORE *store, KLIST_FFL_ARGS)
 }
 
 // Must be locked and none in use and/or unlinked
-void _k_cull_list(K_LIST *list, KLIST_FFL_ARGS)
+void _k_cull_list(K_LIST *list, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS)
 {
 	int i;
 
 	CHKLIST(list);
+	_LIST_WRITE(list, chklock, file, func, line);
 
 	if (list->is_store) {
 		quithere(1, "List %s can't %s() a store" KLIST_FFL,

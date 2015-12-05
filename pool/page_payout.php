@@ -30,7 +30,7 @@ Pool fee is 0.9% of the total.<br><br>
 
 <span class=hdr>How do the payments work?</span><br><br>
 The $n means the pool rewards $t times the expected number of shares, each time a block is found.<br>
-So each share will be paid appoximately $ot of it's expected value, in each block it gets a reward,<br>
+So each share will be paid approximately $ot of it's expected value, in each block it gets a reward,<br>
 but each share is also expected, on average, to be rewarded $t times in blocks found after the share is submitted to the pool.<br>
 i.e. if pool luck was always 100% then each share is expected to be rewarded $t times.<br><br>
 If pool luck is better than 100%, then the average share reward will be better than $t times.<br>

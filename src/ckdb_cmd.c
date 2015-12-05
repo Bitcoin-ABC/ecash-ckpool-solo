@@ -393,11 +393,9 @@ static char *cmd_2fa(__maybe_unused PGconn *conn, char *cmd, char *id,
 				APPEND_REALLOC(buf, off, len, tmp);
 				FREENULL(keystr);
 
-				K_RLOCK(optioncontrol_free);
 				oc_item = find_optioncontrol(TOTPAUTH_ISSUER,
 							     now,
 							     OPTIONCONTROL_HEIGHT);
-				K_RUNLOCK(optioncontrol_free);
 				if (oc_item) {
 					DATA_OPTIONCONTROL(oc, oc_item);
 					issuer = oc->optionvalue;
@@ -627,7 +625,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 							goto struckout;
 						}
 						address = transfer_data(i_address);
-						pa_item = pa_store->head;
+						pa_item = STORE_HEAD_NOLOCK(pa_store);
 						while (pa_item) {
 							DATA_PAYMENTADDRESSES(row, pa_item);
 							if (strcmp(row->payaddress, address) == 0) {
@@ -665,7 +663,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 			}
 
 			if (pa_store && pa_store->count > 0) {
-				pa_item = pa_store->head;
+				pa_item = STORE_HEAD_NOLOCK(pa_store);
 				while (pa_item) {
 					DATA_PAYMENTADDRESSES(row, pa_item);
 					// Only EVER validate addresses once ... for now
@@ -821,7 +819,7 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 			if (!i_workername)
 				break;
 
-			w_item = find_workers(users->userid,
+			w_item = find_workers(false, users->userid,
 					      transfer_data(i_workername));
 			// Abort if any dont exist
 			if (!w_item) {
@@ -958,7 +956,9 @@ static char *cmd_poolstats_do(PGconn *conn, char *cmd, char *id, char *by,
 	row.createdate.tv_usec = date_eot.tv_usec;
 	INIT_POOLSTATS(&look);
 	look.data = (void *)(&row);
+	K_RLOCK(poolstats_free);
 	ps = find_before_in_ktree(poolstats_root, &look, ctx);
+	K_RUNLOCK(poolstats_free);
 	if (!ps)
 		store = true;
 	else {
@@ -1193,9 +1193,7 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, "ok.");
 
 redo:
-	K_WLOCK(blocks_free);
 	has_stats = check_update_blocks_stats(&stats_tv);
-	K_WUNLOCK(blocks_free);
 
 	srows = rows = 0;
 	K_RLOCK(blocks_free);
@@ -1670,7 +1668,7 @@ static char *cmd_payments(__maybe_unused PGconn *conn, char *cmd, char *id,
 	}
 	K_WUNLOCK(payments_free);
 
-	p_item = pay_store->head;
+	p_item = STORE_HEAD_NOLOCK(pay_store);
 	while (p_item) {
 		DATA_PAYMENTS(payments, p_item);
 		pok = false;
@@ -1763,12 +1761,15 @@ static char *cmd_percent(char *cmd, char *id, tv_t *now, USERS *users)
 	lookworkers.workername[0] = '\0';
 	DATE_ZERO(&(lookworkers.expirydate));
 	w_look.data = (void *)(&lookworkers);
+	K_RLOCK(workers_free);
 	w_item = find_after_in_ktree(workers_root, &w_look, w_ctx);
+	K_RUNLOCK(workers_free);
 	DATA_WORKERS_NULL(workers, w_item);
 	while (w_item && workers->userid == users->userid) {
 		if (CURRENT(&(workers->expirydate))) {
-			ws_item = get_workerstatus(true, users->userid,
-						   workers->workername);
+			K_RLOCK(workerstatus_free);
+			ws_item = find_workerstatus(true, users->userid,
+						    workers->workername);
 			if (ws_item) {
 				DATA_WORKERSTATUS(workerstatus, ws_item);
 				t_diffacc += workerstatus->block_diffacc;
@@ -1784,6 +1785,7 @@ static char *cmd_percent(char *cmd, char *id, tv_t *now, USERS *users)
 				t_sharehi += workerstatus->block_sharehi;
 				t_sharerej += workerstatus->block_sharerej;
 			}
+			K_RUNLOCK(workerstatus_free);
 
 			/* TODO: workers_root userid+worker is ordered
 			 *  so no 'find' should be needed -
@@ -1801,7 +1803,9 @@ static char *cmd_percent(char *cmd, char *id, tv_t *now, USERS *users)
 			}
 			K_RUNLOCK(userstats_free);
 		}
+		K_RLOCK(workers_free);
 		w_item = next_in_ktree(w_ctx);
+		K_RUNLOCK(workers_free);
 		DATA_WORKERS_NULL(workers, w_item);
 	}
 
@@ -2029,21 +2033,23 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 	lookworkers.workername[0] = '\0';
 	DATE_ZERO(&(lookworkers.expirydate));
 	w_look.data = (void *)(&lookworkers);
+	K_RLOCK(workers_free);
 	w_item = find_after_in_ktree(workers_root, &w_look, w_ctx);
+	K_RUNLOCK(workers_free);
 	DATA_WORKERS_NULL(workers, w_item);
 	rows = 0;
 	while (w_item && workers->userid == users->userid) {
 		if (CURRENT(&(workers->expirydate))) {
-			ws_item = get_workerstatus(true, users->userid,
-						   workers->workername);
+			K_RLOCK(workerstatus_free);
+			ws_item = find_workerstatus(true, users->userid,
+						    workers->workername);
 			if (ws_item) {
 				DATA_WORKERSTATUS(workerstatus, ws_item);
-				K_RLOCK(workerstatus_free);
 				// good or bad - either means active
 				copy_tv(&last_share, &(workerstatus->last_share));
-				K_RUNLOCK(workerstatus_free);
 			} else
 				DATE_ZERO(&last_share);
+			K_RUNLOCK(workerstatus_free);
 
 			if (tvdiff(now, &last_share) < oldworkers) {
 				str_to_buf(workers->workername, reply, sizeof(reply));
@@ -2223,7 +2229,9 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 				rows++;
 			}
 		}
+		K_RLOCK(workers_free);
 		w_item = next_in_ktree(w_ctx);
+		K_RUNLOCK(workers_free);
 		DATA_WORKERS_NULL(workers, w_item);
 	}
 	snprintf(tmp, sizeof(tmp),
@@ -2298,7 +2306,7 @@ static char *cmd_allusers(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC_INIT(buf, off, len);
 	APPEND_REALLOC(buf, off, len, "ok.");
 	rows = 0;
-	usu_item = usu_store->head;
+	usu_item = STORE_HEAD_NOLOCK(usu_store);
 	while (usu_item) {
 		DATA_USERSTATS(userstats_u, usu_item);
 		K_RLOCK(users_free);
@@ -2865,9 +2873,7 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	if (!i_preauth)
 		i_preauth = &auth_preauth;
 
-	K_RLOCK(optioncontrol_free);
 	oc_item = find_optioncontrol(OPTIONCONTROL_AUTOADDUSER, cd, pool.height);
-	K_RUNLOCK(optioncontrol_free);
 	if (oc_item) {
 		K_RLOCK(users_free);
 		u_item = find_users(username);
@@ -3096,7 +3102,7 @@ static char *cmd_heartbeat(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	APPEND_REALLOC_INIT(buf, off, len);
 	APPEND_REALLOC(buf, off, len, "ok.heartbeat={\"diffchange\":[");
-	hq_item = hq_store->tail;
+	hq_item = STORE_TAIL_NOLOCK(hq_store);
 	first = true;
 	while (hq_item) {
 		DATA_HEARTBEATQUEUE(heartbeatqueue, hq_item);
@@ -3159,7 +3165,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	ftv_to_buf(now, reply, siz);
 	snprintf(tmp, sizeof(tmp), "now=%s%c", reply, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
-	ck_wlock(&last_lock);
+	ck_rlock(&last_lock);
 	ftv_to_buf(&last_heartbeat, reply, siz);
 	snprintf(tmp, sizeof(tmp), "lasthb=%s%c", reply, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
@@ -3176,7 +3182,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	snprintf(tmp, sizeof(tmp), "lastshinv=%s%c", reply, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 	ftv_to_buf(&last_auth, reply, siz);
-	ck_wunlock(&last_lock);
+	ck_runlock(&last_lock);
 	snprintf(tmp, sizeof(tmp), "lastau=%s%c", reply, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
@@ -3249,7 +3255,9 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, tmp);
 
 	// TODO: assumes only one poolinstance (for now)
+	K_RLOCK(poolstats_free);
 	p_item = last_in_ktree(poolstats_root, ctx);
+	K_RUNLOCK(poolstats_free);
 	if (p_item) {
 		DATA_POOLSTATS(poolstats, p_item);
 		int_to_buf(poolstats->users, reply, siz);
@@ -3830,9 +3838,7 @@ static char *cmd_getopts(__maybe_unused PGconn *conn, char *cmd, char *id,
 		comma = strchr(ptr, ',');
 		if (comma)
 			*(comma++) = '\0';
-		K_RLOCK(optioncontrol_free);
 		oc_item = find_optioncontrol(ptr, now, pool.height);
-		K_RUNLOCK(optioncontrol_free);
 		/* web code must check the existance of the optionname
 		 * in the reply since it will be missing if it doesn't
 		 * exist in the DB */
@@ -4175,13 +4181,14 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	ss_count = wm_count = ms_count = 0;
 
 	mu_store = k_new_store(miningpayouts_free);
-	mu_root = new_ktree(cmp_mu);
+	mu_root = new_ktree(cmp_mu, miningpayouts_free);
 
 	looksharesummary.workinfoid = block_workinfoid;
 	looksharesummary.userid = MAXID;
 	looksharesummary.workername = EMPTY;
 	INIT_SHARESUMMARY(&ss_look);
 	ss_look.data = (void *)(&looksharesummary);
+	K_WLOCK(miningpayouts_free);
 	K_RLOCK(sharesummary_free);
 	K_RLOCK(workmarkers_free);
 	K_RLOCK(markersummary_free);
@@ -4215,9 +4222,8 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		begin_workinfoid = sharesummary->workinfoid;
 		if (tv_newer(&end_tv, &(sharesummary->lastshareacc)))
 			copy_tv(&end_tv, &(sharesummary->lastshareacc));
-		mu_root = upd_add_mu(mu_root, mu_store,
-				     sharesummary->userid,
-				     (int64_t)(sharesummary->diffacc));
+		upd_add_mu(mu_root, mu_store, sharesummary->userid,
+			   (int64_t)(sharesummary->diffacc));
 		ss_item = prev_in_ktree(ctx);
 		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 	}
@@ -4240,9 +4246,8 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 		total_share_count += sharesummary->sharecount;
 		acc_share_count += sharesummary->shareacc;
 		total_diff += (int64_t)(sharesummary->diffacc);
-		mu_root = upd_add_mu(mu_root, mu_store,
-				     sharesummary->userid,
-				     (int64_t)(sharesummary->diffacc));
+		upd_add_mu(mu_root, mu_store, sharesummary->userid,
+			   (int64_t)(sharesummary->diffacc));
 		ss_item = prev_in_ktree(ctx);
 		DATA_SHARESUMMARY_NULL(sharesummary, ss_item);
 	}
@@ -4289,9 +4294,8 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 					begin_workinfoid = workmarkers->workinfoidstart;
 					if (tv_newer(&end_tv, &(markersummary->lastshareacc)))
 						copy_tv(&end_tv, &(markersummary->lastshareacc));
-					mu_root = upd_add_mu(mu_root, mu_store,
-							     markersummary->userid,
-							     (int64_t)(markersummary->diffacc));
+					upd_add_mu(mu_root, mu_store, markersummary->userid,
+						   (int64_t)(markersummary->diffacc));
 					ms_item = prev_in_ktree(ms_ctx);
 					DATA_MARKERSUMMARY_NULL(markersummary, ms_item);
 				}
@@ -4305,6 +4309,7 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_RUNLOCK(markersummary_free);
 	K_RUNLOCK(workmarkers_free);
 	K_RUNLOCK(sharesummary_free);
+	K_WUNLOCK(miningpayouts_free);
 
 	LOGDEBUG("%s(): total %.0f want %.0f", __func__, total_diff, diff_want);
 	if (total_diff == 0.0) {
@@ -4487,9 +4492,9 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 	APPEND_REALLOC(buf, off, len, "pplns_last=1");
 
 	free_ktree(mu_root, NULL);
-	K_WLOCK(mu_store);
+	K_WLOCK(miningpayouts_free);
 	k_list_transfer_to_head(mu_store, miningpayouts_free);
-	K_WUNLOCK(mu_store);
+	K_WUNLOCK(miningpayouts_free);
 	mu_store = k_free_store(mu_store);
 
 	LOGDEBUG("%s.ok.pplns.%s", id, buf);
@@ -4498,9 +4503,9 @@ static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
 shazbot:
 
 	free_ktree(mu_root, NULL);
-	K_WLOCK(mu_store);
+	K_WLOCK(miningpayouts_free);
 	k_list_transfer_to_head(mu_store, miningpayouts_free);
-	K_WUNLOCK(mu_store);
+	K_WUNLOCK(miningpayouts_free);
 	mu_store = k_free_store(mu_store);
 
 	return strdup(reply);
@@ -4853,7 +4858,7 @@ static char *cmd_payouts(PGconn *conn, char *cmd, char *id, tv_t *now,
 			return strdup(reply);
 		}
 		// Original wasn't generated, so reward it
-		reward_shifts(payouts2, true, 1);
+		reward_shifts(payouts2, 1);
 		DATA_PAYOUTS(payouts2, p2_item);
 		DATA_PAYOUTS(old_payouts2, old_p2_item);
 		snprintf(msg, sizeof(msg),
@@ -4924,7 +4929,7 @@ static char *cmd_payouts(PGconn *conn, char *cmd, char *id, tv_t *now,
 			return strdup(reply);
 		}
 		// Original was generated, so undo the reward
-		reward_shifts(payouts2, true, -1);
+		reward_shifts(payouts2, -1);
 		DATA_PAYOUTS(payouts2, p2_item);
 		DATA_PAYOUTS(old_payouts2, old_p2_item);
 		snprintf(msg, sizeof(msg),
@@ -5064,7 +5069,7 @@ static char *cmd_mpayouts(__maybe_unused PGconn *conn, char *cmd, char *id,
 	while (po_item) {
 		if (CURRENT(&(payouts->expirydate)) &&
 		    PAYGENERATED(payouts->status)) {
-			// Not locked ... for now
+			K_RLOCK(miningpayouts_free);
 			mp_item = find_miningpayouts(payouts->payoutid,
 						     users->userid);
 			if (mp_item) {
@@ -5123,6 +5128,7 @@ static char *cmd_mpayouts(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 				rows++;
 			}
+			K_RUNLOCK(miningpayouts_free);
 		}
 		po_item = prev_in_ktree(ctx);
 		DATA_PAYOUTS_NULL(payouts, po_item);
@@ -6324,7 +6330,9 @@ static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
 			}
 
 			K_RLOCK(markersummary_free);
+			K_RLOCK(workmarkers_free);
 			ms_item = find_markersummary_p(wm->markerid);
+			K_RUNLOCK(workmarkers_free);
 			K_RUNLOCK(markersummary_free);
 			if (ms_item) {
 				DATA_MARKERSUMMARY(ms, ms_item);
@@ -6494,7 +6502,7 @@ static char *cmd_userinfo(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	rows = 0;
 	K_RLOCK(userinfo_free);
-	ui_item = userinfo_store->head;
+	ui_item = STORE_RHEAD(userinfo_store);
 	while (ui_item) {
 		DATA_USERINFO(userinfo, ui_item);
 
@@ -6798,8 +6806,7 @@ static char *cmd_query(__maybe_unused PGconn *conn, char *cmd, char *id,
 				snprintf(tmp, sizeof(tmp),
 					 "ppsvalue:%d=%.15f%c", rows,
 					 workinfo_pps(wi_item,
-						      workinfo->workinfoid,
-						      true),
+						      workinfo->workinfoid),
 					 FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
 				K_RLOCK(workmarkers_free);
@@ -7171,6 +7178,7 @@ static char *cmd_query(__maybe_unused PGconn *conn, char *cmd, char *id,
 			p_item = next_in_ktree(ctx);
 			DATA_PAYOUTS_NULL(payouts, p_item);
 		}
+		K_RUNLOCK(payouts_free);
 
 		snprintf(tmp, sizeof(tmp), "flds=%s%c",
 			 "height,payoutid,minerreward,workinfoidstart,"
@@ -7206,6 +7214,68 @@ static char *cmd_query(__maybe_unused PGconn *conn, char *cmd, char *id,
 				     msg[0] ? " " : "",
 				     msg[0] ? msg : "");
 	return buf;
+}
+
+// Query and disable internal lock detection code
+static char *cmd_locks(__maybe_unused PGconn *conn, char *cmd, char *id,
+			__maybe_unused tv_t *now, __maybe_unused char *by,
+			__maybe_unused char *code, __maybe_unused char *inet,
+			__maybe_unused tv_t *cd,
+			__maybe_unused K_TREE *trf_root)
+{
+	bool code_locks = false, code_deadlocks = false;
+	bool was_locks = false, was_deadlocks = false;
+	bool new_locks = false, new_deadlocks = false;
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+#if LOCK_CHECK
+	K_ITEM *i_locks, *i_deadlocks;
+	char *deadlocks;
+#endif
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+#if LOCK_CHECK
+	code_locks = true;
+	was_locks = new_locks = check_locks;
+
+	code_deadlocks = true;
+	was_deadlocks = new_locks = check_deadlocks;
+#endif
+
+	/* options are
+	 *  locks <- disable lock checking if it's enabled (value ignored)
+	 *  deadlocks=Y/N <- enable/disable deadlock prediction
+	 *  	any word with any case starting with 'Y' means enable it
+	 *  	anything else means disable it
+	 *  	When you enable it, it won't re-enable it for threads that
+	 *  	 have failed a deadlock prediction test
+	 * It will report the status of both */
+
+#if LOCK_CHECK
+	i_locks = optional_name(trf_root, "locks", 0, NULL, reply, siz);
+	if (i_locks)
+		new_locks = check_locks = false;
+
+	i_deadlocks = optional_name(trf_root, "deadlocks", 0, NULL, reply, siz);
+	if (i_deadlocks) {
+		deadlocks = transfer_data(i_deadlocks);
+		if (toupper(*deadlocks) == TRUE_CHR)
+			check_deadlocks = true;
+		else
+			check_deadlocks = false;
+		new_deadlocks = check_deadlocks;
+	}
+#endif
+
+	snprintf(reply, siz,
+		 "code_locks=%s%cwas_locks=%s%cnew_locks=%s%c"
+		 "code_deadlocks=%s%cwas_deadlocks=%s%cnew_deadlocks=%s",
+		 TFSTR(code_locks), FLDSEP, TFSTR(was_locks), FLDSEP,
+		 TFSTR(new_locks), FLDSEP, TFSTR(code_deadlocks), FLDSEP,
+		 TFSTR(was_deadlocks), FLDSEP, TFSTR(new_deadlocks));
+	LOGWARNING("%s() %s.%s", __func__, id, reply);
+	return strdup(reply);
 }
 
 /* The socket command format is as follows:
@@ -7317,5 +7387,6 @@ struct CMDS ckdb_cmds[] = {
 	{ CMD_USERINFO,	"userinfo",	false,	false,	cmd_userinfo,	SEQ_NONE,	ACCESS_WEB },
 	{ CMD_BTCSET,	"btcset",	false,	false,	cmd_btcset,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_QUERY,	"query",	false,	false,	cmd_query,	SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_LOCKS,	"locks",	false,	false,	cmd_locks,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_END,	NULL,		false,	false,	NULL,		SEQ_NONE,	0 }
 };

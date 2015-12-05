@@ -18,7 +18,8 @@ function dopayments($data, $user)
  $pg .= " <a href='$btc$addr1' target=_blank>BTCa</a>,";
  $pg .= " <a href='$btc$addr2' target=_blank>BTCb</a> and";
  $pg .= " <a href='$btc$addr3' target=_blank>BTCc</a><br>";
- $pg .= "The payments below don't yet show when they have been sent.<br><br>";
+ $pg .= "The payments below don't yet show when they have been sent.<br>";
+ $pg .= "Dust payments below 0.00010000 BTC are not sent out yet.<br><br>";
 
  $ans = getPayments($user);
 

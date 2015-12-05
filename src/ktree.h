@@ -34,6 +34,9 @@
 #define CMP_BIGINT CMP_BIG
 #define CMP_DOUBLE CMP_BIG
 
+#define _TREE_WRITE(_t, _c, _fl, _f, _l)  _LIST_WRITE(_t, _c, _fl, _f, _l)
+#define _TREE_READ(_t, _c, _fl, _f, _l)  _LIST_READ(_t, _c, _fl, _f, _l)
+
 typedef struct knode
 {
 	bool	isNil;
@@ -49,30 +52,39 @@ typedef struct ktree
 {
 	K_NODE	*root;
 	cmp_t (*cmp_funct)(K_ITEM *, K_ITEM *);
+	K_LIST	*master;
 } K_TREE;
 
 typedef void *K_TREE_CTX;
 
-extern K_TREE *_new_ktree(cmp_t (*cmp_funct)(K_ITEM *, K_ITEM *), KTREE_FFL_ARGS);
-#define new_ktree(_cmp_funct) _new_ktree(_cmp_funct, KLIST_FFL_HERE)
+extern K_TREE *_new_ktree(cmp_t (*cmp_funct)(K_ITEM *, K_ITEM *), K_LIST *master, KTREE_FFL_ARGS);
+#define new_ktree(_cmp_funct, _master) _new_ktree(_cmp_funct, _master, KLIST_FFL_HERE)
 extern void _dump_ktree(K_TREE *tree, char *(*dsp_funct)(K_ITEM *), KTREE_FFL_ARGS);
 #define dump_ktree(_tree, _dsp_funct) _dump_ktree(_tree, _dsp_funct, KLIST_FFL_HERE)
-extern void _dsp_ktree(K_LIST *list, K_TREE *tree, char *filename, char *msg, KTREE_FFL_ARGS);
-#define dsp_ktree(_list, _tree, _filename, _msg) _dsp_ktree(_list, _tree, _filename, _msg, KLIST_FFL_HERE)
-extern K_ITEM *_first_in_ktree(K_TREE *tree, K_TREE_CTX *ctx, KTREE_FFL_ARGS);
-#define first_in_ktree(_tree, _ctx) _first_in_ktree(_tree, _ctx, KLIST_FFL_HERE)
+extern void _dsp_ktree(K_TREE *tree, char *filename, char *msg, KTREE_FFL_ARGS);
+#define dsp_ktree(_tree, _filename, _msg) _dsp_ktree(_tree, _filename, _msg, KLIST_FFL_HERE)
+extern K_ITEM *_first_in_ktree(K_TREE *tree, K_TREE_CTX *ctx, LOCK_MAYBE bool chklock, KTREE_FFL_ARGS);
+#define first_in_ktree(_tree, _ctx) _first_in_ktree(_tree, _ctx, true, KLIST_FFL_HERE)
+#define first_in_ktree_nolock(_ktree, _ctx) _first_in_ktree(_ktree, _ctx, false, KLIST_FFL_HERE)
 extern K_ITEM *_last_in_ktree(K_TREE *tree, K_TREE_CTX *ctx, KTREE_FFL_ARGS);
 #define last_in_ktree(_tree, _ctx) _last_in_ktree(_tree, _ctx, KLIST_FFL_HERE)
 extern K_ITEM *_next_in_ktree(K_TREE_CTX *ctx, KTREE_FFL_ARGS);
 #define next_in_ktree(_ctx) _next_in_ktree(_ctx, KLIST_FFL_HERE)
+// No difference for now
+#define next_in_ktree_nolock(_ctx) _next_in_ktree(_ctx, KLIST_FFL_HERE)
 extern K_ITEM *_prev_in_ktree(K_TREE_CTX *ctx, KTREE_FFL_ARGS);
 #define prev_in_ktree(_ctx) _prev_in_ktree(_ctx, KLIST_FFL_HERE)
-extern void _add_to_ktree(K_TREE *tree, K_ITEM *data, KTREE_FFL_ARGS);
-#define add_to_ktree(_tree, _data) _add_to_ktree(_tree, _data, KLIST_FFL_HERE)
-extern K_ITEM *_find_in_ktree(K_TREE *tree, K_ITEM *data, K_TREE_CTX *ctx, KTREE_FFL_ARGS);
-#define find_in_ktree(_tree, _data, _ctx) _find_in_ktree(_tree, _data, _ctx, KLIST_FFL_HERE)
-extern K_ITEM *_find_after_in_ktree(K_TREE *ktree, K_ITEM *data, K_TREE_CTX *ctx, KTREE_FFL_ARGS);
-#define find_after_in_ktree(_ktree, _data, _ctx) _find_after_in_ktree(_ktree, _data, _ctx, KLIST_FFL_HERE)
+// No difference for now
+#define prev_in_ktree_nolock(_ctx) _prev_in_ktree(_ctx, KLIST_FFL_HERE)
+extern void _add_to_ktree(K_TREE *tree, K_ITEM *data, LOCK_MAYBE bool chklock, KTREE_FFL_ARGS);
+#define add_to_ktree(_tree, _data) _add_to_ktree(_tree, _data, true, KLIST_FFL_HERE)
+#define add_to_ktree_nolock(_tree, _data) _add_to_ktree(_tree, _data, false, KLIST_FFL_HERE)
+extern K_ITEM *_find_in_ktree(K_TREE *tree, K_ITEM *data, K_TREE_CTX *ctx, bool chklock, KTREE_FFL_ARGS);
+#define find_in_ktree(_tree, _data, _ctx) _find_in_ktree(_tree, _data, _ctx, true, KLIST_FFL_HERE)
+#define find_in_ktree_nolock(_tree, _data, _ctx) _find_in_ktree(_tree, _data, _ctx, false, KLIST_FFL_HERE)
+extern K_ITEM *_find_after_in_ktree(K_TREE *ktree, K_ITEM *data, K_TREE_CTX *ctx, LOCK_MAYBE bool chklock, KTREE_FFL_ARGS);
+#define find_after_in_ktree(_ktree, _data, _ctx) _find_after_in_ktree(_ktree, _data, _ctx, true, KLIST_FFL_HERE)
+//#define find_after_in_ktree_nolock(_ktree, _data, _ctx) _find_after_in_ktree(_ktree, _data, _ctx, false, KLIST_FFL_HERE)
 extern K_ITEM *_find_before_in_ktree(K_TREE *ktree, K_ITEM *data, K_TREE_CTX *ctx, KTREE_FFL_ARGS);
 #define find_before_in_ktree(_ktree, _data, _ctx) _find_before_in_ktree(_ktree, _data, _ctx, KLIST_FFL_HERE)
 extern void _remove_from_ktree(K_TREE *tree, K_ITEM *data, K_TREE_CTX *ctx, KTREE_FFL_ARGS);

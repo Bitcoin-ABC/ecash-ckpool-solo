@@ -115,6 +115,10 @@ static bool logger_using_data;
 static bool listener_using_data;
 
 char *EMPTY = "";
+const char *nullstr = "(null)";
+
+const char *true_str = "true";
+const char *false_str = "false";
 
 static char *db_name;
 static char *db_user;
@@ -312,9 +316,14 @@ K_LIST *transfer_free;
 
 // SEQSET
 K_LIST *seqset_free;
-K_STORE *seqset_store;
-char *seqnam[SEQ_MAX];
-static cklock_t seq_lock;
+// each new seqset is added to the head, so head is the current one
+static K_STORE *seqset_store;
+// Initialised when seqset_free is allocated
+static char *seqnam[SEQ_MAX];
+
+// Full lock for access to sequence processing data
+#define SEQLOCK() K_WLOCK(seqset_free);
+#define SEQUNLOCK() K_WUNLOCK(seqset_free);
 
 // SEQTRANS
 K_LIST *seqtrans_free;
@@ -334,6 +343,8 @@ K_STORE *useratts_store;
 K_TREE *workers_root;
 K_LIST *workers_free;
 K_STORE *workers_store;
+// Emulate a list for lock checking
+K_LIST *workers_db_free;
 
 // PAYMENTADDRESSES
 K_TREE *paymentaddresses_root;
@@ -416,6 +427,7 @@ const char *blocks_unknown = "?Unknown?";
 K_TREE *blocks_root;
 K_LIST *blocks_free;
 K_STORE *blocks_store;
+// Access both under blocks_free lock
 tv_t blocks_stats_time;
 bool blocks_stats_rebuild = true;
 
@@ -430,7 +442,8 @@ K_TREE *payouts_id_root;
 K_TREE *payouts_wid_root;
 K_LIST *payouts_free;
 K_STORE *payouts_store;
-cklock_t process_pplns_lock;
+// Emulate a list for lock checking
+K_LIST *process_pplns_free;
 
 /*
 // EVENTLOG
@@ -997,7 +1010,8 @@ static void alloc_storage()
 					ALLOC_WORKQUEUE, LIMIT_WORKQUEUE, true);
 	workqueue_store = k_new_store(workqueue_free);
 
-	heartbeatqueue_free = k_new_list("HeartBeatQueue", sizeof(HEARTBEATQUEUE),
+	heartbeatqueue_free = k_new_list("HeartBeatQueue",
+					 sizeof(HEARTBEATQUEUE),
 					 ALLOC_HEARTBEATQUEUE,
 					 LIMIT_HEARTBEATQUEUE, true);
 	heartbeatqueue_store = k_new_store(heartbeatqueue_free);
@@ -1009,43 +1023,48 @@ static void alloc_storage()
 	users_free = k_new_list("Users", sizeof(USERS),
 					ALLOC_USERS, LIMIT_USERS, true);
 	users_store = k_new_store(users_free);
-	users_root = new_ktree(cmp_users);
-	userid_root = new_ktree(cmp_userid);
+	users_root = new_ktree(cmp_users, users_free);
+	userid_root = new_ktree(cmp_userid, users_free);
 
 	useratts_free = k_new_list("Useratts", sizeof(USERATTS),
 					ALLOC_USERATTS, LIMIT_USERATTS, true);
 	useratts_store = k_new_store(useratts_free);
-	useratts_root = new_ktree(cmp_useratts);
+	useratts_root = new_ktree(cmp_useratts, useratts_free);
 
 	optioncontrol_free = k_new_list("OptionControl", sizeof(OPTIONCONTROL),
 					ALLOC_OPTIONCONTROL,
 					LIMIT_OPTIONCONTROL, true);
 	optioncontrol_store = k_new_store(optioncontrol_free);
-	optioncontrol_root = new_ktree(cmp_optioncontrol);
+	optioncontrol_root = new_ktree(cmp_optioncontrol, optioncontrol_free);
 
 	workers_free = k_new_list("Workers", sizeof(WORKERS),
 					ALLOC_WORKERS, LIMIT_WORKERS, true);
 	workers_store = k_new_store(workers_free);
-	workers_root = new_ktree(cmp_workers);
+	workers_root = new_ktree(cmp_workers, workers_free);
 
 	paymentaddresses_free = k_new_list("PaymentAddresses",
 					   sizeof(PAYMENTADDRESSES),
 					   ALLOC_PAYMENTADDRESSES,
 					   LIMIT_PAYMENTADDRESSES, true);
 	paymentaddresses_store = k_new_store(paymentaddresses_free);
-	paymentaddresses_root = new_ktree(cmp_paymentaddresses);
-	paymentaddresses_create_root = new_ktree(cmp_payaddr_create);
+	paymentaddresses_root = new_ktree(cmp_paymentaddresses,
+					  paymentaddresses_free);
+	paymentaddresses_create_root = new_ktree(cmp_payaddr_create,
+						 paymentaddresses_free);
 	paymentaddresses_free->dsp_func = dsp_paymentaddresses;
 
 	payments_free = k_new_list("Payments", sizeof(PAYMENTS),
 					ALLOC_PAYMENTS, LIMIT_PAYMENTS, true);
 	payments_store = k_new_store(payments_free);
-	payments_root = new_ktree(cmp_payments);
+	payments_root = new_ktree(cmp_payments, payments_free);
 
-	accountbalance_free = k_new_list("AccountBalance", sizeof(ACCOUNTBALANCE),
-					ALLOC_ACCOUNTBALANCE, LIMIT_ACCOUNTBALANCE, true);
+	accountbalance_free = k_new_list("AccountBalance",
+					 sizeof(ACCOUNTBALANCE),
+					 ALLOC_ACCOUNTBALANCE,
+					 LIMIT_ACCOUNTBALANCE, true);
 	accountbalance_store = k_new_store(accountbalance_free);
-	accountbalance_root = new_ktree(cmp_accountbalance);
+	accountbalance_root = new_ktree(cmp_accountbalance,
+					accountbalance_free);
 
 	idcontrol_free = k_new_list("IDControl", sizeof(IDCONTROL),
 					ALLOC_IDCONTROL, LIMIT_IDCONTROL, true);
@@ -1054,98 +1073,157 @@ static void alloc_storage()
 	workinfo_free = k_new_list("WorkInfo", sizeof(WORKINFO),
 					ALLOC_WORKINFO, LIMIT_WORKINFO, true);
 	workinfo_store = k_new_store(workinfo_free);
-	workinfo_root = new_ktree(cmp_workinfo);
-	if (!confirm_sharesummary)
-		workinfo_height_root = new_ktree(cmp_workinfo_height);
+	workinfo_root = new_ktree(cmp_workinfo, workinfo_free);
+	if (!confirm_sharesummary) {
+		workinfo_height_root = new_ktree(cmp_workinfo_height,
+						 workinfo_free);
+	}
 
 	shares_free = k_new_list("Shares", sizeof(SHARES),
 					ALLOC_SHARES, LIMIT_SHARES, true);
 	shares_store = k_new_store(shares_free);
 	shares_early_store = k_new_store(shares_free);
-	shares_root = new_ktree(cmp_shares);
-	shares_early_root = new_ktree(cmp_shares);
+	shares_root = new_ktree(cmp_shares, shares_free);
+	shares_early_root = new_ktree(cmp_shares, shares_free);
 
 	shareerrors_free = k_new_list("ShareErrors", sizeof(SHAREERRORS),
 					ALLOC_SHAREERRORS, LIMIT_SHAREERRORS, true);
 	shareerrors_store = k_new_store(shareerrors_free);
 	shareerrors_early_store = k_new_store(shareerrors_free);
-	shareerrors_root = new_ktree(cmp_shareerrors);
-	shareerrors_early_root = new_ktree(cmp_shareerrors);
+	shareerrors_root = new_ktree(cmp_shareerrors, shareerrors_free);
+	shareerrors_early_root = new_ktree(cmp_shareerrors, shareerrors_free);
 
 	sharesummary_free = k_new_list("ShareSummary", sizeof(SHARESUMMARY),
 					ALLOC_SHARESUMMARY, LIMIT_SHARESUMMARY, true);
 	sharesummary_store = k_new_store(sharesummary_free);
-	sharesummary_root = new_ktree(cmp_sharesummary);
-	sharesummary_workinfoid_root = new_ktree(cmp_sharesummary_workinfoid);
+	sharesummary_root = new_ktree(cmp_sharesummary, sharesummary_free);
+	sharesummary_workinfoid_root = new_ktree(cmp_sharesummary_workinfoid,
+						 sharesummary_free);
 	sharesummary_free->dsp_func = dsp_sharesummary;
 	sharesummary_pool_store = k_new_store(sharesummary_free);
-	sharesummary_pool_root = new_ktree(cmp_sharesummary);
+	sharesummary_pool_root = new_ktree(cmp_sharesummary, sharesummary_free);
 
 	blocks_free = k_new_list("Blocks", sizeof(BLOCKS),
 					ALLOC_BLOCKS, LIMIT_BLOCKS, true);
 	blocks_store = k_new_store(blocks_free);
-	blocks_root = new_ktree(cmp_blocks);
+	blocks_root = new_ktree(cmp_blocks, blocks_free);
 	blocks_free->dsp_func = dsp_blocks;
 
 	miningpayouts_free = k_new_list("MiningPayouts", sizeof(MININGPAYOUTS),
 					ALLOC_MININGPAYOUTS, LIMIT_MININGPAYOUTS, true);
 	miningpayouts_store = k_new_store(miningpayouts_free);
-	miningpayouts_root = new_ktree(cmp_miningpayouts);
+	miningpayouts_root = new_ktree(cmp_miningpayouts, miningpayouts_free);
 
 	payouts_free = k_new_list("Payouts", sizeof(PAYOUTS),
 					ALLOC_PAYOUTS, LIMIT_PAYOUTS, true);
 	payouts_store = k_new_store(payouts_free);
-	payouts_root = new_ktree(cmp_payouts);
-	payouts_id_root = new_ktree(cmp_payouts_id);
-	payouts_wid_root = new_ktree(cmp_payouts_wid);
+	payouts_root = new_ktree(cmp_payouts, payouts_free);
+	payouts_id_root = new_ktree(cmp_payouts_id, payouts_free);
+	payouts_wid_root = new_ktree(cmp_payouts_wid, payouts_free);
 
 	auths_free = k_new_list("Auths", sizeof(AUTHS),
 					ALLOC_AUTHS, LIMIT_AUTHS, true);
 	auths_store = k_new_store(auths_free);
-	auths_root = new_ktree(cmp_auths);
+	auths_root = new_ktree(cmp_auths, auths_free);
 
 	poolstats_free = k_new_list("PoolStats", sizeof(POOLSTATS),
 					ALLOC_POOLSTATS, LIMIT_POOLSTATS, true);
 	poolstats_store = k_new_store(poolstats_free);
-	poolstats_root = new_ktree(cmp_poolstats);
+	poolstats_root = new_ktree(cmp_poolstats, poolstats_free);
 
 	userstats_free = k_new_list("UserStats", sizeof(USERSTATS),
 					ALLOC_USERSTATS, LIMIT_USERSTATS, true);
 	userstats_store = k_new_store(userstats_free);
 	userstats_eos_store = k_new_store(userstats_free);
-	userstats_root = new_ktree(cmp_userstats);
+	userstats_root = new_ktree(cmp_userstats, userstats_free);
 	userstats_free->dsp_func = dsp_userstats;
 
 	workerstatus_free = k_new_list("WorkerStatus", sizeof(WORKERSTATUS),
 					ALLOC_WORKERSTATUS, LIMIT_WORKERSTATUS, true);
 	workerstatus_store = k_new_store(workerstatus_free);
-	workerstatus_root = new_ktree(cmp_workerstatus);
+	workerstatus_root = new_ktree(cmp_workerstatus, workerstatus_free);
 
 	markersummary_free = k_new_list("MarkerSummary", sizeof(MARKERSUMMARY),
 					ALLOC_MARKERSUMMARY, LIMIT_MARKERSUMMARY, true);
 	markersummary_store = k_new_store(markersummary_free);
-	markersummary_root = new_ktree(cmp_markersummary);
-	markersummary_userid_root = new_ktree(cmp_markersummary_userid);
+	markersummary_root = new_ktree(cmp_markersummary, markersummary_free);
+	markersummary_userid_root = new_ktree(cmp_markersummary_userid,
+					      markersummary_free);
 	markersummary_free->dsp_func = dsp_markersummary;
 	markersummary_pool_store = k_new_store(markersummary_free);
-	markersummary_pool_root = new_ktree(cmp_markersummary);
+	markersummary_pool_root = new_ktree(cmp_markersummary,
+					    markersummary_free);
 
 	workmarkers_free = k_new_list("WorkMarkers", sizeof(WORKMARKERS),
 					ALLOC_WORKMARKERS, LIMIT_WORKMARKERS, true);
 	workmarkers_store = k_new_store(workmarkers_free);
-	workmarkers_root = new_ktree(cmp_workmarkers);
-	workmarkers_workinfoid_root = new_ktree(cmp_workmarkers_workinfoid);
+	workmarkers_root = new_ktree(cmp_workmarkers, workmarkers_free);
+	workmarkers_workinfoid_root = new_ktree(cmp_workmarkers_workinfoid,
+						workmarkers_free);
 	workmarkers_free->dsp_func = dsp_workmarkers;
 
 	marks_free = k_new_list("Marks", sizeof(MARKS),
 				ALLOC_MARKS, LIMIT_MARKS, true);
 	marks_store = k_new_store(marks_free);
-	marks_root = new_ktree(cmp_marks);
+	marks_root = new_ktree(cmp_marks, marks_free);
 
 	userinfo_free = k_new_list("UserInfo", sizeof(USERINFO),
 					ALLOC_USERINFO, LIMIT_USERINFO, true);
 	userinfo_store = k_new_store(userinfo_free);
-	userinfo_root = new_ktree(cmp_userinfo);
+	userinfo_root = new_ktree(cmp_userinfo, userinfo_free);
+
+#if LOCK_CHECK
+	DLPRIO(seqset, 91);
+
+	DLPRIO(transfer, 90);
+
+	DLPRIO(payouts, 87);
+	DLPRIO(miningpayouts, 86);
+	DLPRIO(payments, 85);
+
+	DLPRIO(accountbalance, 80);
+
+	DLPRIO(workerstatus, 69);
+	DLPRIO(sharesummary, 68);
+	DLPRIO(markersummary, 67);
+	DLPRIO(workmarkers, 66);
+
+	DLPRIO(marks, 60);
+
+	DLPRIO(workinfo, 56);
+
+	DLPRIO(blocks, 53);
+
+	DLPRIO(userinfo, 50);
+
+	DLPRIO(auths, 44);
+	DLPRIO(users, 43);
+	DLPRIO(useratts, 42);
+
+	DLPRIO(shares, 31);
+	DLPRIO(shareerrors, 30);
+
+	DLPRIO(seqset, 21);
+	DLPRIO(seqtrans, 20);
+
+	DLPRIO(msgline, 17);
+	DLPRIO(workqueue, 16);
+	DLPRIO(heartbeatqueue, 15);
+
+	DLPRIO(poolstats, 11);
+	DLPRIO(userstats, 10);
+
+	// Don't currently nest any locks in these:
+	DLPRIO(workers, PRIO_TERMINAL);
+	DLPRIO(idcontrol, PRIO_TERMINAL);
+	DLPRIO(optioncontrol, PRIO_TERMINAL);
+	DLPRIO(paymentaddresses, PRIO_TERMINAL);
+
+	DLPCHECK();
+
+	if (auto_check_deadlocks)
+		check_deadlocks = true;
+#endif
 }
 
 #define SEQSETMSG(_set, _seqset, _msgtxt, _endtxt) do { \
@@ -1201,7 +1279,7 @@ static void alloc_storage()
 
 #define FREE_STORE_DATA(_list) \
 	if (_list ## _store) { \
-		K_ITEM *_item = _list ## _store->head; \
+		K_ITEM *_item = STORE_HEAD_NOLOCK(_list ## _store); \
 		while (_item) { \
 			free_ ## _list ## _data(_item); \
 			_item = _item->next; \
@@ -1211,7 +1289,7 @@ static void alloc_storage()
 
 #define FREE_LIST_DATA(_list) \
 	if (_list ## _free) { \
-		K_ITEM *_item = _list ## _free->head; \
+		K_ITEM *_item = LIST_HEAD_NOLOCK(_list ## _free); \
 		while (_item) { \
 			free_ ## _list ## _data(_item); \
 			_item = _item->next; \
@@ -1240,9 +1318,12 @@ void sequence_report(bool lock)
 
 	last = false;
 	set = 0;
-	if (lock)
-		ck_wlock(&seq_lock);
-	ss_item = seqset_store->head;
+	if (lock) {
+		SEQLOCK();
+		ss_item = STORE_RHEAD(seqset_store);
+	} else {
+		ss_item = STORE_HEAD_NOLOCK(seqset_store);
+	}
 	while (!last && ss_item) {
 		if (!ss_item->next)
 			last = true;
@@ -1256,19 +1337,19 @@ void sequence_report(bool lock)
 				(seqset->seqdata[SEQ_SHARES].lost > 0);
 			if (lock) {
 				memcpy(&seqset_copy, seqset, sizeof(seqset_copy));
-				ck_wunlock(&seq_lock);
+				SEQUNLOCK();
 				seqset = &seqset_copy;
 			}
 			SEQSETMSG(set, seqset,
 				  miss ? "SHARES MISSING" : "status" , EMPTY);
 			if (lock)
-				ck_wlock(&seq_lock);
+				SEQLOCK();
 		}
 		ss_item = ss_item->next;
 		set++;
 	}
 	if (lock)
-		ck_wunlock(&seq_lock);
+		SEQUNLOCK();
 }
 
 static void dealloc_storage()
@@ -1305,7 +1386,8 @@ static void dealloc_storage()
 		LOGWARNING("%s() markersummary ...", __func__);
 
 		FREE_TREE(markersummary_pool);
-		k_list_transfer_to_tail(markersummary_pool_store, markersummary_store);
+		k_list_transfer_to_tail_nolock(markersummary_pool_store,
+					       markersummary_store);
 		FREE_STORE(markersummary_pool);
 		FREE_TREE(markersummary_userid);
 		FREE_TREE(markersummary);
@@ -1337,7 +1419,8 @@ static void dealloc_storage()
 	LOGWARNING("%s() sharesummary ...", __func__);
 
 	FREE_TREE(sharesummary_pool);
-	k_list_transfer_to_tail(sharesummary_pool_store, sharesummary_store);
+	k_list_transfer_to_tail_nolock(sharesummary_pool_store,
+				       sharesummary_store);
 	FREE_STORE(sharesummary_pool);
 	FREE_TREE(sharesummary_workinfoid);
 	FREE_TREE(sharesummary);
@@ -1347,7 +1430,7 @@ static void dealloc_storage()
 	if (shareerrors_early_store->count > 0) {
 		LOGERR("%s() *** shareerrors_early count %d ***",
 			__func__, shareerrors_early_store->count);
-		s_item = shareerrors_early_store->head;
+		s_item = STORE_HEAD_NOLOCK(shareerrors_early_store);
 		while (s_item) {
 			DATA_SHAREERRORS(shareerrors, s_item);
 			LOGERR("%s(): %"PRId64"/%s/%"PRId32"/%s/%ld,%ld",
@@ -1368,7 +1451,7 @@ static void dealloc_storage()
 	if (shares_early_store->count > 0) {
 		LOGERR("%s() *** shares_early count %d ***",
 			__func__, shares_early_store->count);
-		s_item = shares_early_store->head;
+		s_item = STORE_HEAD_NOLOCK(shares_early_store);
 		while (s_item) {
 			DATA_SHARES(shares, s_item);
 			LOGERR("%s(): %"PRId64"/%s/%s/%"PRId32"/%ld,%ld",
@@ -1507,26 +1590,29 @@ static bool setup_data()
 	LOGWARNING("reload complete %.0fm %.3fs", min, sec);
 
 	// full lock access since mark processing can occur
-	ck_wlock(&process_pplns_lock);
+	K_WLOCK(process_pplns_free);
+
 	K_WLOCK(workerstatus_free);
 	K_RLOCK(sharesummary_free);
-	K_RLOCK(workmarkers_free);
 	K_RLOCK(markersummary_free);
+	K_RLOCK(workmarkers_free);
 
 	set_block_share_counters();
 
 	if (!everyone_die)
 		workerstatus_ready();
 
-	K_RUNLOCK(markersummary_free);
 	K_RUNLOCK(workmarkers_free);
+	K_RUNLOCK(markersummary_free);
 	K_RUNLOCK(sharesummary_free);
 	K_WUNLOCK(workerstatus_free);
-	ck_wunlock(&process_pplns_lock);
+
+	K_WUNLOCK(process_pplns_free);
 
 	if (everyone_die)
 		return false;
 
+	K_WLOCK(workinfo_free);
 	workinfo_current = last_in_ktree(workinfo_height_root, ctx);
 	if (workinfo_current) {
 		DATA_WORKINFO(wic, workinfo_current);
@@ -1543,6 +1629,7 @@ static bool setup_data()
 		// No longer needed
 		free_ktree(workinfo_height_root, NULL);
 	}
+	K_WUNLOCK(workinfo_free);
 
 	return true;
 }
@@ -1621,7 +1708,7 @@ static tv_t last_trancheck;
  *  and we don't run trans_process() during reloading
  * We also only know now, not cd, for a missing item
  * This fills in store with a copy of the details of all the new transients
- * N.B. this is called under seq_lock */
+ * N.B. this is called under SEQLOCK() */
 static void trans_process(SEQSET *seqset, tv_t *now, K_STORE *store)
 {
 	SEQDATA *seqdata = NULL;
@@ -1707,11 +1794,11 @@ static void trans_seq(tv_t *now)
 
 	store = k_new_store(seqtrans_free);
 	for (i = 0; more; i++) {
-		ck_wlock(&seq_lock);
+		SEQLOCK();
 		if (seqset_store->count <= i)
 			more = false;
 		else {
-			item = seqset_store->head;
+			item = STORE_RHEAD(seqset_store);
 			for (j = 0; item && j < 0; j++)
 				item = item->next;
 			if (!item)
@@ -1734,9 +1821,9 @@ static void trans_seq(tv_t *now)
 		}
 		if (seqset_store->count <= (i + 1))
 			more = false;
-		ck_wunlock(&seq_lock);
+		SEQUNLOCK();
 
-		st_item = store->tail;
+		st_item = STORE_TAIL_NOLOCK(store);
 		while (st_item) {
 			DATA_SEQTRANS(seqtrans, st_item);
 			btu64_to_buf(&seqstt, t_buf, sizeof(t_buf));
@@ -1749,7 +1836,7 @@ static void trans_seq(tv_t *now)
 				   t_buf2, seqtrans->entry.code);
 			st_item = st_item->prev;
 		}
-		if (store->head) {
+		if (store->count) {
 			K_WLOCK(seqtrans_free);
 			k_list_transfer_to_head(store, seqtrans_free);
 			if (seqtrans_free->count == seqtrans_free->total &&
@@ -1770,9 +1857,9 @@ static void seq_reloadmax()
 	SEQDATA *seqdata;
 	int i;
 
-	ck_wlock(&seq_lock);
+	SEQLOCK();
 	if (seqset_store->count > 0) {
-		seqset_item = seqset_store->head;
+		seqset_item = STORE_WHEAD(seqset_store);
 		while (seqset_item) {
 			DATA_SEQSET(seqset, seqset_item);
 			if (seqset->seqstt) {
@@ -1786,7 +1873,7 @@ static void seq_reloadmax()
 			seqset_item = seqset_item->next;
 		}
 	}
-	ck_wunlock(&seq_lock);
+	SEQUNLOCK();
 }
 
 /* Most of the extra message logic in here is to avoid putting too many
@@ -1823,13 +1910,13 @@ static bool update_seq(enum seq_num seq, uint64_t n_seqcmd,
 
 	firstseq = newseq = expseq = gothigh = okhi = gotstale =
 	gotstalestart = dup = wastrans = gotrecover = false;
-	ck_wlock(&seq_lock);
+	SEQLOCK();
 	// Get the seqset
 	if (seqset_store->count == 0)
 		firstseq = true;
 	else {
 		// Normal processing is: count=1 and head is current
-		seqset_item = seqset_store->head;
+		seqset_item = STORE_WHEAD(seqset_store);
 		DATA_SEQSET(seqset, seqset_item);
 		set = 0;
 		if (n_seqstt == seqset->seqstt && n_seqpid == seqset->seqpid)
@@ -1848,8 +1935,8 @@ static bool update_seq(enum seq_num seq, uint64_t n_seqcmd,
 	// Need to setup a new seqset
 	newseq = true;
 	if (!firstseq) {
-		// If !seqset_store->head (i.e. a bug) this will quit()
-		DATA_SEQSET(seqset0, seqset_store->head);
+		// If !STORE_WHEAD(seqset_store) (i.e. a bug) this will quit()
+		DATA_SEQSET(seqset0, STORE_WHEAD(seqset_store));
 		// The current seqset (may become the previous)
 		memcpy(&seqset_pre, seqset0, sizeof(seqset_pre));
 	}
@@ -1934,7 +2021,7 @@ static bool update_seq(enum seq_num seq, uint64_t n_seqcmd,
 		int s = 0;
 		seqset = NULL;
 		seqset_item = NULL;
-		ss_item = seqset_store->head;
+		ss_item = STORE_WHEAD(seqset_store);
 		while (ss_item) {
 			DATA_SEQSET(ss, ss_item);
 			if (!seqset) {
@@ -1976,7 +2063,7 @@ static bool update_seq(enum seq_num seq, uint64_t n_seqcmd,
 		} else {
 			// put it next after the head
 			k_insert_after(seqset_store, seqset_item,
-					seqset_store->head);
+					STORE_WHEAD(seqset_store));
 			set = 1;
 		}
 	}
@@ -2156,7 +2243,7 @@ gotseqset:
 		 *	  to cause this */
 		st_item = NULL;
 		if (seqdata->reload_lost) {
-			st_item = seqdata->reload_lost->head;
+			st_item = STORE_WHEAD(seqdata->reload_lost);
 			// seqnum order is not guaranteed
 			while (st_item) {
 				DATA_SEQTRANS(seqtrans, st_item);
@@ -2228,7 +2315,7 @@ setitemdata:
 			copy_tv(&(seqdata->lastcd), cd);
 	}
 
-	ck_wunlock(&seq_lock);
+	SEQUNLOCK();
 
 	if (firstseq) {
 		// The first ever SEQ_ALL
@@ -2333,12 +2420,12 @@ setitemdata:
 		}
 	}
 
-	if (lost && lost->head) {
+	if (lost && lost->count) {
 		int tran = 0, miss = 0;
 		uint64_t prev = 0;
 		char range_buf[256];
 		bool isrange = false;
-		st_item = lost->head;
+		st_item = STORE_HEAD_NOLOCK(lost);
 		while (st_item) {
 			DATA_SEQTRANS(seqtrans, st_item);
 			st_item = st_item->next;
@@ -2590,7 +2677,8 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 		goto nogood;
 	}
 
-	msgline->trf_root = new_ktree(cmp_transfer);
+	// N.B. these aren't shared so they use _nolock, below
+	msgline->trf_root = new_ktree(cmp_transfer, transfer_free);
 	msgline->trf_store = k_new_store(transfer_free);
 	next = data;
 	if (next && strncmp(next, JSON_TRANSFER, JSON_TRANSFER_LEN) == 0) {
@@ -2742,8 +2830,8 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 				STRNCPYSIZ(transfer->svalue, next, siz+1);
 				transfer->mvalue = transfer->svalue;
 			}
-			add_to_ktree(msgline->trf_root, t_item);
-			k_add_head(msgline->trf_store, t_item);
+			add_to_ktree_nolock(msgline->trf_root, t_item);
+			k_add_head_nolock(msgline->trf_store, t_item);
 			t_item = NULL;
 
 			// find the separator then move to the next name
@@ -2765,7 +2853,6 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 			goto nogood;
 		}
 	} else {
-		K_WLOCK(transfer_free);
 		while (next && *next) {
 			data = next;
 			next = strchr(data, FLDSEP);
@@ -2778,23 +2865,24 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 			else
 				*(eq++) = '\0';
 
+			K_WLOCK(transfer_free);
 			t_item = k_unlink_head(transfer_free);
+			K_WUNLOCK(transfer_free);
 			DATA_TRANSFER(transfer, t_item);
 			STRNCPY(transfer->name, data);
 			STRNCPY(transfer->svalue, eq);
 			transfer->mvalue = transfer->svalue;
 
 			// Discard duplicates
-			if (find_in_ktree(msgline->trf_root, t_item, ctx)) {
+			if (find_in_ktree_nolock(msgline->trf_root, t_item, ctx)) {
 				if (transfer->mvalue != transfer->svalue)
 					FREENULL(transfer->mvalue);
 				k_add_head(transfer_free, t_item);
 			} else {
-				add_to_ktree(msgline->trf_root, t_item);
-				k_add_head(msgline->trf_store, t_item);
+				add_to_ktree_nolock(msgline->trf_root, t_item);
+				k_add_head_nolock(msgline->trf_store, t_item);
 			}
 		}
-		K_WUNLOCK(transfer_free);
 	}
 
 	seqall = find_transfer(msgline->trf_root, SEQALL);
@@ -2861,12 +2949,14 @@ static void check_blocks()
 	BLOCKS *blocks;
 
 	K_RLOCK(blocks_free);
-	// Find the oldest block BLOCKS_NEW or BLOCKS_CONFIRM
+	/* Find the oldest block BLOCKS_NEW or BLOCKS_CONFIRM
+	 * ... that's summarised, so processing order is correct */
 	b_item = first_in_ktree(blocks_root, ctx);
 	while (b_item) {
 		DATA_BLOCKS(blocks, b_item);
 		if (!blocks->ignore &&
 		    CURRENT(&(blocks->expirydate)) &&
+		    blocks->statsconfirmed[0] != BLOCKS_STATSPENDING &&
 		    (blocks->confirmed[0] == BLOCKS_NEW ||
 		     blocks->confirmed[0] == BLOCKS_CONFIRM))
 			break;
@@ -2979,10 +3069,13 @@ static void summarise_blocks()
 	INIT_SHARESUMMARY(&ss_look);
 	ss_look.data = (void *)(&looksharesummary);
 
+	// We don't want them in an indeterminate state due to pplns
+	K_WLOCK(process_pplns_free);
+
 	// For now, just lock all 3
 	K_RLOCK(sharesummary_free);
-	K_RLOCK(workmarkers_free);
 	K_RLOCK(markersummary_free);
+	K_RLOCK(workmarkers_free);
 
 	ss_item = find_before_in_ktree(sharesummary_workinfoid_root, &ss_look,
 					ss_ctx);
@@ -2990,9 +3083,11 @@ static void summarise_blocks()
 	while (ss_item && sharesummary->workinfoid > wi_start) {
 		if (sharesummary->complete[0] == SUMMARY_NEW) {
 			// Not aged yet
-			K_RUNLOCK(markersummary_free);
 			K_RUNLOCK(workmarkers_free);
+			K_RUNLOCK(markersummary_free);
 			K_RUNLOCK(sharesummary_free);
+
+			K_WUNLOCK(process_pplns_free);
 			return;
 		}
 		has_ss = true;
@@ -3075,9 +3170,11 @@ static void summarise_blocks()
 		DATA_WORKMARKERS_NULL(workmarkers, wm_item);
 	}
 
-	K_RUNLOCK(markersummary_free);
 	K_RUNLOCK(workmarkers_free);
+	K_RUNLOCK(markersummary_free);
 	K_RUNLOCK(sharesummary_free);
+
+	K_WUNLOCK(process_pplns_free);
 
 	if (!has_ss && !has_ms) {
 		// This will repeat each call here until fixed ...
@@ -3118,6 +3215,7 @@ static void *summariser(__maybe_unused void *arg)
 
 	pthread_detach(pthread_self());
 
+	LOCK_INIT("db_summariser");
 	rename_proc("db_summariser");
 
 	/* Don't do any summarisation until the reload queue completes coz:
@@ -3674,6 +3772,7 @@ static void *marker(__maybe_unused void *arg)
 
 	pthread_detach(pthread_self());
 
+	LOCK_INIT("db_marker");
 	rename_proc("db_marker");
 
 	/* We want this to start during the CCL reload so that if we run a
@@ -3747,6 +3846,7 @@ static void *logger(__maybe_unused void *arg)
 	pthread_detach(pthread_self());
 
 	snprintf(buf, sizeof(buf), "db%s_logger", dbcode);
+	LOCK_INIT(buf);
 	rename_proc(buf);
 
 	LOGWARNING("%s() Start processing...", __func__);
@@ -3790,7 +3890,7 @@ static void *logger(__maybe_unused void *arg)
 	LOGFILE(buf, logname_io);
 	if (count)
 		LOGERR("%s", buf);
-	lq_item = logqueue_store->head;
+	lq_item = STORE_WHEAD(logqueue_store);
 	copy_tv(&then, &now);
 	while (lq_item) {
 		DATA_LOGQUEUE(lq, lq_item);
@@ -3862,6 +3962,7 @@ static void *socketer(__maybe_unused void *arg)
 
 	pthread_detach(pthread_self());
 
+	LOCK_INIT("db_socketer");
 	rename_proc("db_socketer");
 
 	while (!everyone_die && !db_users_complete)
@@ -4085,6 +4186,7 @@ static void *socketer(__maybe_unused void *arg)
 					case CMD_SHSTA:
 					case CMD_USERINFO:
 					case CMD_BTCSET:
+					case CMD_LOCKS:
 						ans = ckdb_cmds[msgline->which_cmds].func(NULL,
 								msgline->cmd,
 								msgline->id,
@@ -4420,6 +4522,7 @@ static void reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_USERINFO:
 			case CMD_BTCSET:
 			case CMD_QUERY:
+			case CMD_LOCKS:
 				LOGERR("%s() INVALID message line %"PRIu64
 					" ignored '%.42s...",
 					__func__, count,
@@ -4807,9 +4910,15 @@ static void *listener(void *arg)
 	K_ITEM *ss_item;
 	int i;
 
+	LOCK_INIT("db_listener");
+
 	logqueue_free = k_new_list("LogQueue", sizeof(LOGQUEUE),
 					ALLOC_LOGQUEUE, LIMIT_LOGQUEUE, true);
 	logqueue_store = k_new_store(logqueue_free);
+
+#if LOCK_CHECK
+	DLPRIO(logqueue, 94);
+#endif
 
 	create_pthread(&log_pt, logger, NULL);
 
@@ -4832,9 +4941,9 @@ static void *listener(void *arg)
 	}
 
 	if (!everyone_die) {
-		K_RLOCK(workqueue_store);
+		K_RLOCK(workqueue_free);
 		wqcount = workqueue_store->count;
-		K_RUNLOCK(workqueue_store);
+		K_RUNLOCK(workqueue_free);
 
 		LOGWARNING("reload shares OoO %s", ooo_status(ooo_buf, sizeof(ooo_buf)));
 		sequence_report(true);
@@ -4863,10 +4972,10 @@ static void *listener(void *arg)
 
 	// Process queued work
 	while (!everyone_die) {
-		K_WLOCK(workqueue_store);
+		K_WLOCK(workqueue_free);
 		wq_item = k_unlink_head(workqueue_store);
 		left = workqueue_store->count;
-		K_WUNLOCK(workqueue_store);
+		K_WUNLOCK(workqueue_free);
 
 		if (left == 0 && wq_stt.tv_sec != 0L)
 			setnow(&wq_fin);
@@ -4904,9 +5013,9 @@ static void *listener(void *arg)
 			/* Cleanup all the reload_lost stores since
 			 *  they should no longer be needed and the ram
 			 *  they use should be freed by the next cull */
-			ck_wlock(&seq_lock);
+			SEQLOCK();
 			if (seqset_store->count > 0) {
-				ss_item = seqset_store->head;
+				ss_item = STORE_WHEAD(seqset_store);
 				while (ss_item) {
 					DATA_SEQSET(seqset, ss_item);
 					if (seqset->seqstt) {
@@ -4920,7 +5029,7 @@ static void *listener(void *arg)
 				}
 			}
 			seqdata_reload_lost = false;
-			ck_wunlock(&seq_lock);
+			SEQUNLOCK();
 		}
 
 		if (!wq_item) {
@@ -5468,8 +5577,13 @@ static void confirm_summaries()
 					ALLOC_LOGQUEUE, LIMIT_LOGQUEUE, true);
 	logqueue_store = k_new_store(logqueue_free);
 
+#if LOCK_CHECK
+	DLPRIO(logqueue, 94);
+#endif
+
 	create_pthread(&log_pt, logger, NULL);
 
+	LOCK_INIT("dby_confirmer");
 	rename_proc("dby_confirmer");
 
 	alloc_storage();
@@ -5726,7 +5840,9 @@ int main(int argc, char **argv)
 	if (!ckp.name)
 		ckp.name = "ckdb";
 	snprintf(buf, 15, "%s%s", ckp.name, dbcode);
+	FIRST_LOCK_INIT(buf);
 	prctl(PR_SET_NAME, buf, 0, 0, 0);
+
 	memset(buf, 0, 15);
 
 	check_restore_dir(ckp.name);
@@ -5782,8 +5898,15 @@ int main(int argc, char **argv)
 
 	cklock_init(&last_lock);
 	cklock_init(&btc_lock);
-	cklock_init(&seq_lock);
-	cklock_init(&process_pplns_lock);
+
+	// Emulate a list for lock checking
+	process_pplns_free = k_lock_only_list("ProcessPPLNS");
+	workers_db_free = k_lock_only_list("WorkersDB");
+
+#if LOCK_CHECK
+	DLPRIO(process_pplns, 99);
+	DLPRIO(workers_db, 98);
+#endif
 
 	if (confirm_sharesummary) {
 		// TODO: add a system lock to stop running 2 at once?

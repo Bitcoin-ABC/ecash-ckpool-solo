@@ -565,7 +565,7 @@ K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 
 	dup = false;
 	K_RLOCK(users_free);
-	u_item = users_store->head;
+	u_item = STORE_RHEAD(users_store);
 	while (u_item) {
 		DATA_USERS(users, u_item);
 		if (strcmp(row->usertrim, users->usertrim) == 0) {
@@ -1292,10 +1292,10 @@ bool useratts_fill(PGconn *conn)
 	return ok;
 }
 
-K_ITEM *workers_add(PGconn *conn, bool lock, int64_t userid, char *workername,
+K_ITEM *workers_add(PGconn *conn, int64_t userid, char *workername, bool add_ws,
 			char *difficultydefault, char *idlenotificationenabled,
-			char *idlenotificationtime, char *by,
-			char *code, char *inet, tv_t *cd, K_TREE *trf_root)
+			char *idlenotificationtime, char *by, char *code,
+			char *inet, tv_t *cd, K_TREE *trf_root)
 {
 	ExecStatusType rescode;
 	bool conned = false;
@@ -1310,11 +1310,23 @@ K_ITEM *workers_add(PGconn *conn, bool lock, int64_t userid, char *workername,
 
 	LOGDEBUG("%s(): add", __func__);
 
-	if (lock)
-		K_WLOCK(workers_free);
+	/* Since shares can add workers and there's lotsa shares :) ...
+	 *  and workers_add() and workers_fill() are the only places where
+	 *  workers can be added, to ensure that the existence of the worker
+	 *  hasn't changed, we check it again under a lock here that's unique
+	 *  to workers_add() and workers_fill()
+	 *   i.e. multiple threads trying to add the same worker will only end
+	 *    up adding one and thus avoid wasted DB IO and avoid DB duplicate
+	 *    errors */
+	K_WLOCK(workers_db_free);
+
+	ret = find_workers(false, userid, workername);
+	if (ret)
+		goto hadit;
+
+	K_WLOCK(workers_free);
 	item = k_unlink_head(workers_free);
-	if (lock)
-		K_WUNLOCK(workers_free);
+	K_WUNLOCK(workers_free);
 
 	DATA_WORKERS(row, item);
 
@@ -1404,19 +1416,27 @@ unparam:
 unitem:
 	if (conned)
 		PQfinish(conn);
-	if (lock)
-		K_WLOCK(workers_free);
+	K_WLOCK(workers_free);
 	if (!ret)
 		k_add_head(workers_free, item);
 	else {
 		add_to_ktree(workers_root, item);
 		k_add_head(workers_store, item);
-		// Ensure there is a matching workerstatus
-		find_create_workerstatus(lock, userid, workername,
+	}
+	K_WUNLOCK(workers_free);
+
+hadit:
+	;
+	K_WUNLOCK(workers_db_free);
+
+	if (ret && add_ws) {
+		/* Ensure there is a matching workerstatus
+		 * WARNING - find_create_workerstatus() can call workers_add()!
+		 *  The hasworker=true argument guarantees it wont and
+		 *   add_ws=false above ensures it wont call back */
+		find_create_workerstatus(false, false, userid, workername, true,
 					 __FILE__, __func__, __LINE__);
 	}
-	if (lock)
-		K_WUNLOCK(workers_free);
 
 	return ret;
 }
@@ -1588,6 +1608,9 @@ bool workers_fill(PGconn *conn)
 		return false;
 	}
 
+	// See workers_add() about this lock
+	K_WLOCK(workers_db_free);
+
 	res = PQexec(conn, sel, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	PQclear(res);
@@ -1616,10 +1639,11 @@ bool workers_fill(PGconn *conn)
 
 	n = 0;
 	ok = true;
-	K_WLOCK(workers_free);
 	while ((t = PQntuples(res)) > 0) {
 		for (i = 0; i < t; i++) {
+			K_WLOCK(workers_free);
 			item = k_unlink_head(workers_free);
+			K_WUNLOCK(workers_free);
 			DATA_WORKERS(row, item);
 			bzero(row, sizeof(*row));
 
@@ -1667,14 +1691,14 @@ bool workers_fill(PGconn *conn)
 				break;
 			TXT_TO_BIGINT("workerid", field, row->workerid);
 
+			K_WLOCK(workers_free);
 			add_to_ktree(workers_root, item);
 			k_add_head(workers_store, item);
+			K_WUNLOCK(workers_free);
 
-			/* Make sure a workerstatus exists for each worker
-			 * This is to ensure that code can use the workerstatus tree
-			 *  to reference other tables and not miss workers in the
-			 *  other tables */
-			find_create_workerstatus(false, row->userid, row->workername,
+			// Make sure a workerstatus exists for each worker
+			find_create_workerstatus(false, false, row->userid,
+						 row->workername, true,
 						 __FILE__, __func__, __LINE__);
 			tick();
 			n++;
@@ -1691,11 +1715,12 @@ bool workers_fill(PGconn *conn)
 	if (!ok)
 		k_add_head(workers_free, item);
 
-	K_WUNLOCK(workers_free);
 	PQclear(res);
 flail:
 	res = PQexec(conn, "Commit", CKPQ_READ);
 	PQclear(res);
+
+	K_WUNLOCK(workers_db_free);
 
 	if (ok) {
 		LOGDEBUG("%s(): built", __func__);
@@ -1779,7 +1804,7 @@ bool paymentaddresses_set(PGconn *conn, int64_t userid, K_STORE *pa_store,
 			break;
 
 		// Find the RAM record in pa_store
-		match = pa_store->head;
+		match = STORE_HEAD_NOLOCK(pa_store);
 		while (match) {
 			DATA_PAYMENTADDRESSES(pa, match);
 			if (strcmp(pa->payaddress, row->payaddress) == 0 &&
@@ -1804,7 +1829,7 @@ bool paymentaddresses_set(PGconn *conn, int64_t userid, K_STORE *pa_store,
 		DATA_PAYMENTADDRESSES_NULL(row, item);
 	}
 	LOGDEBUG("%s(): Step 1 par=%d count=%d matches=%d first=%s", __func__,
-		 par, count, matches, first ? "true" : "false");
+		 par, count, matches, TFSTR(first));
 	// Too many, or none need expiring = don't do the update
 	if (count > ABS_ADDR_LIMIT || first == true) {
 		for (n = 0; n < par; n++)
@@ -1838,7 +1863,7 @@ bool paymentaddresses_set(PGconn *conn, int64_t userid, K_STORE *pa_store,
 		HISTORYDATECONTROL ") values (" PQPARAM10 ")";
 
 	count = 0;
-	match = pa_store->head;
+	match = STORE_HEAD_NOLOCK(pa_store);
 	while (match) {
 		DATA_PAYMENTADDRESSES(row, match);
 		if (!row->match) {
@@ -1895,7 +1920,7 @@ unparam:
 		free(params[n]);
 	FREENULL(upd);
 	// Third step - do step 1 and 2 to the RAM version of the DB
-	LOGDEBUG("%s(): Step 3, ok=%s", __func__, ok ? "true" : "false");
+	LOGDEBUG("%s(): Step 3, ok=%s", __func__, TFSTR(ok));
 	matches = count = n = 0;
 	if (ok) {
 		// Change the expiry on all records that we expired in the DB
@@ -1904,7 +1929,7 @@ unparam:
 		while (item && CURRENT(&(row->expirydate)) && row->userid == userid) {
 			prev = prev_in_ktree(ctx);
 			// Find the RAM record in pa_store
-			match = pa_store->head;
+			match = STORE_HEAD_NOLOCK(pa_store);
 			while (match) {
 				DATA_PAYMENTADDRESSES(pa, match);
 				if (strcmp(pa->payaddress, row->payaddress) == 0 &&
@@ -1930,7 +1955,7 @@ unparam:
 		}
 
 		// Add in all the non-matching ps_store
-		match = pa_store->head;
+		match = STORE_HEAD_NOLOCK(pa_store);
 		while (match) {
 			next = match->next;
 			DATA_PAYMENTADDRESSES(pa, match);
@@ -2943,7 +2968,7 @@ bool workinfo_fill(PGconn *conn)
 
 	n = 0;
 	ok = true;
-	//K_WLOCK(workinfo_free);
+	K_WLOCK(workinfo_free);
 	while ((t = PQntuples(res)) > 0) {
 		for (i = 0; i < t; i++) {
 			item = k_unlink_head(workinfo_free);
@@ -3055,10 +3080,13 @@ bool workinfo_fill(PGconn *conn)
 	if (!ok) {
 		free_workinfo_data(item);
 		k_add_head(workinfo_free, item);
-	} else
+	} else {
+		K_WLOCK(blocks_free);
 		ok = set_prevcreatedate(0);
+		K_WUNLOCK(blocks_free);
+	}
 
-	//K_WUNLOCK(workinfo_free);
+	K_WUNLOCK(workinfo_free);
 	PQclear(res);
 flail:
 	res = PQexec(conn, "Commit", CKPQ_READ);
@@ -3140,8 +3168,10 @@ static bool shares_process(PGconn *conn, SHARES *shares, K_ITEM *wi_item,
 
 	if (reloading && !confirm_sharesummary) {
 		// We only need to know if the workmarker is processed
+		K_RLOCK(workmarkers_free);
 		wm_item = find_workmarkers(shares->workinfoid, false,
 					   MARKER_PROCESSED, NULL);
+		K_RUNLOCK(workmarkers_free);
 		if (wm_item) {
 			LOGDEBUG("%s(): workmarker exists for wid %"PRId64
 				 " %"PRId64"/%s/%ld,%ld",
@@ -3153,8 +3183,10 @@ static bool shares_process(PGconn *conn, SHARES *shares, K_ITEM *wi_item,
 			return false;
 		}
 
+		K_RLOCK(sharesummary_free);
 		ss_item = find_sharesummary(shares->userid, shares->workername,
 					    shares->workinfoid);
+		K_RUNLOCK(sharesummary_free);
 		if (ss_item) {
 			DATA_SHARESUMMARY(sharesummary, ss_item);
 			if (sharesummary->complete[0] != SUMMARY_NEW) {
@@ -3174,7 +3206,9 @@ static bool shares_process(PGconn *conn, SHARES *shares, K_ITEM *wi_item,
 
 	if (!confirm_sharesummary) {
 		workerstatus_update(NULL, shares, NULL);
-		userinfo_update(shares, NULL, NULL);
+		K_WLOCK(userinfo_free);
+		userinfo_update(shares, NULL, NULL, false);
+		K_WUNLOCK(userinfo_free);
 	}
 
 	sharesummary_update(shares, NULL, shares->createby, shares->createcode,
@@ -3440,8 +3474,10 @@ static bool shareerrors_process(PGconn *conn, SHAREERRORS *shareerrors,
 
 	if (reloading && !confirm_sharesummary) {
 		// We only need to know if the workmarker is processed
+		K_RLOCK(workmarkers_free);
 		wm_item = find_workmarkers(shareerrors->workinfoid, false,
 					   MARKER_PROCESSED, NULL);
+		K_RUNLOCK(workmarkers_free);
 		if (wm_item) {
 			LOGDEBUG("%s(): workmarker exists for wid %"PRId64
 				 " %"PRId64"/%s/%ld,%ld",
@@ -3454,9 +3490,11 @@ static bool shareerrors_process(PGconn *conn, SHAREERRORS *shareerrors,
 			return false;
 		}
 
+		K_RLOCK(sharesummary_free);
 		ss_item = find_sharesummary(shareerrors->userid,
 					    shareerrors->workername,
 					    shareerrors->workinfoid);
+		K_RUNLOCK(sharesummary_free);
 		if (ss_item) {
 			DATA_SHARESUMMARY(sharesummary, ss_item);
 			if (sharesummary->complete[0] != SUMMARY_NEW) {
@@ -3775,7 +3813,7 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 
 	K_STORE *old_sharesummary_store = k_new_store(sharesummary_free);
 	K_STORE *new_markersummary_store = k_new_store(markersummary_free);
-	K_TREE *ms_root = new_ktree(cmp_markersummary);
+	K_TREE *ms_root = new_ktree(cmp_markersummary, markersummary_free);
 
 	if (!CURRENT(&(workmarkers->expirydate))) {
 		reason = "unexpired";
@@ -3844,12 +3882,12 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 			lookmarkersummary.workername = sharesummary->workername;
 
 			ms_look.data = (void *)(&lookmarkersummary);
-			ms_item = find_in_ktree(ms_root, &ms_look, ms_ctx);
+			ms_item = find_in_ktree_nolock(ms_root, &ms_look, ms_ctx);
 			if (!ms_item) {
 				K_WLOCK(markersummary_free);
 				ms_item = k_unlink_head(markersummary_free);
 				K_WUNLOCK(markersummary_free);
-				k_add_head(new_markersummary_store, ms_item);
+				k_add_head_nolock(new_markersummary_store, ms_item);
 				DATA_MARKERSUMMARY(markersummary, ms_item);
 				bzero(markersummary, sizeof(*markersummary));
 				markersummary->markerid = workmarkers->markerid;
@@ -3857,7 +3895,7 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 				DUP_POINTER(markersummary_free,
 					    markersummary->workername,
 					    sharesummary->workername);
-				add_to_ktree(ms_root, ms_item);
+				add_to_ktree_nolock(ms_root, ms_item);
 
 				LOGDEBUG("%s() new ms %"PRId64"/%"PRId64"/%s",
 					 shortname, markersummary->markerid,
@@ -3900,8 +3938,10 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 		diffacc += sharesummary->diffacc;
 		shareacc += sharesummary->shareacc;
 
+		K_WLOCK(sharesummary_free);
 		k_unlink_item(sharesummary_store, ss_item);
-		k_add_head(old_sharesummary_store, ss_item);
+		K_WUNLOCK(sharesummary_free);
+		k_add_head_nolock(old_sharesummary_store, ss_item);
 
 		ss_item = ss_prev;
 	}
@@ -3919,7 +3959,7 @@ bool sharesummaries_to_markersummaries(PGconn *conn, WORKMARKERS *workmarkers,
 		goto flail;
 	}
 
-	ms_item = new_markersummary_store->head;
+	ms_item = STORE_HEAD_NOLOCK(new_markersummary_store);
 	while (ms_item) {
 		if (!(markersummary_add(conn, ms_item, by, code, inet,
 					cd, trf_root))) {
@@ -3960,7 +4000,7 @@ flail:
 	if (!ok) {
 		if (new_markersummary_store->count > 0) {
 			// Throw them away (they don't exist anywhere else)
-			ms_item = new_markersummary_store->head;
+			ms_item = STORE_HEAD_NOLOCK(new_markersummary_store);
 			while (ms_item) {
 				free_markersummary_data(ms_item);
 				ms_item = ms_item->next;
@@ -3978,10 +4018,11 @@ flail:
 	} else {
 		ms_count = new_markersummary_store->count;
 		ss_count = old_sharesummary_store->count;
-		// Deadlock alert for other newer code ...
+
 		K_WLOCK(sharesummary_free);
 		K_WLOCK(markersummary_free);
-		ms_item = new_markersummary_store->head;
+		K_RLOCK(workmarkers_free);
+		ms_item = STORE_HEAD_NOLOCK(new_markersummary_store);
 		while (ms_item) {
 			// move the new markersummaries into the trees/stores
 			add_to_ktree(markersummary_root, ms_item);
@@ -4007,7 +4048,7 @@ flail:
 
 		/* For normal shift processing this wont be very quick
 		 *  so it will be a 'long' LOCK */
-		ss_item = old_sharesummary_store->head;
+		ss_item = STORE_HEAD_NOLOCK(old_sharesummary_store);
 		while (ss_item) {
 			// remove the old sharesummaries from the trees
 			remove_from_ktree(sharesummary_root, ss_item);
@@ -4027,6 +4068,7 @@ flail:
 			ss_item = ss_item->next;
 		}
 		k_list_transfer_to_head(old_sharesummary_store, sharesummary_free);
+		K_RUNLOCK(workmarkers_free);
 		K_WUNLOCK(markersummary_free);
 		K_WUNLOCK(sharesummary_free);
 
@@ -4088,8 +4130,8 @@ bool delete_markersummaries(PGconn *conn, WORKMARKERS *wm)
 	INIT_MARKERSUMMARY(&ms_look);
 	ms_look.data = (void *)(&lookmarkersummary);
 
-	K_WLOCK(workmarkers_free);
 	K_WLOCK(markersummary_free);
+	K_WLOCK(workmarkers_free);
 
 	ms_item = find_after_in_ktree(markersummary_root, &ms_look, ms_ctx);
 	DATA_MARKERSUMMARY_NULL(markersummary, ms_item);
@@ -4160,7 +4202,7 @@ flail:
 		/* TODO: add a list garbage collection thread so as to not
 		 *  invalidate the data immediately (free_*), rather after
 		 *  some delay */
-		ms_item = del_markersummary_store->head;
+		ms_item = STORE_HEAD_NOLOCK(del_markersummary_store);
 		while (ms_item) {
 			remove_from_ktree(markersummary_root, ms_item);
 			remove_from_ktree(markersummary_userid_root, ms_item);
@@ -4180,8 +4222,8 @@ flail:
 		}
 	}
 
-	K_WUNLOCK(markersummary_free);
 	K_WUNLOCK(workmarkers_free);
+	K_WUNLOCK(markersummary_free);
 
 	if (!ok) {
 		// already displayed the full workmarkers detail at the top
@@ -4208,6 +4250,8 @@ static void set_sharesummary_stats(SHARESUMMARY *row, SHARES *s_row,
 				   double *tdf, double *tdl)
 {
 	tv_t *createdate;
+
+	K_WLOCK(sharesummary_free);
 
 	if (s_row)
 		createdate = &(s_row->createdate);
@@ -4270,6 +4314,8 @@ static void set_sharesummary_stats(SHARESUMMARY *row, SHARES *s_row,
 		*tdf = tvdiff(createdate, &(row->firstshare));
 		*tdl = tvdiff(createdate, &(row->lastshare));
 	}
+
+	K_WUNLOCK(sharesummary_free);
 }
 
 /* Keep some simple stats on how often shares are out of order
@@ -4978,6 +5024,7 @@ flail:
 	if (conned)
 		PQfinish(conn);
 
+	K_RLOCK(workinfo_free);
 	K_WLOCK(blocks_free);
 	if (!ok)
 		k_add_head(blocks_free, b_item);
@@ -4998,6 +5045,7 @@ flail:
 		set_prevcreatedate(row->height);
 	}
 	K_WUNLOCK(blocks_free);
+	K_RUNLOCK(workinfo_free);
 
 	if (ok) {
 		char pct[16] = "?";
@@ -5041,7 +5089,7 @@ flail:
 				if (pool.workinfoid < row->workinfoid) {
 					pool.workinfoid = row->workinfoid;
 					pool.height = row->height;
-					zero_on_new_block(true);
+					zero_on_new_block(false);
 				}
 				break;
 			case BLOCKS_ORPHAN:
@@ -5221,7 +5269,7 @@ bool blocks_fill(PGconn *conn)
 
 		// first add all the NEW blocks
 		if (row->confirmed[0] == BLOCKS_NEW)
-			_userinfo_block(row, INFO_NEW, 1, false);
+			userinfo_block(row, INFO_NEW, 1);
 	}
 
 	if (!ok)
@@ -5236,9 +5284,9 @@ bool blocks_fill(PGconn *conn)
 			DATA_BLOCKS(row, item);
 			if (CURRENT(&(row->expirydate))) {
 				if (row->confirmed[0] == BLOCKS_ORPHAN)
-					_userinfo_block(row, INFO_ORPHAN, 1, false);
+					userinfo_block(row, INFO_ORPHAN, 1);
 				else if (row->confirmed[0] == BLOCKS_REJECT)
-					_userinfo_block(row, INFO_REJECT, 1, false);
+					userinfo_block(row, INFO_REJECT, 1);
 			}
 			item = next_in_ktree(ctx);
 		}
@@ -5675,7 +5723,7 @@ K_ITEM *payouts_full_expire(PGconn *conn, int64_t payoutid, tv_t *now, bool lock
 
 	// If not already done before calling
 	if (lock)
-		ck_wlock(&process_pplns_lock);
+		K_WLOCK(process_pplns_free);
 
 	// This will be rare so a full lock is best
 	K_WLOCK(payouts_free);
@@ -5873,7 +5921,7 @@ K_ITEM *payouts_full_expire(PGconn *conn, int64_t payoutid, tv_t *now, bool lock
 
 	if (PAYGENERATED(payouts->status)) {
 		// Original was generated, so undo the reward
-		reward_shifts(payouts, true, -1);
+		reward_shifts(payouts, -1);
 
 	}
 
@@ -5891,7 +5939,7 @@ matane:
 	CKPQDisco(&conn, conned);
 
 	if (lock)
-		ck_wunlock(&process_pplns_lock);
+		K_WUNLOCK(process_pplns_free);
 
 	for (n = 0; n < par; n++)
 		free(params[n]);
@@ -6024,7 +6072,9 @@ bool payouts_fill(PGconn *conn)
 			break;
 
 		// This also of course, verifies the payouts -> blocks reference
+		K_RLOCK(blocks_free);
 		b_item = find_blocks(row->height, row->blockhash, ctx);
+		K_RUNLOCK(blocks_free);
 		if (!b_item) {
 			LOGERR("%s(): payoutid %"PRId64" references unknown "
 				"block %"PRId32"/%s",
@@ -6045,7 +6095,7 @@ bool payouts_fill(PGconn *conn)
 		k_add_head(payouts_store, item);
 
 		if (CURRENT(&(row->expirydate)) && PAYGENERATED(row->status))
-			reward_shifts(row, false, 1);
+			reward_shifts(row, 1);
 
 		tick();
 	}
@@ -6216,12 +6266,13 @@ bool poolstats_add(PGconn *conn, bool store, char *poolinstance,
 	SIMPLEDATEINIT(row, cd, by, code, inet);
 	SIMPLEDATETRANSFER(trf_root, row);
 
+	K_WLOCK(poolstats_free);
 	if (igndup && find_in_ktree(poolstats_root, p_item, ctx)) {
-		K_WLOCK(poolstats_free);
 		k_add_head(poolstats_free, p_item);
 		K_WUNLOCK(poolstats_free);
 		return true;
 	}
+	K_WUNLOCK(poolstats_free);
 
 	if (store) {
 		par = 0;
@@ -6499,7 +6550,8 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 	workerstatus_update(NULL, NULL, row);
 
 	/* group at: userid,workername */
-	us_match = userstats_eos_store->head;
+	K_WLOCK(userstats_free);
+	us_match = STORE_WHEAD(userstats_eos_store);
 	while (us_match && cmp_userstats(us_item, us_match) != 0.0)
 		us_match = us_match->next;
 
@@ -6513,19 +6565,16 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 		if (match->elapsed > row->elapsed)
 			match->elapsed = row->elapsed;
 		// Unused
-		K_WLOCK(userstats_free);
 		k_add_head(userstats_free, us_item);
-		K_WUNLOCK(userstats_free);
 	} else {
 		// New user+worker
-		K_WLOCK(userstats_free);
 		k_add_head(userstats_eos_store, us_item);
-		K_WUNLOCK(userstats_free);
 	}
+	K_WUNLOCK(userstats_free);
 
 	if (eos) {
 		K_WLOCK(userstats_free);
-		us_next = userstats_eos_store->head;
+		us_next = STORE_WHEAD(userstats_eos_store);
 		while (us_next) {
 			us_item = find_in_ktree(userstats_root, us_next, ctx);
 			if (!us_item) {
@@ -6771,8 +6820,11 @@ bool markersummary_fill(PGconn *conn)
 
 	n = 0;
 	ok = true;
-	//K_WLOCK(markersummary_free);
+	K_WLOCK(markersummary_free);
 	while ((t = PQntuples(res)) > 0) {
+		// Avoid locking them too many times
+		K_RLOCK(workmarkers_free);
+		K_WLOCK(userinfo_free);
 		for (i = 0; i < t; i++) {
 			item = k_unlink_head(markersummary_free);
 			DATA_MARKERSUMMARY(row, item);
@@ -6919,7 +6971,7 @@ bool markersummary_fill(PGconn *conn)
 
 			markersummary_to_pool(p_row, row);
 
-			_userinfo_update(NULL, NULL, row, false, false);
+			userinfo_update(NULL, NULL, row, false);
 
 			if (n == 0 || ((n+1) % 100000) == 0) {
 				printf(TICK_PREFIX"ms ");
@@ -6930,6 +6982,8 @@ bool markersummary_fill(PGconn *conn)
 			tick();
 			n++;
 		}
+		K_WUNLOCK(userinfo_free);
+		K_RUNLOCK(workmarkers_free);
 		PQclear(res);
 		res = PQexec(conn, "fetch 9999 in ws", CKPQ_READ);
 		rescode = PQresultStatus(res);
@@ -6946,7 +7000,7 @@ bool markersummary_fill(PGconn *conn)
 
 	p_n = markersummary_pool_store->count;
 
-	//K_WUNLOCK(markersummary_free);
+	K_WUNLOCK(markersummary_free);
 	PQclear(res);
 flail:
 	res = PQexec(conn, "Commit", CKPQ_READ);
@@ -7130,7 +7184,7 @@ bool _workmarkers_process(PGconn *conn, bool already, bool add,
 			PGLOGERR("Insert", rescode, conn);
 			goto rollback;
 		}
-		row->pps_value = workinfo_pps(w_item, workinfoidend, true);
+		row->pps_value = workinfo_pps(w_item, workinfoidend);
 	}
 
 	ok = true;
@@ -7150,14 +7204,17 @@ unparam:
 	if (conned)
 		PQfinish(conn);
 
-	K_WLOCK(workmarkers_free);
 	if (!ok) {
 		if (wm_item) {
+			K_WLOCK(workmarkers_free);
 			free_workmarkers_data(wm_item);
 			k_add_head(workmarkers_free, wm_item);
+			K_WUNLOCK(workmarkers_free);
 		}
-	}
-	else {
+	} else {
+		if (wm_item)
+			shift_rewards(wm_item);
+		K_WLOCK(workmarkers_free);
 		if (old_wm_item) {
 			remove_from_ktree(workmarkers_root, old_wm_item);
 			remove_from_ktree(workmarkers_workinfoid_root,
@@ -7167,14 +7224,12 @@ unparam:
 			add_to_ktree(workmarkers_workinfoid_root, old_wm_item);
 		}
 		if (wm_item) {
-			shift_rewards(wm_item);
-
 			add_to_ktree(workmarkers_root, wm_item);
 			add_to_ktree(workmarkers_workinfoid_root, wm_item);
 			k_add_head(workmarkers_store, wm_item);
 		}
+		K_WUNLOCK(workmarkers_free);
 	}
-	K_WUNLOCK(workmarkers_free);
 
 	return ok;
 }
@@ -7278,7 +7333,7 @@ bool workmarkers_fill(PGconn *conn)
 				__func__, row->markerid,
 				row->workinfoidend);
 		}
-		row->pps_value = workinfo_pps(wi_item, row->workinfoidend, false);
+		row->pps_value = workinfo_pps(wi_item, row->workinfoidend);
 
 		if (CURRENT(&(row->expirydate)) &&
 		    !WMPROCESSED(row->status)) {
