@@ -3696,9 +3696,8 @@ static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_va
 /* Needs to be entered with client holding a ref count. */
 static void update_client(sdata_t *sdata, const stratum_instance_t *client, const int64_t client_id)
 {
-	if (client->ckp->btcsolo)
-		return;
-	stratum_send_update(sdata, client_id, true);
+	if (!client->ckp->btcsolo)
+		stratum_send_update(sdata, client_id, true);
 	stratum_send_diff(sdata, client);
 }
 
@@ -3792,7 +3791,8 @@ static void suggest_diff(stratum_instance_t *client, const char *method, const j
 static void init_client(sdata_t *sdata, const stratum_instance_t *client, const int64_t client_id)
 {
 	stratum_send_diff(sdata, client);
-	stratum_send_update(sdata, client_id, true);
+	if (!client->ckp->btcsolo)
+		stratum_send_update(sdata, client_id, true);
 }
 
 /* Enter with client holding ref count */
