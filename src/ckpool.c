@@ -831,14 +831,19 @@ json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
 out_empty:
 	empty_socket(cs->fd);
 	empty_buffer(cs);
-	if (!val && cs->fd > 0) {
+	if (!val) {
 		/* Assume that a failed request means the socket will be closed
 		 * and reopen it */
-		LOGWARNING("Attempting to reopen socket to %s:%s", cs->url, cs->port);
 		Close(cs->fd);
-		cs->fd = connect_socket(cs->url, cs->port);
 	}
 out:
+	if (cs->fd < 0) {
+		/* Attempt to reopen a socket that has been closed due to a
+		 * failed requet or if the socket was closed while trying to
+		 * read/write to it. */
+		LOGWARNING("Attempting to reopen socket to %s:%s", cs->url, cs->port);
+		cs->fd = connect_socket(cs->url, cs->port);
+	}
 	free(http_req);
 	dealloc(cs->buf);
 	cksem_post(&cs->sem);
