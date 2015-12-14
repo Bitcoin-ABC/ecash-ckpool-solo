@@ -111,6 +111,7 @@ struct server_instance {
 	char *auth;
 	char *pass;
 	bool notify;
+	bool alive;
 	connsock_t cs;
 
 	void *data; // Private data
