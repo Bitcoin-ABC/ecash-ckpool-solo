@@ -15,7 +15,7 @@ for(var j=1;j<w.length;j++){tda[j-1]*=(Math.pow(2,32)/Math.pow(10,12)/(xmax-xmin
 var p5=(ymax-ymin)*0.05;ymax+=p5;ymin-=p5;if(ymin<0){ymin=0}
 if(c['zerob']){ymin=0}
 ghg(c,xmax-xmin);
-ggr(c,0.9,0.9,'TH/s',rows,xmin,xmax,ymin,ymax,d,'nx:','vx:','ths:',tda,w,cols)}
+ggr(c,0.9,0.9,'TH/s',rows,xmin,xmax,ymin,ymax,d,'nx:','vx:','ths:',tda,w,cols,null)}
 c={};
 function dodrw(data,cbx){if(hasCan()){gdrw(c,sep(data),cbx)}}
 function gact(t){if(t.checked){scnv(t.id,1)}else{scnv(t.id,0)}godrw(0)}";

@@ -277,6 +277,10 @@ reconnect:
 	si = live_server(ckp);
 	if (!si)
 		goto out;
+	if (unlikely(!started)) {
+		started = true;
+		LOGWARNING("%s generator ready", ckp->name);
+	}
 
 	gbt = si->data;
 	cs = &si->cs;
@@ -342,10 +346,6 @@ retry:
 				cs->url, cs->port);
 			send_unix_msg(sockd, "failed");
 		} else {
-			if (unlikely(!started)) {
-				started = true;
-				LOGWARNING("%s generator ready", ckp->name);
-			}
 			send_unix_msg(sockd, hash);
 		}
 	} else if (cmdmatch(buf, "getlast")) {
@@ -362,11 +362,6 @@ retry:
 				send_unix_msg(sockd, "failed");
 				goto reconnect;
 			} else {
-				if (unlikely(!started)) {
-					started = true;
-					LOGWARNING("%s generator ready", ckp->name);
-				}
-
 				send_unix_msg(sockd, hash);
 				LOGDEBUG("Hash: %s", hash);
 			}

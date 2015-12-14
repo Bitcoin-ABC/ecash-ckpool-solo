@@ -13,7 +13,7 @@ for(var j=1;j<w.length;j++){var pre=w[j];var lk=0,nam=pre+'luck:'+i;if(d[nam]){l
 }
 if(ymax>500){ymax=500}
 ghg(c,xmax-xmin);
-ggr(c,0.90,0.90,'Luck%',rows,xmin,xmax,ymin,ymax,d,'seq:','vx:','luck:',tlk,w,cols)}
+ggr(c,0.90,0.90,'Luck%',rows,xmin,xmax,ymin,ymax,d,'seq:','vx:','luck:',tlk,w,cols,null)}
 c={};
 function dodrw(data,cbx){if(hasCan()){gdrw(c,sep(data),cbx)}}
 function gact(t){if(t.checked){scnv(t.id,1)}else{scnv(t.id,0)}godrw(0)}";

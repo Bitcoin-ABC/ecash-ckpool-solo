@@ -1,8 +1,9 @@
 <?php
 #
-function uspg($nc)
+function uspg($nc,$fs)
 {
-$g = "function gdrw(c,d,cbx){gc(c);ghrs(c);gopt(c,cbx);
+$g = "function exf(n,c,xn,x0,x1,y0,y1,ar){if(n==0){var i,st=-1,fi=-1;for(i=0;i<xn;i++){if(st==-1&&ar['lastpayoutstart:'+i]!=''){st=ar['start:'+i]}if(fi==-1&&ar['endmarkextra:'+i].indexOf('Block')==0){fi=ar['end:'+i]}}if(st>=0&&fi>=0){var xs,xf;xs=(st-x0)/(x1-x0);xf=(fi-x0)/(x1-x0);gfs(c,'$fs');gbe(c,xs,0);gln(c,xs,1);gln(c,xf,1);gln(c,xf,0);gle(c);gfl(c)}}}
+function gdrw(c,d,cbx){gc(c);ghrs(c);gopt(c,cbx);
 gfs(c,'white');gss(c,'#0000c0');glw(c,2);gbd(c);
 var rows=d['rows'],ymin=-1,ymax=0,xmin=-1,xmax=0,tda=[];
 var w=d['arp'].split(',');var cols=d['cols'].split(',');
@@ -15,7 +16,7 @@ for(var j=1;j<w.length;j++){tda[j-1]*=(Math.pow(2,32)/Math.pow(10,12)/(xmax-xmin
 var p5=(ymax-ymin)*0.05;ymax+=p5;ymin-=p5;if(ymin<0){ymin=0}
 if(c['zerob']){ymin=0}
 ghg(c,xmax-xmin);
-ggr(c,0.9,0.9,'TH/s',rows,xmin,xmax,ymin,ymax,d,'nx:','vx:','ths:',tda,w,cols)}
+ggr(c,0.9,0.9,'TH/s',rows,xmin,xmax,ymin,ymax,d,'nx:','vx:','ths:',tda,w,cols,exf)}
 c={};
 function dodrw(data,cbx){if(hasCan()){gdrw(c,sep(data),cbx)}}
 function gact(t){if(t.checked){scnv(t.id,1)}else{scnv(t.id,0)}godrw(0)}
@@ -109,7 +110,7 @@ function dousperf($data, $user)
 	$data = str_replace(array("\\","'"), array("\\\\","\\'"), $ans['DATA']);
 	$data .= $fld_sep . 'cols' . $val_sep . $datacols;
 	$pg .= "<script type='text/javascript'>\n";
-	$pg .= uspg($nc);
+	$pg .= uspg($nc,'#fff0f0');
 	$pg .= "\nfunction godrw(f){var cbx=[";
 	$comma = '';
 	foreach ($cbx as $nam => $txt)
