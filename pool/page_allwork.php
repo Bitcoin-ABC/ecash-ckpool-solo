@@ -6,7 +6,7 @@ function doallwork($data, $user)
 {
  $pg = '<h1>All Workers</h1>';
 
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= worktable();
 
  $totshare = 0;
  $totdiff = 0;

@@ -396,6 +396,11 @@ struct stratifier_data {
 	workbase_t *current_workbase;
 	int workbases_generated;
 
+	/* Semaphore to serialise calls to add_base */
+	sem_t update_sem;
+	/* Time we last sent out a stratum update */
+	time_t update_time;
+
 	int64_t workbase_id;
 	int64_t blockchange_id;
 	int session_id;
@@ -1012,6 +1017,7 @@ static void *do_update(void *arg)
 	int prio = ur->prio;
 	bool ret = false;
 	workbase_t *wb;
+	time_t now_t;
 	json_t *val;
 	char *buf;
 
@@ -1066,7 +1072,16 @@ static void *do_update(void *arg)
 	json_decref(val);
 	generate_coinbase(ckp, wb);
 
+	/* Serialise access to add_base to avoid out of order new block notifies */
+	cksem_wait(&sdata->update_sem);
 	add_base(ckp, wb, &new_block);
+	/* Reset the update time to avoid stacked low priority notifies. Bring
+	 * forward the next notify in case of a new block. */
+	now_t = time(NULL);
+	if (new_block)
+		now_t -= ckp->update_interval / 2;
+	sdata->update_time = now_t;
+	cksem_post(&sdata->update_sem);
 
 	if (ckp->btcsolo)
 		stratum_broadcast_updates(sdata, new_block);
@@ -2000,7 +2015,6 @@ static int stratum_loop(ckpool_t *ckp, proc_instance_t *pi)
 {
 	sdata_t *sdata = ckp->data;
 	unix_msg_t *umsg = NULL;
-	tv_t start_tv = {0, 0};
 	int ret = 0;
 	char *buf;
 
@@ -2011,13 +2025,11 @@ retry:
 	}
 
 	do {
-		double tdiff;
-		tv_t end_tv;
+		time_t end_t;
 
-		tv_time(&end_tv);
-		tdiff = tvdiff(&end_tv, &start_tv);
-		if (tdiff > ckp->update_interval) {
-			copy_tv(&start_tv, &end_tv);
+		end_t = time(NULL);
+		if (end_t - sdata->update_time >= ckp->update_interval) {
+			sdata->update_time = end_t;
 			if (!ckp->proxy) {
 				LOGDEBUG("%ds elapsed in strat_loop, updating gbt base",
 					 ckp->update_interval);
@@ -2916,6 +2928,7 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 		LOGNOTICE("Authorised client %"PRId64" %s worker %s as user %s",
 			  client->id, client->address, buf, user->username);
 		user->auth_backoff = DEFAULT_AUTH_BACKOFF; /* Reset auth backoff time */
+		user->throttled = false;
 	} else {
 		LOGNOTICE("Client %"PRId64" %s worker %s failed to authorise as user %s",
 			  client->id, client->address, buf,user->username);
@@ -3111,8 +3124,8 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	uchar swap[32];
 	ts_t ts_now;
 
-	/* Submit anything over 99% of the diff in case of rounding errors */
-	if (diff < sdata->current_workbase->network_diff * 0.99)
+	/* Submit anything over 99.9% of the diff in case of rounding errors */
+	if (diff < sdata->current_workbase->network_diff * 0.999)
 		return;
 
 	LOGWARNING("Possible block solve diff %f !", diff);
@@ -3754,7 +3767,7 @@ static void suggest_diff(stratum_instance_t *client, const char *method, const j
 	int64_t sdiff;
 
 	if (unlikely(!client_active(client))) {
-		LOGWARNING("Attempted to suggest diff on unauthorised client %"PRId64, client->id);
+		LOGNOTICE("Attempted to suggest diff on unauthorised client %"PRId64, client->id);
 		return;
 	}
 	if (arr_val && json_is_integer(arr_val))
@@ -3773,6 +3786,13 @@ static void suggest_diff(stratum_instance_t *client, const char *method, const j
 	else
 		client->diff = sdiff;
 	stratum_send_diff(sdata, client);
+}
+
+/* Send diff first when sending the first stratum template after subscribing */
+static void init_client(sdata_t *sdata, const stratum_instance_t *client, const int64_t client_id)
+{
+	stratum_send_diff(sdata, client);
+	stratum_send_update(sdata, client_id, true);
 }
 
 /* Enter with client holding ref count */
@@ -3813,7 +3833,7 @@ static void parse_method(sdata_t *sdata, stratum_instance_t *client, const int64
 		json_object_set_new_nocheck(val, "error", json_null());
 		stratum_add_send(sdata, val, client_id);
 		if (likely(client->subscribed))
-			update_client(sdata, client, client_id);
+			init_client(sdata, client, client_id);
 		return;
 	}
 
@@ -4927,6 +4947,8 @@ int stratifier(proc_instance_t *pi)
 		ckp->serverurls = 1;
 	}
 	cklock_init(&sdata->instance_lock);
+	cksem_init(&sdata->update_sem);
+	cksem_post(&sdata->update_sem);
 
 	mutex_init(&sdata->ckdb_lock);
 	mutex_init(&sdata->ckdb_msg_lock);

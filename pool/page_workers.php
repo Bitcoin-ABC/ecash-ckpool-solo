@@ -1,5 +1,16 @@
 <?php
 #
+function worktable()
+{
+ $pg = "<script type='text/javascript'>\n";
+ $pg .= "function wkdet(n,i){var t=document.getElementById(n);if(i&&t){var b,cs,j,c,a;b=i.checked;cs=t.getElementsByTagName('td');for(j=0;c=cs[j];j++)
+{a=c.getAttribute('data-hid');if(a){if(b){c.className=a}else{c.className='hid'}}}}}";
+ $pg .= "</script>\n";
+ $pg .= "Show Details for Invalids: <input type=checkbox onclick='wkdet(\"wkt\",this)'><br>";
+ $pg .= "<table id=wkt callpadding=0 cellspacing=0 border=0>\n";
+ return $pg;
+}
+#
 function worktitle($data, $user)
 {
  addSort();
@@ -13,8 +24,12 @@ function worktitle($data, $user)
  $pg .= "<td class=dr><span class=nb><$r id=srtshrate data-sf=r5>:Share Rate</span></td>";
  $pg .= '<td class=dr>&laquo;Elapsed</td>';
  $pg .= "<td class=dr><span class=nb><$r id=srtinv data-sf=r7>:Invalid</span></td>";
- $pg .= '<td class=dr>Block %</td>';
- $pg .= "<td class=dr><span class=nb><$r id=srtrate data-sf=r9>:Hash</span> Rate</td>";
+ $pg .= "<td class=hid data-hid=dr><span class=nb><$r id=srtstale data-sf=r8>:Stale</span></td>";
+ $pg .= "<td class=hid data-hid=dr><span class=nb><$r id=srtdup data-sf=r9>:Dup</span></td>";
+ $pg .= "<td class=hid data-hid=dr><span class=nb><$r id=srthi data-sf=r10>:Hi</span></td>";
+ $pg .= "<td class=hid data-hid=dr><span class=nb><$r id=srtreject data-sf=r11>:Rej</span></td>";
+ $pg .= '<td class=dr>Block&nbsp;%</td>';
+ $pg .= "<td class=dr><span class=nb><$r id=srtrate data-sf=r13>:Hash</span> Rate</td>";
  $pg .= "</tr>\n";
  return $pg;
 }
@@ -66,6 +81,14 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 				'w_shareacc' => $ans['w_shareacc:'.$i],
 				'w_diffacc' => $ans['w_diffacc:'.$i],
 				'w_diffinv' => $ans['w_diffinv:'.$i],
+				'w_diffsta' => $ans['w_diffsta:'.$i],
+				'w_diffdup' => $ans['w_diffdup:'.$i],
+				'w_diffhi' => $ans['w_diffhi:'.$i],
+				'w_diffrej' => $ans['w_diffrej:'.$i],
+				'w_sharesta' => $ans['w_sharesta:'.$i],
+				'w_sharedup' => $ans['w_sharedup:'.$i],
+				'w_sharehi' => $ans['w_sharehi:'.$i],
+				'w_sharerej' => $ans['w_sharerej:'.$i],
 				'w_lastdiff' => $ans['w_lastdiff:'.$i],
 				'w_active_diffacc' => $ans['w_active_diffacc:'.$i],
 				'w_active_start' => $ans['w_active_start:'.$i],
@@ -143,6 +166,15 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 
 		$pg .= "<td class=dr data-srt=$rejf>$rej%</td>";
 
+		foreach(array('sta','dup','hi','rej') as $fld)
+		{
+			$shr = number_format($all[$i]['w_share'.$fld]);
+			$dif = $all[$i]['w_diff'.$fld];
+			$ddif = number_format($dif);
+			$sdif = number_format($dif,0,'','');
+			$pg .= "<td class=hid data-srt=$sdif data-hid=dr>$ddif/$shr</td>";
+		}
+
 		if ($blockacc <= 0)
 			$blkpct = '&nbsp;';
 		else
@@ -198,6 +230,7 @@ function worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
 	$blkpct = '&nbsp;';
  else
 	$blkpct = number_format(100.0 * $totdiff / $blockacc, 3) . '%';
+ $pg .= "<td class=hid colspan=4 data-hid=dr>&nbsp;</td>";
  $pg .= "<td class=dr>$blkpct</td>";
  $pg .= "<td class=dr>$totrate</td></tr>\n";
  return $pg;
@@ -207,7 +240,7 @@ function doworker($data, $user)
 {
  $title = '';
 
- $pg = "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg = worktable();
 
  $totshare = 0;
  $totdiff = 0;

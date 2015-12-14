@@ -500,13 +500,13 @@ void empty_buffer(connsock_t *cs)
  * of the buffer for use on the next receive. */
 int read_socket_line(connsock_t *cs, float *timeout)
 {
-	int fd = cs->fd, ret = -1;
 	char *eom = NULL;
 	tv_t start, now;
 	size_t buflen;
+	int ret = -1;
 	float diff;
 
-	if (unlikely(fd < 0))
+	if (unlikely(cs->fd < 0))
 		goto out;
 
 	if (unlikely(!cs->buf))
@@ -527,7 +527,7 @@ rewait:
 		ret = 0;
 		goto out;
 	}
-	ret = wait_read_select(fd, eom ? 0 : *timeout);
+	ret = wait_read_select(cs->fd, eom ? 0 : *timeout);
 	if (ret < 1) {
 		if (!ret) {
 			if (eom)
@@ -539,13 +539,14 @@ rewait:
 	}
 	tv_time(&now);
 	diff = tvdiff(&now, &start);
+	copy_tv(&start, &now);
 	*timeout -= diff;
 	while (42) {
 		char readbuf[PAGESIZE] = {};
 		int backoff = 1;
 		char *newbuf;
 
-		ret = recv(fd, readbuf, PAGESIZE - 4, MSG_DONTWAIT);
+		ret = recv(cs->fd, readbuf, PAGESIZE - 4, MSG_DONTWAIT);
 		if (ret < 1) {
 			/* No more to read or closed socket after valid message */
 			if (eom)
@@ -635,10 +636,8 @@ void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const ch
 		ret = true;
 	Close(sockd);
 out:
-	if (unlikely(!ret)) {
+	if (unlikely(!ret))
 		LOGERR("Failure in send_proc from %s %s:%d", file, func, line);
-		childsighandler(15);
-	}
 }
 
 /* Send a single message to a process instance and retrieve the response, then
@@ -746,6 +745,8 @@ json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
 	double elapsed;
 	int len, ret;
 
+	/* Serialise all calls in case we use cs from multiple threads */
+	cksem_wait(&cs->sem);
 	if (unlikely(cs->fd < 0)) {
 		LOGWARNING("FD %d invalid in %s", cs->fd, __func__);
 		goto out;
@@ -830,16 +831,17 @@ json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
 out_empty:
 	empty_socket(cs->fd);
 	empty_buffer(cs);
-	if (!val) {
+	if (!val && cs->fd > 0) {
 		/* Assume that a failed request means the socket will be closed
 		 * and reopen it */
-		LOGWARNING("Reopening socket to %s:%s", cs->url, cs->port);
+		LOGWARNING("Attempting to reopen socket to %s:%s", cs->url, cs->port);
 		Close(cs->fd);
 		cs->fd = connect_socket(cs->url, cs->port);
 	}
 out:
 	free(http_req);
 	dealloc(cs->buf);
+	cksem_post(&cs->sem);
 	return val;
 }
 

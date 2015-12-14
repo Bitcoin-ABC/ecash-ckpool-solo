@@ -79,6 +79,8 @@ struct connsock {
 	char *buf;
 	int bufofs;
 	int buflen;
+	/* Semaphore used to serialise request/responses */
+	sem_t sem;
 };
 
 typedef struct connsock connsock_t;

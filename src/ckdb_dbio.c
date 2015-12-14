@@ -6766,9 +6766,10 @@ bool markersummary_fill(PGconn *conn)
 	K_ITEM *item, *p_item;
 	int n, t, i, p_n;
 	MARKERSUMMARY *row, *p_row;
+	char *params[1];
 	char *field;
 	char *sel;
-	int fields = 20;
+	int fields = 20, par = 0;
 	bool ok = false;
 
 	LOGDEBUG("%s(): select", __func__);
@@ -6783,7 +6784,16 @@ bool markersummary_fill(PGconn *conn)
 		"sharecount,errorcount,firstshare,lastshare,firstshareacc,"
 		"lastshareacc,lastdiffacc"
 		MODIFYDATECONTROL
-		" from markersummary";
+		" from markersummary where markerid>=$1";
+	par = 0;
+	if (mark_start)
+		params[par++] = mark_start;
+	else
+		params[par++] = "0";
+	PARCHK(par, params);
+
+	LOGWARNING("%s(): loading from markerid>=%s", __func__, params[0]);
+
 	res = PQexec(conn, "Begin", CKPQ_READ);
 	rescode = PQresultStatus(res);
 	PQclear(res);
@@ -6792,7 +6802,7 @@ bool markersummary_fill(PGconn *conn)
 		return false;
 	}
 
-	res = PQexec(conn, sel, CKPQ_READ);
+	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	PQclear(res);
 	if (!PGOK(rescode)) {

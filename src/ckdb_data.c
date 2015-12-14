@@ -4618,7 +4618,7 @@ static bool gen_workmarkers(PGconn *conn, MARKS *stt, bool after, MARKS *fin,
 {
 	K_ITEM look, *wi_stt_item, *wi_fin_item, *old_wm_item;
 	WORKMARKERS *old_wm;
-	WORKINFO workinfo, *wi_stt, *wi_fin;
+	WORKINFO workinfo, *wi_stt = NULL, *wi_fin;
 	K_TREE_CTX ctx[1];
 	char description[TXT_BIG+1];
 	bool ok;
@@ -4731,7 +4731,7 @@ bool workmarkers_generate(PGconn *conn, char *err, size_t siz, char *by,
 			  bool none_error)
 {
 	K_ITEM *m_item, *m_next_item;
-	MARKS *mused, *mnext;
+	MARKS *mused = NULL, *mnext;
 	MARKS marks;
 	K_TREE_CTX ctx[1];
 	K_ITEM look;

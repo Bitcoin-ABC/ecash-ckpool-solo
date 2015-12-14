@@ -188,8 +188,10 @@ out:
 	if (!ret) {
 		/* Close and invalidate the file handle */
 		Close(cs->fd);
-	} else
+	} else {
+		LOGNOTICE("Server alive: %s:%s", cs->url, cs->port);
 		keep_sockalive(cs->fd);
+	}
 	return ret;
 }
 
@@ -244,9 +246,8 @@ static void kill_server(server_instance_t *si)
 
 static int gen_loop(proc_instance_t *pi)
 {
+	server_instance_t *si = NULL, *old_si;
 	int sockd = -1, ret = 0, selret;
-	server_instance_t *si = NULL;
-	bool reconnecting = false;
 	unixsock_t *us = &pi->us;
 	ckpool_t *ckp = pi->ckp;
 	gdata_t *gdata = ckp->data;
@@ -258,20 +259,17 @@ static int gen_loop(proc_instance_t *pi)
 
 reconnect:
 	Close(sockd);
-	if (si) {
-		kill_server(si);
-		reconnecting = true;
-	}
+	old_si = si;
 	si = live_server(ckp);
 	if (!si)
 		goto out;
 
 	gbt = si->data;
 	cs = &si->cs;
-	if (reconnecting) {
+	if (!old_si)
+		LOGWARNING("Connected to bitoind: %s:%s", cs->url, cs->port);
+	else if (si != old_si)
 		LOGWARNING("Failed over to bitcoind: %s:%s", cs->url, cs->port);
-		reconnecting = false;
-	}
 
 retry:
 	Close(sockd);
@@ -1698,6 +1696,9 @@ static int server_mode(ckpool_t *ckp, proc_instance_t *pi)
 		si->auth = ckp->btcdauth[i];
 		si->pass = ckp->btcdpass[i];
 		si->notify = ckp->btcdnotify[i];
+		si->id = i;
+		cksem_init(&si->cs.sem);
+		cksem_post(&si->cs.sem);
 	}
 
 	ret = gen_loop(pi);
@@ -1768,12 +1769,13 @@ static int proxy_mode(ckpool_t *ckp, proc_instance_t *pi)
 	return ret;
 }
 
-/* Tell the watchdog what the current server instance is and decide if we
- * should check to see if the higher priority servers are alive and fallback */
+/* Tell the watchdog what the current server instance is, check which servers
+ * are alive, maintaining a connection with them and reconnect if a higher
+ * priority one is available. */
 static void server_watchdog(ckpool_t *ckp, server_instance_t *cursi)
 {
+	server_instance_t *best = NULL;
 	static time_t last_t = 0;
-	bool alive = false;
 	time_t now_t;
 	int i;
 
@@ -1784,22 +1786,14 @@ static void server_watchdog(ckpool_t *ckp, server_instance_t *cursi)
 
 	last_t = now_t;
 
-	/* Is this the highest priority server already? */
-	if (!cursi->id)
-		return;
-
 	for (i = 0; i < ckp->btcds; i++) {
 		server_instance_t *si  = ckp->servers[i];
 
 		/* Have we reached the current server? */
-		if (si == cursi)
-			return;
-
-		alive = server_alive(ckp, si, true);
-		if (alive)
-			break;
+		if (server_alive(ckp, si, true) && !best)
+			best = si;
 	}
-	if (alive)
+	if (best && (!cursi || cursi->id > best->id))
 		send_proc(ckp->generator, "reconnect");
 }
 

@@ -586,7 +586,7 @@ extern void _k_insert_after(K_LIST *list, K_ITEM *item, K_ITEM *after, LOCK_MAYB
 //#define k_insert_after_nolock(_list, _item, _after) _k_insert_after(_list, _item, _after, false, KLIST_FFL_HERE)
 extern void _k_unlink_item(K_LIST *list, K_ITEM *item, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS);
 #define k_unlink_item(_list, _item) _k_unlink_item(_list, _item, true, KLIST_FFL_HERE)
-//#define k_unlink_item_nolock(_list, _item) _k_unlink_item(_list, _item, false, KLIST_FFL_HERE)
+#define k_unlink_item_nolock(_list, _item) _k_unlink_item(_list, _item, false, KLIST_FFL_HERE)
 extern void _k_list_transfer_to_head(K_LIST *from, K_LIST *to, LOCK_MAYBE bool chklock, KLIST_FFL_ARGS);
 #define k_list_transfer_to_head(_from, _to) _k_list_transfer_to_head(_from, _to, true, KLIST_FFL_HERE)
 //#define k_list_transfer_to_head_nolock(_from, _to) _k_list_transfer_to_head(_from, _to, false, KLIST_FFL_HERE)

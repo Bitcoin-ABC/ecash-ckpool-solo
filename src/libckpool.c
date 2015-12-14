@@ -620,13 +620,17 @@ void block_socket(int fd)
 
 void _close(int *fd, const char *file, const char *func, const int line)
 {
+	int sockd;
+
 	if (*fd < 0)
 		return;
-	LOGDEBUG("Closing file handle %d", *fd);
-	if (unlikely(close(*fd)))
-		LOGWARNING("Close of fd %d failed with errno %d:%s from %s %s:%d",
-			   *fd, errno, strerror(errno), file, func, line);
+	sockd = *fd;
+	LOGDEBUG("Closing file handle %d", sockd);
 	*fd = -1;
+	if (unlikely(close(sockd))) {
+		LOGWARNING("Close of fd %d failed with errno %d:%s from %s %s:%d",
+			   sockd, errno, strerror(errno), file, func, line);
+	}
 }
 
 int bind_socket(char *url, char *port)
@@ -1978,6 +1982,8 @@ double diff_from_nbits(char *nbits)
 
 	pow = nbits[0];
 	powdiff = (8 * (0x1d - 3)) - (8 * (pow - 3));
+	if (powdiff < 8)
+		powdiff = 8;
 	diff32 = be32toh(*((uint32_t *)nbits)) & 0x00FFFFFF;
 	numerator = 0xFFFFULL << powdiff;
 	return numerator / (double)diff32;
