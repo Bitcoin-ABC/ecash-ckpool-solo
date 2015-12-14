@@ -839,10 +839,11 @@ out_empty:
 out:
 	if (cs->fd < 0) {
 		/* Attempt to reopen a socket that has been closed due to a
-		 * failed requet or if the socket was closed while trying to
+		 * failed request or if the socket was closed while trying to
 		 * read/write to it. */
-		LOGWARNING("Attempting to reopen socket to %s:%s", cs->url, cs->port);
 		cs->fd = connect_socket(cs->url, cs->port);
+		LOGWARNING("Attempt to reopen socket to %s:%s %ssuccessful",
+			   cs->url, cs->port, cs->fd > 0 ? "" : "un");
 	}
 	free(http_req);
 	dealloc(cs->buf);
