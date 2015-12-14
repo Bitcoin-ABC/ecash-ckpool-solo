@@ -290,7 +290,7 @@ retry:
 	ckmsgq_add(gdata->srvchk, si);
 
 	do {
-		selret = wait_read_select(us->sockd, 5);
+		selret = wait_recv_select(us->sockd, 5);
 		if (!selret && !ping_main(ckp)) {
 			LOGEMERG("Generator failed to ping main process, exiting");
 			ret = 1;
@@ -1632,7 +1632,7 @@ retry:
 	ckmsgq_add(gdata->srvchk, proxi->si);
 
 	do {
-		selret = wait_read_select(us->sockd, 5);
+		selret = wait_recv_select(us->sockd, 5);
 		if (!selret && !ping_main(ckp)) {
 			LOGEMERG("Generator failed to ping main process, exiting");
 			ret = 1;

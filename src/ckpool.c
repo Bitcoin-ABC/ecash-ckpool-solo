@@ -527,7 +527,7 @@ rewait:
 		ret = 0;
 		goto out;
 	}
-	ret = wait_read_select(cs->fd, eom ? 0 : *timeout);
+	ret = wait_recv_select(cs->fd, eom ? 0 : *timeout);
 	if (ret < 1) {
 		if (!ret) {
 			if (eom)

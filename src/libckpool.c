@@ -758,17 +758,15 @@ out:
 
 void empty_socket(int fd)
 {
+	char buf[PAGESIZE];
 	int ret;
 
 	if (fd < 1)
 		return;
 
 	do {
-		char buf[PAGESIZE];
-
-		ret = wait_read_select(fd, 0);
+		ret = recv(fd, buf, PAGESIZE - 1, MSG_DONTWAIT);
 		if (ret > 0) {
-			ret = recv(fd, buf, PAGESIZE - 1, 0);
 			buf[ret] = 0;
 			LOGDEBUG("Discarding: %s", buf);
 		}
@@ -907,21 +905,39 @@ int wait_close(int sockd, int timeout)
 	return sfd.revents & (POLLHUP | POLLRDHUP | POLLERR);
 }
 
-/* Emulate a select read wait for high fds that select doesn't support */
-int wait_read_select(int sockd, float timeout)
+/* Emulate a select read wait for high fds that select doesn't support.
+ * wait_read_select is for unix sockets and _wait_recv_select for regular
+ * sockets. */
+int _wait_read_select(int *sockd, float timeout)
 {
 	struct pollfd sfd;
 	int ret = -1;
 
-	if (unlikely(sockd < 0))
+	if (unlikely(*sockd < 0))
 		goto out;
-	sfd.fd = sockd;
+	sfd.fd = *sockd;
 	sfd.events = POLLIN | POLLRDHUP;
-	sfd.revents = 0;
 	timeout *= 1000;
 	ret = poll(&sfd, 1, timeout);
-	if (ret && !(sfd.revents & POLLIN))
-		ret = -1;
+	if (ret > 0 && sfd.revents & (POLLERR))
+		_Close(sockd);
+out:
+	return ret;
+}
+
+int _wait_recv_select(int *sockd, float timeout)
+{
+	struct pollfd sfd;
+	int ret = -1;
+
+	if (unlikely(*sockd < 0))
+		goto out;
+	sfd.fd = *sockd;
+	sfd.events = POLLIN | POLLRDHUP;
+	timeout *= 1000;
+	ret = poll(&sfd, 1, timeout);
+	if (ret > 0 && sfd.revents & (POLLHUP | POLLRDHUP | POLLERR))
+		_Close(sockd);
 out:
 	return ret;
 }
