@@ -213,8 +213,9 @@ retry:
 	 * without blocking on server_alive() */
 	for (i = 0; i < ckp->btcds; i++) {
 		server_instance_t *si = ckp->servers[i];
+		cs = &si->cs;
 
-		if (si->alive) {
+		if (si->alive && cs->fd > 0) {
 			alive = si;
 			goto living;
 		}
