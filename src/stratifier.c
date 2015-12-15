@@ -1011,10 +1011,10 @@ static void broadcast_ping(sdata_t *sdata);
 static void *do_update(void *arg)
 {
 	struct update_req *ur = (struct update_req *)arg;
+	int prio = ur->prio, retries = 0;
 	ckpool_t *ckp = ur->ckp;
 	sdata_t *sdata = ckp->data;
 	bool new_block = false;
-	int prio = ur->prio;
 	bool ret = false;
 	workbase_t *wb;
 	time_t now_t;
@@ -1024,15 +1024,20 @@ static void *do_update(void *arg)
 	pthread_detach(pthread_self());
 	rename_proc("updater");
 
+retry:
 	buf = send_recv_generator(ckp, "getbase", prio);
 	if (unlikely(!buf)) {
 		LOGNOTICE("Get base in update_base delayed due to higher priority request");
 		goto out;
 	}
 	if (unlikely(cmdmatch(buf, "failed"))) {
-		LOGWARNING("Generator returned failure in update_base");
-		goto out;
+		if (retries++ < 5 || prio == GEN_PRIORITY) {
+			LOGWARNING("Generator returned failure in update_base, retry #%d", retries);
+			goto retry;
+		}
 	}
+	if (unlikely(retries))
+		LOGWARNING("Generator succeeded in update_base after retrying");
 
 	wb = ckzalloc(sizeof(workbase_t));
 	wb->ckp = ckp;

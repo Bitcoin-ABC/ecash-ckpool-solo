@@ -504,6 +504,7 @@ int read_socket_line(connsock_t *cs, float *timeout)
 	tv_t start, now;
 	size_t buflen;
 	int ret = -1;
+	bool polled;
 	float diff;
 
 	if (unlikely(cs->fd < 0))
@@ -528,6 +529,7 @@ rewait:
 		goto out;
 	}
 	ret = wait_recv_select(cs->fd, eom ? 0 : *timeout);
+	polled = true;
 	if (ret < 1) {
 		if (!ret) {
 			if (eom)
@@ -551,12 +553,16 @@ rewait:
 			/* No more to read or closed socket after valid message */
 			if (eom)
 				break;
-			/* Have we used up all the timeout yet? */
-			if (*timeout >= 0 && (errno == EAGAIN || errno == EWOULDBLOCK || !ret))
+			/* Have we used up all the timeout yet? If polled is
+			 * set that means poll has said there should be
+			 * something to read and if we get nothing it means the
+			 * socket is closed. */
+			if (!polled && *timeout >= 0 && (errno == EAGAIN || errno == EWOULDBLOCK || !ret))
 				goto rewait;
 			LOGERR("Failed to recv in read_socket_line");
 			goto out;
 		}
+		polled = false;
 		buflen = cs->bufofs + ret + 1;
 		while (42) {
 			newbuf = realloc(cs->buf, buflen);

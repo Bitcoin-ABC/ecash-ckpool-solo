@@ -919,8 +919,10 @@ int _wait_read_select(int *sockd, float timeout)
 	sfd.events = POLLIN | POLLRDHUP;
 	timeout *= 1000;
 	ret = poll(&sfd, 1, timeout);
-	if (ret > 0 && sfd.revents & (POLLERR))
+	if (ret > 0 && sfd.revents & (POLLERR)) {
+		ret = -1;
 		_Close(sockd);
+	}
 out:
 	return ret;
 }
@@ -936,8 +938,12 @@ int _wait_recv_select(int *sockd, float timeout)
 	sfd.events = POLLIN | POLLRDHUP;
 	timeout *= 1000;
 	ret = poll(&sfd, 1, timeout);
-	if (ret > 0 && sfd.revents & (POLLHUP | POLLRDHUP | POLLERR))
+	/* If POLLRDHUP occurs, we may still have data to read so let recv()
+	 * after this determine if the socket can still be used. */
+	if (ret > 0 && sfd.revents & (POLLHUP | POLLERR)) {
+		ret = -1;
 		_Close(sockd);
+	}
 out:
 	return ret;
 }

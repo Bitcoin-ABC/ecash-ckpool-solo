@@ -54,7 +54,7 @@ bool validate_address(connsock_t *cs, const char *address)
 	snprintf(rpc_req, 128, "{\"method\": \"validateaddress\", \"params\": [\"%s\"]}\n", address);
 	val = json_rpc_call(cs, rpc_req);
 	if (!val) {
-		LOGERR("Failed to get valid json response to validate_address");
+		LOGERR("%s:%s Failed to get valid json response to validate_address", cs->url, cs->port);
 		return ret;
 	}
 	res_val = json_object_get(val, "result");
@@ -194,7 +194,7 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 
 	val = json_rpc_call(cs, gbt_req);
 	if (!val) {
-		LOGWARNING("Failed to get valid json response to getblocktemplate");
+		LOGWARNING("%s:%s Failed to get valid json response to getblocktemplate", cs->url, cs->port);
 		return ret;
 	}
 	res_val = json_object_get(val, "result");
@@ -299,7 +299,7 @@ int get_blockcount(connsock_t *cs)
 
 	val = json_rpc_call(cs, blockcount_req);
 	if (!val) {
-		LOGWARNING("Failed to get valid json response to getblockcount");
+		LOGWARNING("%s:%s Failed to get valid json response to getblockcount", cs->url, cs->port);
 		return ret;
 	}
 	res_val = json_object_get(val, "result");
@@ -325,7 +325,7 @@ bool get_blockhash(connsock_t *cs, int height, char *hash)
 	sprintf(rpc_req, "{\"method\": \"getblockhash\", \"params\": [%d]}\n", height);
 	val = json_rpc_call(cs, rpc_req);
 	if (!val) {
-		LOGWARNING("Failed to get valid json response to getblockhash");
+		LOGWARNING("%s:%s Failed to get valid json response to getblockhash", cs->url, cs->port);
 		return ret;
 	}
 	res_val = json_object_get(val, "result");
@@ -356,7 +356,7 @@ bool get_bestblockhash(connsock_t *cs, char *hash)
 
 	val = json_rpc_call(cs, bestblockhash_req);
 	if (!val) {
-		LOGWARNING("Failed to get valid json response to getbestblockhash");
+		LOGWARNING("%s:%s Failed to get valid json response to getbestblockhash", cs->url, cs->port);
 		return ret;
 	}
 	res_val = json_object_get(val, "result");
@@ -391,7 +391,7 @@ retry:
 	val = json_rpc_call(cs, rpc_req);
 	dealloc(rpc_req);
 	if (!val) {
-		LOGWARNING("Failed to get valid json response to submitblock");
+		LOGWARNING("%s:%s Failed to get valid json response to submitblock", cs->url, cs->port);
 		if (++retries < 5)
 			goto retry;
 		return ret;
