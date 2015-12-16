@@ -528,7 +528,7 @@ rewait:
 		ret = 0;
 		goto out;
 	}
-	ret = wait_recv_select(cs->fd, eom ? 0 : *timeout);
+	ret = wait_read_select(cs->fd, eom ? 0 : *timeout);
 	polled = true;
 	if (ret < 1) {
 		if (!ret) {

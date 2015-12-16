@@ -16,6 +16,7 @@
 #else
 #include <sys/un.h>
 #endif
+#include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -905,46 +906,18 @@ int wait_close(int sockd, int timeout)
 	return sfd.revents & (POLLHUP | POLLRDHUP | POLLERR);
 }
 
-/* Emulate a select read wait for high fds that select doesn't support.
- * wait_read_select is for unix sockets and _wait_recv_select for regular
- * sockets. */
-int _wait_read_select(int *sockd, float timeout)
+/* Emulate a select read wait for high fds that select doesn't support. */
+int wait_read_select(int sockd, float timeout)
 {
-	struct pollfd sfd;
-	int ret = -1;
+	struct epoll_event event;
+	int epfd, ret;
 
-	if (unlikely(*sockd < 0))
-		goto out;
-	sfd.fd = *sockd;
-	sfd.events = POLLIN | POLLRDHUP;
+	epfd = epoll_create1(EPOLL_CLOEXEC);
+	event.events = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, sockd, &event);
 	timeout *= 1000;
-	ret = poll(&sfd, 1, timeout);
-	if (ret > 0 && sfd.revents & (POLLERR)) {
-		ret = -1;
-		_Close(sockd);
-	}
-out:
-	return ret;
-}
-
-int _wait_recv_select(int *sockd, float timeout)
-{
-	struct pollfd sfd;
-	int ret = -1;
-
-	if (unlikely(*sockd < 0))
-		goto out;
-	sfd.fd = *sockd;
-	sfd.events = POLLIN | POLLRDHUP;
-	timeout *= 1000;
-	ret = poll(&sfd, 1, timeout);
-	/* If POLLRDHUP occurs, we may still have data to read so let recv()
-	 * after this determine if the socket can still be used. */
-	if (ret > 0 && sfd.revents & (POLLHUP | POLLERR)) {
-		ret = -1;
-		_Close(sockd);
-	}
-out:
+	ret = epoll_wait(epfd, &event, 1, timeout);
+	close(epfd);
 	return ret;
 }
 
