@@ -1035,6 +1035,8 @@ retry:
 			LOGWARNING("Generator returned failure in update_base, retry #%d", retries);
 			goto retry;
 		}
+		LOGWARNING("Generator failed in update_base after retrying");
+		goto out;
 	}
 	if (unlikely(retries))
 		LOGWARNING("Generator succeeded in update_base after retrying");
