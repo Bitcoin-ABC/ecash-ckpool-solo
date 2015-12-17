@@ -991,19 +991,15 @@ out:
 /* Emulate a select write wait for high fds that select doesn't support */
 int wait_write_select(int sockd, float timeout)
 {
-	struct pollfd sfd;
-	int ret = -1;
+	struct epoll_event event;
+	int epfd, ret;
 
-	if (unlikely(sockd < 0))
-		goto out;
-	sfd.fd = sockd;
-	sfd.events = POLLOUT | POLLRDHUP;
-	sfd.revents = 0;
+	epfd = epoll_create1(EPOLL_CLOEXEC);
+	event.events = EPOLLOUT | EPOLLRDHUP | EPOLLONESHOT;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, sockd, &event);
 	timeout *= 1000;
-	ret = poll(&sfd, 1, timeout);
-	if (ret && !(sfd.revents & POLLOUT))
-		ret = -1;
-out:
+	ret = epoll_wait(epfd, &event, 1, timeout);
+	close(epfd);
 	return ret;
 }
 
