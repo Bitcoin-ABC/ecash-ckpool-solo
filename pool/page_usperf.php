@@ -1,8 +1,8 @@
 <?php
 #
-function uspg($nc,$fs)
+function uspg($nc,$ff,$fs)
 {
-$g = "function exf(n,c,xn,x0,x1,y0,y1,ar){if(n==0){var i,st=-1,fi=-1;for(i=0;i<xn;i++){if(st==-1&&ar['lastpayoutstart:'+i]!=''){st=ar['start:'+i]}if(fi==-1&&ar['endmarkextra:'+i].indexOf('Block')==0){fi=ar['end:'+i]}}if(st>=0&&fi>=0){var xs,xf;xs=(st-x0)/(x1-x0);xf=(fi-x0)/(x1-x0);gfs(c,'$fs');gbe(c,xs,0);gln(c,xs,1);gln(c,xf,1);gln(c,xf,0);gle(c);gfl(c)}}}
+$g = "function exf(n,c,xn,x0,x1,y0,y1,ar){if(n==0){var i,st=-1,fi=-1;for(i=0;i<xn;i++){if(st==-1&&ar['lastpayoutstart:'+i]!=''){st=ar['start:'+i]}if(fi==-1&&ar['endmarkextra:'+i].indexOf('Block')==0){fi=ar['end:'+i]}}if(st>=0&&fi>=0){var xs,xf;xs=(st-x0)/(x1-x0);xf=(fi-x0)/(x1-x0);gfs(c,'$fs');gbe(c,xs,0);gln(c,xs,1);gln(c,xf,1);gln(c,xf,0);gle(c);gfl(c);gfz(c,xs,1,0,2,'Last 5Nd Reward \u279c','$ff','left')}}}
 function gdrw(c,d,cbx){gc(c);ghrs(c);gopt(c,cbx);
 gfs(c,'white');gss(c,'#0000c0');glw(c,2);gbd(c);
 var rows=d['rows'],ymin=-1,ymax=0,xmin=-1,xmax=0,tda=[];
@@ -110,7 +110,7 @@ function dousperf($data, $user)
 	$data = str_replace(array("\\","'"), array("\\\\","\\'"), $ans['DATA']);
 	$data .= $fld_sep . 'cols' . $val_sep . $datacols;
 	$pg .= "<script type='text/javascript'>\n";
-	$pg .= uspg($nc,'#fff0f0');
+	$pg .= uspg($nc,'#ff0000','#fff0f0');
 	$pg .= "\nfunction godrw(f){var cbx=[";
 	$comma = '';
 	foreach ($cbx as $nam => $txt)

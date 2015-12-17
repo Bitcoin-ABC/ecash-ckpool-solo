@@ -14,7 +14,16 @@ function dopayout($data, $user)
  if (isset($data['info']['currndiff']))
   $nd = $data['info']['currndiff'];
  $nv = number_format($nd, 1);
- $nvx = number_format($N*$nd, 1);
+ $nvx = '<b>'.number_format($N*$nd, 1).'</b>';
+ $pd = $data['info']['p_hashrate24hr'];
+ $hr = 'is <b>?</b>';
+ $hrt = '<b>?</b>';
+ if ($pd != '?' && $pd != '' && $pd > 0)
+ {
+	$hr = 'for the last day is roughly <b>'.siprefmt($pd,2).'Hs</b>';
+	if ($nd > 0)
+	 $hrt = '<b>'.howmanyhrs($nd * $N / ($pd / pow(2,32)), true, true).'</b>';
+ }
 
  $pg = "<h1>Payouts</h1>
 <table width=75% cellpadding=0 cellspacing=0 border=0><tr><td>
@@ -28,7 +37,16 @@ The $n1 value the pool uses is $t times the network difficulty when the block is
 Transaction fees are included in the miner reward.<br>
 Pool fee is 0.9% of the total.<br><br>
 
-<span class=hdr>How do the payments work?</span><br><br>
+<span class=hdr>PPL${n1}S acts like the reward 'ramps up' when you first start mining.<br>What actually happens?</span><br><br>
+The $n means it takes that long to reward your shares.<br>
+The ramp isn't missing rewards, it's delaying them to reduce variance.<br>
+Each share is rewarded in all the blocks found in the $n after the share.<br>
+That's simply how it reduces variance. Each share's reward is averaged out over the $n after it.<br>
+The pool hash rate $hr which means the $n 'ramp' is roughly $hrt.<br><br>
+
+Continue reading below for more detail about how it works:<br><br>
+
+<span class=hdr>How do the <b>PPL${n1}S</b> payments work?</span><br><br>
 The $n means the pool rewards $t times the expected number of shares, each time a block is found.<br>
 So each share will be paid approximately $ot of it's expected value, in each block it gets a reward,<br>
 but each share is also expected, on average, to be rewarded $t times in blocks found after the share is submitted to the pool.<br>
@@ -48,7 +66,7 @@ A ckpool restart will also end the current shift and start a new shift.<br>
 A network difficulty change will also end the current shift and start a new shift.<br><br>
 
 <span class=hdr>So, what's the $n value?</span><br><br>
-The current Bitcoin network value for $n1d is $nv and thus $n is <b>$nvx</b><br>
+The current Bitcoin network value for $n1d is $nv and thus $n is $nvx<br>
 Bitcoin adjusts the $n1d value every 2016 blocks, which is about every 2 weeks.<br><br>
 When a block is found, the reward process counts back shifts until the total share difficulty included is $n.<br>
 Since shares are summarised into shifts, it will include the full shift at the end of the range counting backwards,<br>

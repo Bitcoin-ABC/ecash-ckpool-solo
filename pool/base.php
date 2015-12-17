@@ -99,7 +99,7 @@ function howlongago($sec)
  return $des;
 }
 #
-function howmanyhrs($tot, $days = false)
+function howmanyhrs($tot, $days = false, $dh = false)
 {
  $sec = round($tot);
  if ($sec < 60)
@@ -118,10 +118,47 @@ function howmanyhrs($tot, $days = false)
 		{
 			$dy = floor($hr / 24);
 			$hr -= $dy * 24;
-			$des = $dy.'d '.$hr.'hr '.$min.'m '.$sec.'s';
+			if ($dh == true)
+			{
+				if ($min >= 30)
+				{
+					$hr++;
+					if ($hr > 23)
+					{
+						$dy++;
+						$hr -= 24;
+					}
+				}
+				$ds = '';
+				if ($dy != 1)
+					$ds = 's';
+				if ($hr == 0)
+					$des = "${dy}day$ds";
+				else
+				{
+					$hs = '';
+					if ($hr != 1)
+						$hs = 's';
+					$des = "${dy}day$ds ${hr}hr$hs";
+				}
+			}
+			else
+				$des = $dy.'d '.$hr.'hr '.$min.'m '.$sec.'s';
 		}
 		else
-			$des = $hr.'hr '.$min.'m '.$sec.'s';
+		{
+			if ($dh == true)
+			{
+				if ($min >= 30)
+					$hr++;
+				$hs = '';
+				if ($hr != 1)
+					$hs = 's';
+				$des = "${hr}hr$hs";
+			}
+			else
+				$des = $hr.'hr '.$min.'m '.$sec.'s';
+		}
 	}
  }
  return $des;

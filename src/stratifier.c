@@ -1024,6 +1024,8 @@ static void *do_update(void *arg)
 	pthread_detach(pthread_self());
 	rename_proc("updater");
 
+	/* Serialise access to getbase to avoid out of order new block notifies */
+	cksem_wait(&sdata->update_sem);
 retry:
 	buf = send_recv_generator(ckp, "getbase", prio);
 	if (unlikely(!buf)) {
@@ -1079,8 +1081,6 @@ retry:
 	json_decref(val);
 	generate_coinbase(ckp, wb);
 
-	/* Serialise access to add_base to avoid out of order new block notifies */
-	cksem_wait(&sdata->update_sem);
 	add_base(ckp, wb, &new_block);
 	/* Reset the update time to avoid stacked low priority notifies. Bring
 	 * forward the next notify in case of a new block. */
@@ -1088,7 +1088,6 @@ retry:
 	if (new_block)
 		now_t -= ckp->update_interval / 2;
 	sdata->update_time = now_t;
-	cksem_post(&sdata->update_sem);
 
 	if (ckp->btcsolo)
 		stratum_broadcast_updates(sdata, new_block);
@@ -1097,6 +1096,8 @@ retry:
 	ret = true;
 	LOGINFO("Broadcast updated stratum base");
 out:
+	cksem_post(&sdata->update_sem);
+
 	/* Send a ping to miners if we fail to get a base to keep them
 	 * connected while bitcoind recovers(?) */
 	if (unlikely(!ret)) {
