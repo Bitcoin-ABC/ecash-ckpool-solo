@@ -137,18 +137,18 @@ struct generator_data {
 
 typedef struct generator_data gdata_t;
 
+/* Use a temporary fd when testing server_alive to avoid races on cs->fd */
 static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 {
 	char *userpass = NULL;
 	bool ret = false;
 	connsock_t *cs;
 	gbtbase_t *gbt;
+	int fd;
 
-	cs = &si->cs;
-	/* Has this server already been reconnected? */
-	if (cs->fd > 0)
+	if (si->alive)
 		return true;
-	si->alive = false;
+	cs = &si->cs;
 	if (!extract_sockaddr(si->url, &cs->url, &cs->port)) {
 		LOGWARNING("Failed to extract address from %s", si->url);
 		return ret;
@@ -163,8 +163,8 @@ static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 		return ret;
 	}
 
-	cs->fd = connect_socket(cs->url, cs->port);
-	if (cs->fd < 0) {
+	fd = connect_socket(cs->url, cs->port);
+	if (fd < 0) {
 		if (!pinging)
 			LOGWARNING("Failed to connect socket to %s:%s !", cs->url, cs->port);
 		return ret;
@@ -185,16 +185,11 @@ static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 		LOGWARNING("Invalid btcaddress: %s !", ckp->btcaddress);
 		goto out;
 	}
-	ret = true;
+	si->alive = ret = true;
+	LOGNOTICE("Server alive: %s:%s", cs->url, cs->port);
 out:
-	if (!ret) {
-		/* Close and invalidate the file handle */
-		Close(cs->fd);
-	} else {
-		si->alive = true;
-		LOGNOTICE("Server alive: %s:%s", cs->url, cs->port);
-		keep_sockalive(cs->fd);
-	}
+	/* Close the file handle */
+	close(fd);
 	return ret;
 }
 
@@ -216,7 +211,7 @@ retry:
 		server_instance_t *si = ckp->servers[i];
 		cs = &si->cs;
 
-		if (si->alive && cs->fd > 0) {
+		if (si->alive) {
 			alive = si;
 			goto living;
 		}
@@ -301,11 +296,10 @@ retry:
 		}
 	} while (selret < 1);
 
-	if (unlikely(cs->fd < 0)) {
+	if (unlikely(!si->alive)) {
 		LOGWARNING("%s:%s Bitcoind socket invalidated, will attempt failover", cs->url, cs->port);
 		goto reconnect;
 	}
-
 	sockd = accept(us->sockd, NULL, NULL);
 	if (sockd < 0) {
 		LOGEMERG("Failed to accept on generator socket");
@@ -329,6 +323,7 @@ retry:
 			LOGWARNING("Failed to get block template from %s:%s",
 				   cs->url, cs->port);
 			send_unix_msg(sockd, "Failed");
+			si->alive = false;
 			goto reconnect;
 		} else {
 			char *s = json_dumps(gbt->json, JSON_NO_UTF8);
@@ -343,6 +338,7 @@ retry:
 		else if (!get_bestblockhash(cs, hash)) {
 			LOGINFO("No best block hash support from %s:%s",
 				cs->url, cs->port);
+			si->alive = false;
 			send_unix_msg(sockd, "failed");
 		} else {
 			send_unix_msg(sockd, hash);
@@ -353,11 +349,13 @@ retry:
 		if (si->notify)
 			send_unix_msg(sockd, "notify");
 		else if ((height = get_blockcount(cs)) == -1) {
+			si->alive = false;
 			send_unix_msg(sockd,  "failed");
 			goto reconnect;
 		} else {
 			LOGDEBUG("Height: %d", height);
 			if (!get_blockhash(cs, height, hash)) {
+				si->alive = false;
 				send_unix_msg(sockd, "failed");
 				goto reconnect;
 			} else {
@@ -1728,6 +1726,8 @@ static int server_mode(ckpool_t *ckp, proc_instance_t *pi)
 
 	ckp->servers = ckalloc(sizeof(server_instance_t *) * ckp->btcds);
 	for (i = 0; i < ckp->btcds; i++) {
+		connsock_t *cs;
+
 		ckp->servers[i] = ckzalloc(sizeof(server_instance_t));
 		si = ckp->servers[i];
 		si->url = ckp->btcdurl[i];
@@ -1735,8 +1735,9 @@ static int server_mode(ckpool_t *ckp, proc_instance_t *pi)
 		si->pass = ckp->btcdpass[i];
 		si->notify = ckp->btcdnotify[i];
 		si->id = i;
-		cksem_init(&si->cs.sem);
-		cksem_post(&si->cs.sem);
+		cs = &si->cs;
+		cksem_init(&cs->sem);
+		cksem_post(&cs->sem);
 	}
 
 	create_pthread(&pth_watchdog, server_watchdog, ckp);
