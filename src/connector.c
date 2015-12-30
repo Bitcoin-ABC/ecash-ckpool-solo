@@ -235,6 +235,7 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 
 	keep_sockalive(fd);
 	noblock_socket(fd);
+	nolinger_socket(fd);
 
 	LOGINFO("Connected new client %d on socket %d to %d active clients from %s:%d",
 		cdata->nfds, fd, no_clients, client->address_name, port);
@@ -341,7 +342,6 @@ static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *c
 			/* We only close the client fd once we're sure there
 			 * are no references to it left to prevent fds being
 			 * reused on new and old clients. */
-			nolinger_socket(client->fd);
 			Close(client->fd);
 			__recycle_client(cdata, client);
 		}
