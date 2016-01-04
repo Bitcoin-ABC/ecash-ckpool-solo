@@ -38,5 +38,5 @@ if WANT_CKDB
 bin_PROGRAMS += ckdb
 ckdb_SOURCES = ckdb.c ckdb_cmd.c ckdb_data.c ckdb_dbio.c ckdb_btc.c \
 		ckdb_crypt.c ckdb.h klist.c ktree.c klist.h ktree.h
-ckdb_LDADD = libckpool.a @JANSSON_LIBS@ @DB_LIBS@ @LIBS@ $(native_objs)
+ckdb_LDADD = libckpool.a @JANSSON_LIBS@ @LIBS@
 endif

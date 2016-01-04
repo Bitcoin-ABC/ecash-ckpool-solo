@@ -86,22 +86,28 @@ AC_ARG_WITH([ckdb],
 	[ckdb=$withval]
 	)
 
+AC_SEARCH_LIBS(exp, m, , echo "Error: Required library math not found." && exit 1)
+AC_SEARCH_LIBS(pthread_mutex_trylock, pthread, , "Error: Required library pthreads not found." && exit 1)
+
 if test "x$ckdb" != "xno"; then
-	AC_CHECK_LIB([pq], [main],[PQ=-lpq],echo "Error: Required library pq
+	AC_SEARCH_LIBS(PQdb, pq, , echo "Error: Required library pq
 		not found. Install it or disable postgresql support with --without-ckdb" && exit 1)
-	AC_CHECK_LIB([gsl], [main],[GSL=-lgsl],echo "Error: Required libraries gsl and gslcblas
-		not found. Install them or disable support with --without-ckdb" && exit 1,[-lgslcblas])
-	AC_CHECK_LIB([ssl], [main],[SSL=-lssl],echo "Error: Required libraries ssl and crypto
-		not found. Install them or disable support with --without-ckdb" && exit 1,[-lcrypto])
+	AC_SEARCH_LIBS(BN_init, crypto, , echo "Error: Required library crypto
+		not found. Install them or disable support with --without-ckdb" && exit 1)
+	AC_SEARCH_LIBS(SSL_accept, ssl, , echo "Error: Required libraries ssl
+		not found. Install them or disable support with --without-ckdb" && exit 1)
+	AC_SEARCH_LIBS(cblas_dgemm, gslcblas, ,echo "Error: Required library gslcblas
+		not found. Install them or disable support with --without-ckdb" && exit 1)
+	AC_SEARCH_LIBS(gsl_blas_dgemm, gsl, , echo "Error: Required library gsl
+		not found. Install them or disable support with --without-ckdb" && exit 1)
 	AC_DEFINE([USE_CKDB], [1], [Defined to 1 if ckdb support required])
-	DB_LIBS="-lpq -lgsl -lgslcblas -lssl -lcrypto"
-else
-	DB_LIBS=""
 fi
 AM_CONDITIONAL([WANT_CKDB], [test "x$ckdb" != "xno"])
 AC_SUBST(DB_LIBS)
 
 AC_OUTPUT([Makefile] [src/Makefile])
+
+LDFLAGS="${LDFLAGS} -Wl,--as-needed"
 
 echo
 echo "Compilation............: make (or gmake)"
@@ -109,8 +115,7 @@ echo "  YASM (Intel ASM).....: $YASM"
 echo "  CPPFLAGS.............: $CPPFLAGS"
 echo "  CFLAGS...............: $CFLAGS"
 echo "  LDFLAGS..............: $LDFLAGS"
-echo "  LDADD................: $PTHREAD_LIBS $MATH_LIBS $RT_LIBS $JANSSON_LIBS"
-echo "  db LDADD.............: $DB_LIBS"
+echo "  LDADD................: $LIBS $JANSSON_LIBS"
 echo
 echo "Installation...........: make install (as root if needed, with 'su' or 'sudo')"
 echo "  prefix...............: $prefix"
