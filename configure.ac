@@ -45,6 +45,34 @@ PTHREAD_LIBS="-lpthread"
 MATH_LIBS="-lm"
 RT_LIBS="-lrt"
 
+AC_CHECK_PROG(YASM, yasm, yes)
+AM_CONDITIONAL([HAVE_YASM], [test x$YASM = xyes])
+
+rorx=
+avx1=
+sse4=
+if test x$YASM = xyes; then
+	rorx=`cat /proc/cpuinfo | grep -o -m 1 avx2`
+	if [test x$rorx != xavx2]; then
+		avx1=`cat /proc/cpuinfo | grep -o -m 1 avx`
+		if [test x$avx1 != xavx]; then
+			sse4=`cat /proc/cpuinfo | grep -o -m 1 sse4_1`
+		fi
+	fi
+fi
+AM_CONDITIONAL([HAVE_AVX2], [test x$rorx = xavx2])
+AM_CONDITIONAL([HAVE_AVX1], [test x$avx1 = xavx])
+AM_CONDITIONAL([HAVE_SSE4], [test x$sse4 = xsse4_1])
+if test x$rorx = xavx2; then
+	AC_DEFINE([USE_AVX2], [1], [Use avx2 assembly instructions for sha256])
+fi
+if test x$avx1 = xavx; then
+	AC_DEFINE([USE_AVX1], [1], [Use avx1 assembly instructions for sha256])
+fi
+if test x$sse4 = xsse4_1; then
+	AC_DEFINE([USE_SSE4], [1], [Use sse4 assembly instructions for sha256])
+fi
+
 AC_CONFIG_SUBDIRS([src/jansson-2.6])
 JANSSON_LIBS="jansson-2.6/src/.libs/libjansson.a"
 
@@ -81,6 +109,7 @@ AC_OUTPUT([Makefile] [src/Makefile])
 
 echo
 echo "Compilation............: make (or gmake)"
+echo "  YASM (Intel ASM).....: $YASM"
 echo "  CPPFLAGS.............: $CPPFLAGS"
 echo "  CFLAGS...............: $CFLAGS"
 echo "  LDFLAGS..............: $LDFLAGS"
