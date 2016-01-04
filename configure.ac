@@ -87,16 +87,12 @@ AC_ARG_WITH([ckdb],
 	)
 
 if test "x$ckdb" != "xno"; then
-	AC_CHECK_LIB([pq], [main],[PQ=-lpq],echo "Error: Required library libpq-dev
+	AC_CHECK_LIB([pq], [main],[PQ=-lpq],echo "Error: Required library pq
 		not found. Install it or disable postgresql support with --without-ckdb" && exit 1)
-	AC_CHECK_LIB([gsl], [main],[GSL=-lgsl],echo "Error: Required library gsl-dev
-		not found. Install it or disable support with --without-ckdb" && exit 1)
-	AC_CHECK_LIB([gslcblas], [main],[GSLCBLAS=-lgslcblas],echo "Error: Required library gslcblas
-		not found. Install it or disable support with --without-ckdb" && exit 1)
-	AC_CHECK_LIB([ssl], [main],[SSL=-lssl],echo "Error: Required library ssl
-		not found. Install it or disable support with --without-ckdb" && exit 1)
-	AC_CHECK_LIB([crypto], [main],[SSL=-lcrypto],echo "Error: Required library crypto
-		not found. Install it or disable support with --without-ckdb" && exit 1)
+	AC_CHECK_LIB([gsl], [main],[GSL=-lgsl],echo "Error: Required libraries gsl and gslcblas
+		not found. Install them or disable support with --without-ckdb" && exit 1,[-lgslcblas])
+	AC_CHECK_LIB([ssl], [main],[SSL=-lssl],echo "Error: Required libraries ssl and crypto
+		not found. Install them or disable support with --without-ckdb" && exit 1,[-lcrypto])
 	AC_DEFINE([USE_CKDB], [1], [Defined to 1 if ckdb support required])
 	DB_LIBS="-lpq -lgsl -lgslcblas -lssl -lcrypto"
 else
