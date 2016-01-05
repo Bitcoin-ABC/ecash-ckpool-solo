@@ -195,6 +195,9 @@ struct ckpool_instance {
 	/* Are we running without ckdb */
 	bool standalone;
 
+	/* Are we running in btcsolo mode */
+	bool btcsolo;
+
 	/* Are we running in userproxy mode */
 	bool userproxy;
 

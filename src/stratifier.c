@@ -128,6 +128,8 @@ struct workbase {
 	char *coinb2; // coinbase2
 	uchar *coinb2bin;
 	int coinb2len; // length of above
+	char *coinb3bin; // coinbase3 for variable coinb2len
+	int coinb3len; // length of above
 
 	/* Cached header binary */
 	char headerbin[112];
@@ -157,6 +159,15 @@ struct smsg {
 
 typedef struct smsg smsg_t;
 
+struct userwb {
+	UT_hash_handle hh;
+	int64_t id;
+
+	uchar *coinb2bin; // Coinb2 cointaining this user's address for generation
+	char *coinb2;
+	int coinb2len; // Length of user coinb2
+};
+
 struct user_instance;
 struct worker_instance;
 struct stratum_instance;
@@ -179,8 +190,12 @@ struct user_instance {
 	worker_instance_t *worker_instances;
 
 	int workers;
+	char txnbin[25];
+	int txnlen;
+	struct userwb *userwbs; /* Protected by instance lock */
 
 	double best_diff; /* Best share found by this user */
+	int64_t best_ever; /* Best share ever found by this user */
 
 	int64_t shares;
 	double dsps1; /* Diff shares per second, 1 minute rolling average */
@@ -219,6 +234,7 @@ struct worker_instance {
 	time_t start_time;
 
 	double best_diff; /* Best share found by this worker */
+	int64_t best_ever; /* Best share ever found by this worker */
 	int mindiff; /* User chosen mindiff */
 
 	bool idle;
@@ -463,6 +479,7 @@ struct stratifier_data {
 
 	int stratum_generated;
 	int disconnected_generated;
+	int userwbs_generated;
 	session_t *disconnected_sessions;
 
 	user_instance_t *user_instances;
@@ -508,8 +525,11 @@ struct json_entry {
  * to the log outside of lock */
 static void add_msg_entry(char_entry_t **entries, char **buf)
 {
-	char_entry_t *entry = ckalloc(sizeof(char_entry_t));
+	char_entry_t *entry;
 
+	if (!*buf)
+		return;
+	entry = ckalloc(sizeof(char_entry_t));
 	entry->buf = *buf;
 	*buf = NULL;
 	DL_APPEND(*entries, entry);
@@ -624,25 +644,35 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 	*u64 = htole64(g64);
 	wb->coinb2len += 8;
 
-	wb->coinb2bin[wb->coinb2len++] = sdata->pubkeytxnlen;
-	memcpy(wb->coinb2bin + wb->coinb2len, sdata->pubkeytxnbin, sdata->pubkeytxnlen);
-	wb->coinb2len += sdata->pubkeytxnlen;
+	/* Coinb2 address goes here, takes up 23~25 bytes + 1 byte for length */
 
+	wb->coinb3len = 0;
+	wb->coinb3bin = ckzalloc(256);
 	if (ckp->donvalid) {
-		u64 = (uint64_t *)&wb->coinb2bin[wb->coinb2len];
+		u64 = (uint64_t *)wb->coinb3bin;
 		*u64 = htole64(d64);
-		wb->coinb2len += 8;
+		wb->coinb3len += 8;
 
-		wb->coinb2bin[wb->coinb2len++] = sdata->donkeytxnlen;
-		memcpy(wb->coinb2bin + wb->coinb2len, sdata->donkeytxnbin, sdata->donkeytxnlen);
-		wb->coinb2len += sdata->donkeytxnlen;
+		wb->coinb3bin[wb->coinb3len++] = sdata->donkeytxnlen;
+		memcpy(wb->coinb3bin + wb->coinb3len, sdata->donkeytxnbin, sdata->donkeytxnlen);
+		wb->coinb3len += sdata->donkeytxnlen;
 	}
 
-	wb->coinb2len += 4; // Blank lock
+	wb->coinb3len += 4; // Blank lock
 
-	wb->coinb2 = bin2hex(wb->coinb2bin, wb->coinb2len);
-	LOGDEBUG("Coinb2: %s", wb->coinb2);
-	/* Coinbase 2 complete */
+	if (!ckp->btcsolo) {
+		/* Append the generation address and coinb3 in !solo mode */
+		wb->coinb2bin[wb->coinb2len++] = sdata->pubkeytxnlen;
+		memcpy(wb->coinb2bin + wb->coinb2len, sdata->pubkeytxnbin, sdata->pubkeytxnlen);
+		wb->coinb2len += sdata->pubkeytxnlen;
+		memcpy(wb->coinb2bin + wb->coinb2len, wb->coinb3bin, wb->coinb3len);
+		wb->coinb2len += wb->coinb3len;
+		wb->coinb3len = 0;
+		dealloc(wb->coinb3bin);
+		wb->coinb2 = bin2hex(wb->coinb2bin, wb->coinb2len);
+		LOGDEBUG("Coinb2: %s", wb->coinb2);
+	}
+	/* Coinbases 2 +/- 3 templates complete */
 
 	snprintf(header, 225, "%s%s%s%s%s%s%s",
 		 wb->bbversion, wb->prevhash,
@@ -655,9 +685,31 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 }
 
 static void stratum_broadcast_update(sdata_t *sdata, const workbase_t *wb, bool clean);
+static void stratum_broadcast_updates(sdata_t *sdata, bool clean);
 
-static void clear_workbase(workbase_t *wb)
+static void clear_userwb(sdata_t *sdata, int64_t id)
 {
+	user_instance_t *instance, *tmp;
+
+	ck_wlock(&sdata->instance_lock);
+	HASH_ITER(hh, sdata->user_instances, instance, tmp) {
+		struct userwb *userwb;
+
+		HASH_FIND_I64(instance->userwbs, &id, userwb);
+		if (!userwb)
+			continue;
+		HASH_DEL(instance->userwbs, userwb);
+		free(userwb->coinb2bin);
+		free(userwb->coinb2);
+		free(userwb);
+	}
+	ck_wunlock(&sdata->instance_lock);
+}
+
+static void clear_workbase(ckpool_t *ckp, workbase_t *wb)
+{
+	if (ckp->btcsolo)
+		clear_userwb(ckp->data, wb->id);
 	free(wb->flags);
 	free(wb->txn_data);
 	free(wb->txn_hashes);
@@ -666,6 +718,7 @@ static void clear_workbase(workbase_t *wb)
 	free(wb->coinb1);
 	free(wb->coinb2bin);
 	free(wb->coinb2);
+	free(wb->coinb3bin);
 	json_decref(wb->merkle_array);
 	free(wb);
 }
@@ -856,6 +909,9 @@ static void send_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *wb)
 	char cdfield[64];
 	json_t *val;
 
+	if (CKP_STANDALONE(ckp))
+		return;
+
 	sprintf(cdfield, "%lu,%lu", wb->gentime.tv_sec, wb->gentime.tv_nsec);
 
 	JSON_CPACK(val, "{sI,ss,ss,ss,ss,ss,ss,ss,ss,sI,so,ss,ss,ss,ss}",
@@ -884,6 +940,9 @@ static void send_ageworkinfo(ckpool_t *ckp, const int64_t id)
 	ts_t ts_now;
 	json_t *val;
 
+	if (CKP_STANDALONE(ckp))
+		return;
+
 	ts_realtime(&ts_now);
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
@@ -895,6 +954,45 @@ static void send_ageworkinfo(ckpool_t *ckp, const int64_t id)
 			"createcode", __func__,
 			"createinet", ckp->serverurl[0]);
 	ckdbq_add(ckp, ID_AGEWORKINFO, val);
+}
+
+/* Entered with instance_lock held, make sure wb can't be pulled from us */
+static void __generate_userwb(sdata_t *sdata, workbase_t *wb, user_instance_t *user)
+{
+	struct userwb *userwb;
+	int64_t id = wb->id;
+
+	/* Make sure this user doesn't have this userwb already */
+	HASH_FIND_I64(user->userwbs, &id, userwb);
+	if (unlikely(userwb))
+		return;
+
+	sdata->userwbs_generated++;
+	userwb = ckzalloc(sizeof(struct userwb));
+	userwb->id = id;
+	userwb->coinb2bin = ckalloc(wb->coinb2len + 1 + user->txnlen + wb->coinb3len);
+	memcpy(userwb->coinb2bin, wb->coinb2bin, wb->coinb2len);
+	userwb->coinb2len = wb->coinb2len;
+	userwb->coinb2bin[userwb->coinb2len++] = user->txnlen;
+	memcpy(userwb->coinb2bin + userwb->coinb2len, user->txnbin, user->txnlen);
+	userwb->coinb2len += user->txnlen;
+	memcpy(userwb->coinb2bin + userwb->coinb2len, wb->coinb3bin, wb->coinb3len);
+	userwb->coinb2len += wb->coinb3len;
+	userwb->coinb2 = bin2hex(userwb->coinb2bin, userwb->coinb2len);
+	HASH_ADD_I64(user->userwbs, id, userwb);
+}
+
+static void generate_userwbs(sdata_t *sdata, workbase_t *wb)
+{
+	user_instance_t *instance, *tmp;
+
+	ck_wlock(&sdata->instance_lock);
+	HASH_ITER(hh, sdata->user_instances, instance, tmp) {
+		if (!instance->btcaddress)
+			continue;
+		__generate_userwb(sdata, wb, instance);
+	}
+	ck_wunlock(&sdata->instance_lock);
 }
 
 /* Add a new workbase to the table of workbases. Sdata is the global data in
@@ -959,6 +1057,11 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 	sdata->current_workbase = wb;
 	ck_wunlock(&sdata->workbase_lock);
 
+	/* This wb can't be pulled out from under us so no workbase lock is
+	 * required to generate_userwbs */
+	if (ckp->btcsolo)
+		generate_userwbs(sdata, wb);
+
 	if (*new_block)
 		purge_share_hashtable(sdata, wb->id);
 
@@ -970,7 +1073,7 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 	if (aged) {
 		send_ageworkinfo(ckp, aged->id);
 		age_share_hashtable(sdata, aged->id);
-		clear_workbase(aged);
+		clear_workbase(ckp, aged);
 	}
 }
 
@@ -1119,7 +1222,10 @@ retry:
 
 	if (new_block)
 		LOGNOTICE("Block hash changed to %s", sdata->lastswaphash);
-	stratum_broadcast_update(sdata, wb, new_block);
+	if (ckp->btcsolo)
+		stratum_broadcast_updates(sdata, new_block);
+	else
+		stratum_broadcast_update(sdata, wb, new_block);
 	ret = true;
 	LOGINFO("Broadcast updated stratum base");
 out:
@@ -2691,6 +2797,22 @@ static char *stratifier_stats(ckpool_t *ckp, sdata_t *sdata)
 	json_set_object(val, "workbases", subval);
 
 	ck_rlock(&sdata->instance_lock);
+	if (ckp->btcsolo) {
+		user_instance_t *user, *tmpuser;
+		int subobjects;
+
+		objects = 0;
+		memsize = 0;
+		HASH_ITER(hh, sdata->user_instances, user, tmpuser) {
+			subobjects = HASH_COUNT(user->userwbs);
+			objects += subobjects;
+			memsize += SAFE_HASH_OVERHEAD(user->userwbs) + sizeof(struct userwb) * subobjects;
+		}
+		generated = sdata->userwbs_generated;
+		JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+		json_set_object(val, "userwbs", subval);
+	}
+
 	objects = HASH_COUNT(sdata->user_instances);
 	memsize = SAFE_HASH_OVERHEAD(sdata->user_instances) + sizeof(stratum_instance_t) * objects;
 	JSON_CPACK(subval, "{si,si}", "count", objects, "memory", memsize);
@@ -3921,9 +4043,12 @@ static void read_userstats(ckpool_t *ckp, user_instance_t *user)
 	json_get_int64(&user->last_update.tv_sec, val, "lastupdate");
 	json_get_int64(&user->shares, val, "shares");
 	json_get_double(&user->best_diff, val, "bestshare");
-	LOGINFO("Successfully read user %s stats %f %f %f %f %f %f", user->username,
+	json_get_int64(&user->best_ever, val, "bestever");
+	if (user->best_diff > user->best_ever)
+		user->best_ever = user->best_diff;
+	LOGINFO("Successfully read user %s stats %f %f %f %f %f %f %ld", user->username,
 		user->dsps1, user->dsps5, user->dsps60, user->dsps1440,
-		user->dsps10080, user->best_diff);
+		user->dsps10080, user->best_diff, user->best_ever);
 	json_decref(val);
 	if (user->last_update.tv_sec)
 		tvsec_diff = now.tv_sec - user->last_update.tv_sec - 60;
@@ -3971,10 +4096,13 @@ static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
 	worker->dsps1440 = dsps_from_key(val, "hashrate1d");
 	worker->dsps10080 = dsps_from_key(val, "hashrate7d");
 	json_get_double(&worker->best_diff, val, "bestshare");
+	json_get_int64(&worker->best_ever, val, "bestever");
+	if (worker->best_diff > worker->best_ever)
+		worker->best_ever = worker->best_diff;
 	json_get_int64(&worker->last_update.tv_sec, val, "lastupdate");
 	json_get_int64(&worker->shares, val, "shares");
-	LOGINFO("Successfully read worker %s stats %f %f %f %f %f", worker->workername,
-		worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440, worker->best_diff);
+	LOGINFO("Successfully read worker %s stats %f %f %f %f %f %ld", worker->workername,
+		worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440, worker->best_diff, worker->best_ever);
 	json_decref(val);
 	if (worker->last_update.tv_sec)
 		tvsec_diff = now.tv_sec - worker->last_update.tv_sec - 60;
@@ -4051,6 +4179,13 @@ static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, cons
 	return worker;
 }
 
+/* Braindead check to see if this btcaddress is an M of N script address which
+ * is currently unsupported as a generation address. */
+static bool script_address(const char *btcaddress)
+{
+	return btcaddress[0] == '3';
+}
+
 /* This simply strips off the first part of the workername and matches it to a
  * user or creates a new one. Needs to be entered with client holding a ref
  * count. */
@@ -4096,8 +4231,18 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 
 	if (new_user && !ckp->proxy) {
 		/* Is this a btc address based username? */
-		if (len > 26 && len < 35)
-			user->btcaddress = test_address(ckp, username);
+		if (len > 26 && len < 35) {
+			if (test_address(ckp, username)) {
+				user->btcaddress = true;
+				if (script_address(username)) {
+					user->txnlen = 23;
+					address_to_scripttxn(user->txnbin, username);
+				} else {
+					user->txnlen = 25;
+					address_to_pubkeytxn(user->txnbin, username);
+				}
+			}
+		}
 		LOGNOTICE("Added new user %s%s", username, user->btcaddress ?
 			  " as address based registration" : "");
 	}
@@ -4284,6 +4429,16 @@ static void check_global_user(ckpool_t *ckp, user_instance_t *user, stratum_inst
 	send_generator(ckp, buf, GEN_LAX);
 }
 
+static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean);
+
+static void __update_solo_client(sdata_t *sdata, stratum_instance_t *client, user_instance_t *user_instance)
+{
+	json_t *json_msg;
+
+	json_msg = __user_notify(sdata->current_workbase, user_instance, true);
+	stratum_add_send(sdata, json_msg, client->id, SM_UPDATE);
+}
+
 /* Needs to be entered with client holding a ref count. */
 static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_val,
 			       json_t **err_val, int *errnum)
@@ -4353,9 +4508,10 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 			goto out;
 		}
 	}
-	if (CKP_STANDALONE(ckp))
-		ret = true;
-	else {
+	if (CKP_STANDALONE(ckp)) {
+		if (!ckp->btcsolo || client->user_instance->btcaddress)
+			ret = true;
+	} else {
 		/* Preauth workers for the first 10 minutes after the user is
 		 * first authorised by ckdb to avoid floods of worker auths.
 		 * *errnum is implied zero already so ret will be set true */
@@ -4399,6 +4555,19 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 	/* We can set this outside of lock safely */
 	client->authorising = false;
 out:
+	if (ckp->btcsolo && ret) {
+		sdata_t *sdata = ckp->data;
+
+		/* recursive lock, grab instance first then workbase */
+		ck_wlock(&sdata->instance_lock);
+		ck_rlock(&sdata->workbase_lock);
+		__generate_userwb(sdata, sdata->current_workbase, user);
+		__update_solo_client(sdata, client, user);
+		ck_runlock(&sdata->workbase_lock);
+		ck_wunlock(&sdata->instance_lock);
+
+		stratum_send_diff(sdata, client);
+	}
 	return json_boolean(ret);
 }
 
@@ -4641,26 +4810,54 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	ckdbq_add(ckp, ID_BLOCK, val);
 }
 
+/* Entered with instance_lock held */
+static inline uchar *__user_coinb2(const stratum_instance_t *client, const workbase_t *wb, int *cb2len)
+{
+	struct userwb *userwb;
+	int64_t id;
+
+	if (!client->ckp->btcsolo)
+		goto out_nouserwb;
+
+	id = wb->id;
+	HASH_FIND_I64(client->user_instance->userwbs, &id, userwb);
+	if (unlikely(!userwb))
+		goto out_nouserwb;
+	*cb2len = userwb->coinb2len;
+	return userwb->coinb2bin;
+
+out_nouserwb:
+	*cb2len = wb->coinb2len;
+	return wb->coinb2bin;
+}
+
 /* Needs to be entered with client holding a ref count. */
-static double submission_diff(const stratum_instance_t *client, const workbase_t *wb, const char *nonce2,
+static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, const workbase_t *wb, const char *nonce2,
 			      const uint32_t ntime32, const char *nonce, uchar *hash)
 {
 	unsigned char merkle_root[32], merkle_sha[64];
 	uint32_t *data32, *swap32, benonce32;
 	char *coinbase, data[80];
 	uchar swap[80], hash1[32];
-	int cblen, i;
+	int cblen, i, cb2len;
+	uchar *coinb2bin;
 	double ret;
 
-	coinbase = alloca(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len);
+	/* Leave enough room for 25 byte generation address + length counter */
+	coinbase = alloca(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len + 26 + wb->coinb3len);
 	memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
 	cblen = wb->coinb1len;
 	memcpy(coinbase + cblen, &client->enonce1bin, wb->enonce1constlen + wb->enonce1varlen);
 	cblen += wb->enonce1constlen + wb->enonce1varlen;
 	hex2bin(coinbase + cblen, nonce2, wb->enonce2varlen);
 	cblen += wb->enonce2varlen;
-	memcpy(coinbase + cblen, wb->coinb2bin, wb->coinb2len);
-	cblen += wb->coinb2len;
+
+	ck_rlock(&sdata->instance_lock);
+	coinb2bin = __user_coinb2(client, wb, &cb2len);
+	memcpy(coinbase + cblen, coinb2bin, cb2len);
+	ck_runlock(&sdata->instance_lock);
+
+	cblen += cb2len;
 
 	gen_hash((uchar *)coinbase, merkle_root, cblen);
 	memcpy(merkle_sha, merkle_root, 32);
@@ -4859,7 +5056,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		memcpy(nonce2, tmp, nlen);
 		nonce2[len] = '\0';
 	}
-	sdiff = submission_diff(client, wb, nonce2, ntime32, nonce, hash);
+	sdiff = submission_diff(sdata, client, wb, nonce2, ntime32, nonce, hash);
 	if (sdiff > client->best_diff) {
 		worker_instance_t *worker = client->worker_instance;
 
@@ -4868,8 +5065,12 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 			worker->workername, client->id, sdiff);
 		if (sdiff > worker->best_diff)
 			worker->best_diff = sdiff;
+		if (sdiff > worker->best_ever)
+			worker->best_ever = sdiff;
 		if (sdiff > user->best_diff)
 			user->best_diff = sdiff;
+		if (sdiff > user->best_ever)
+			user->best_ever = sdiff;
 	}
 	bswap_256(sharehash, hash);
 	__bin2hex(hexhash, sharehash, 32);
@@ -5064,6 +5265,57 @@ static void stratum_send_update(sdata_t *sdata, const int64_t client_id, const b
 	stratum_add_send(sdata, json_msg, client_id, SM_UPDATE);
 }
 
+/* Hold instance and workbase lock */
+static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean)
+{
+	int64_t id = wb->id;
+	struct userwb *userwb;
+	json_t *val;
+
+	HASH_FIND_I64(user->userwbs, &id, userwb);
+	if (unlikely(!userwb)) {
+		LOGINFO("Failed to find userwb in __user_notify!");
+		return NULL;
+	}
+
+	JSON_CPACK(val, "{s:[ssssosssb],s:o,s:s}",
+			"params",
+			wb->idstring,
+			wb->prevhash,
+			wb->coinb1,
+			userwb->coinb2,
+			json_deep_copy(wb->merkle_array),
+			wb->bbversion,
+			wb->nbit,
+			wb->ntime,
+			clean,
+			"id", json_null(),
+			"method", "mining.notify");
+	return val;
+}
+
+/* Sends a stratum update with a unique coinb2 for every client. Note locking
+ * order, instance then workbase. */
+static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
+{
+	stratum_instance_t *client, *tmp;
+	json_t *json_msg;
+
+	ck_rlock(&sdata->instance_lock);
+	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
+		if (!client->user_instance)
+			continue;
+
+		ck_rlock(&sdata->workbase_lock);
+		json_msg = __user_notify(sdata->current_workbase, client->user_instance, clean);
+		ck_runlock(&sdata->workbase_lock);
+
+		if (likely(json_msg))
+			stratum_add_send(sdata, json_msg, client->id, SM_UPDATE);
+	}
+	ck_runlock(&sdata->instance_lock);
+}
+
 static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_val, const char *err_msg)
 {
 	json_t *val;
@@ -5077,7 +5329,8 @@ static void update_client(const stratum_instance_t *client, const int64_t client
 {
 	sdata_t *sdata = client->sdata;
 
-	stratum_send_update(sdata, client_id, true);
+	if (!client->ckp->btcsolo)
+		stratum_send_update(sdata, client_id, true);
 	stratum_send_diff(sdata, client);
 }
 
@@ -5171,7 +5424,8 @@ static void suggest_diff(stratum_instance_t *client, const char *method, const j
 static void init_client(sdata_t *sdata, const stratum_instance_t *client, const int64_t client_id)
 {
 	stratum_send_diff(sdata, client);
-	stratum_send_update(sdata, client_id, true);
+	if (!client->ckp->btcsolo)
+		stratum_send_update(sdata, client_id, true);
 }
 
 static void add_mining_node(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *client)
@@ -6102,7 +6356,7 @@ static void *statsupdate(void *arg)
 
 				copy_tv(&worker->last_update, &now);
 
-				JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,sI,sf}",
+				JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,sI,sf,sI}",
 						"hashrate1m", suffix1,
 						"hashrate5m", suffix5,
 						"hashrate1hr", suffix60,
@@ -6110,7 +6364,8 @@ static void *statsupdate(void *arg)
 						"hashrate7d", suffix10080,
 						"lastupdate", now.tv_sec,
 						"shares", worker->shares,
-						"bestshare", worker->best_diff);
+						"bestshare", worker->best_diff,
+						"bestever", worker->best_ever);
 
 				ASPRINTF(&fname, "%s/workers/%s", ckp->logdir, worker->workername);
 				s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL);
@@ -6141,7 +6396,7 @@ static void *statsupdate(void *arg)
 
 			copy_tv(&user->last_update, &now);
 
-			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,si,sI,sf}",
+			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,si,sI,sf,sI}",
 					"hashrate1m", suffix1,
 					"hashrate5m", suffix5,
 					"hashrate1hr", suffix60,
@@ -6150,7 +6405,8 @@ static void *statsupdate(void *arg)
 					"lastupdate", now.tv_sec,
 					"workers", user->workers,
 					"shares", user->shares,
-					"bestshare", user->best_diff);
+					"bestshare", user->best_diff,
+					"bestever", user->best_ever);
 
 			ASPRINTF(&fname, "%s/users/%s", ckp->logdir, user->username);
 			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL);
@@ -6454,13 +6710,6 @@ static void read_poolstats(ckpool_t *ckp)
 		decay_time(&stats->dsps1440, 0, tvsec_diff, DAY);
 		decay_time(&stats->dsps10080, 0, tvsec_diff, WEEK);
 	}
-}
-
-/* Braindead check to see if this btcaddress is an M of N script address which
- * is currently unsupported as a generation address. */
-static bool script_address(const char *btcaddress)
-{
-	return btcaddress[0] == '3';
 }
 
 int stratifier(proc_instance_t *pi)

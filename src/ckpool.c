@@ -1543,6 +1543,7 @@ static void *watchdog(void *arg)
 #ifdef USE_CKDB
 static struct option long_options[] = {
 	{"standalone",	no_argument,		0,	'A'},
+	{"btcsolo",	no_argument,		0,	'B'},
 	{"config",	required_argument,	0,	'c'},
 	{"daemonise",	no_argument,		0,	'D'},
 	{"ckdb-name",	required_argument,	0,	'd'},
@@ -1564,6 +1565,7 @@ static struct option long_options[] = {
 };
 #else
 static struct option long_options[] = {
+	{"btcsolo",	no_argument,		0,	'B'},
 	{"config",	required_argument,	0,	'c'},
 	{"daemonise",	no_argument,		0,	'D'},
 	{"group",	required_argument,	0,	'g'},
@@ -1622,9 +1624,15 @@ int main(int argc, char **argv)
 		ckp.initial_args[ckp.args] = strdup(argv[ckp.args]);
 	ckp.initial_args[ckp.args] = NULL;
 
-	while ((c = getopt_long(argc, argv, "Ac:Dd:g:HhkLl:Nn:PpRS:s:u", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "ABc:Dd:g:HhkLl:Nn:PpRS:s:u", long_options, &i)) != -1) {
 		switch (c) {
 			case 'A':
+				ckp.standalone = true;
+				break;
+			case 'B':
+				if (ckp.proxy)
+					quit(1, "Cannot set both proxy and btcsolo mode");
+				ckp.btcsolo = true;
 				ckp.standalone = true;
 				break;
 			case 'c':
@@ -1789,7 +1797,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	ckp.donaddress = "14BMjogz69qe8hk9thyzbmR5pg34mVKB1e";
+	ckp.donaddress = "1PKN98VN2z5gwSGZvGKS2bj8aADZBkyhkZ";
 	if (!ckp.btcaddress)
 		ckp.btcaddress = ckp.donaddress;
 	if (!ckp.blockpoll)
