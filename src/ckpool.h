@@ -180,6 +180,9 @@ struct ckpool_instance {
 	pthread_t pth_listener;
 	pthread_t pth_watchdog;
 
+	/* Are we running in trusted remote node mode */
+	bool remote;
+
 	/* Are we running in node proxy mode */
 	bool node;
 
@@ -227,6 +230,8 @@ struct ckpool_instance {
 	char **serverurl; // Array of URLs to bind our server/proxy to
 	int serverurls; // Number of server bindings
 	bool *nodeserver; // If this server URL serves node information
+	bool *trusted; // If this server URL accepts trusted remote nodes
+	char *upstream; // Upstream pool in trusted remote mode
 
 	int update_interval; // Seconds between stratum updates
 

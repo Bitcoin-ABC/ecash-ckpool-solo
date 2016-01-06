@@ -1297,6 +1297,7 @@ static bool parse_serverurls(ckpool_t *ckp, const json_t *arr_val)
 	ckp->serverurls = arr_size;
 	ckp->serverurl = ckalloc(sizeof(char *) * arr_size);
 	ckp->nodeserver = ckzalloc(sizeof(bool) * arr_size);
+	ckp->trusted = ckzalloc(sizeof(bool) * arr_size);
 	for (i = 0; i < arr_size; i++) {
 		json_t *val = json_array_get(arr_val, i);
 
@@ -1326,6 +1327,7 @@ static void parse_nodeservers(ckpool_t *ckp, const json_t *arr_val)
 	total_urls = ckp->serverurls + arr_size;
 	ckp->serverurl = realloc(ckp->serverurl, sizeof(char *) * total_urls);
 	ckp->nodeserver = realloc(ckp->nodeserver, sizeof(bool) * total_urls);
+	ckp->trusted = realloc(ckp->trusted, sizeof(bool) * total_urls);
 	for (i = 0, j = ckp->serverurls; j < total_urls; i++, j++) {
 		json_t *val = json_array_get(arr_val, i);
 
@@ -1335,6 +1337,36 @@ static void parse_nodeservers(ckpool_t *ckp, const json_t *arr_val)
 	}
 	ckp->serverurls = total_urls;
 }
+
+static void parse_trusted(ckpool_t *ckp, const json_t *arr_val)
+{
+	int arr_size, i, j, total_urls;
+
+	if (!arr_val)
+		return;
+	if (!json_is_array(arr_val)) {
+		LOGWARNING("Unable to parse trusted server entries as an array");
+		return;
+	}
+	arr_size = json_array_size(arr_val);
+	if (!arr_size) {
+		LOGWARNING("Trusted array empty");
+		return;
+	}
+	total_urls = ckp->serverurls + arr_size;
+	ckp->serverurl = realloc(ckp->serverurl, sizeof(char *) * total_urls);
+	ckp->nodeserver = realloc(ckp->nodeserver, sizeof(bool) * total_urls);
+	ckp->trusted = realloc(ckp->trusted, sizeof(bool) * total_urls);
+	for (i = 0, j = ckp->serverurls; j < total_urls; i++, j++) {
+		json_t *val = json_array_get(arr_val, i);
+
+		if (!_json_get_string(&ckp->serverurl[j], val, "trusted"))
+			LOGWARNING("Invalid trusted server entry number %d", i);
+		ckp->trusted[j] = true;
+	}
+	ckp->serverurls = total_urls;
+}
+
 
 static bool parse_redirecturls(ckpool_t *ckp, const json_t *arr_val)
 {
@@ -1413,6 +1445,9 @@ static void parse_config(ckpool_t *ckp)
 	}
 	arr_val = json_object_get(json_conf, "nodeserver");
 	parse_nodeservers(ckp, arr_val);
+	arr_val = json_object_get(json_conf, "trusted");
+	parse_trusted(ckp, arr_val);
+	json_get_string(&ckp->upstream, json_conf, "upstream");
 	json_get_int64(&ckp->mindiff, json_conf, "mindiff");
 	json_get_int64(&ckp->startdiff, json_conf, "startdiff");
 	json_get_int64(&ckp->maxdiff, json_conf, "maxdiff");
@@ -1559,6 +1594,7 @@ static struct option long_options[] = {
 	{"redirector",	no_argument,		0,	'R'},
 	{"ckdb-sockdir",required_argument,	0,	'S'},
 	{"sockdir",	required_argument,	0,	's'},
+	{"trusted",	no_argument,		0,	't'},
 	{"userproxy",	no_argument,		0,	'u'},
 	{0, 0, 0, 0}
 };
@@ -1578,6 +1614,7 @@ static struct option long_options[] = {
 	{"proxy",	no_argument,		0,	'p'},
 	{"redirector",	no_argument,		0,	'R'},
 	{"sockdir",	required_argument,	0,	's'},
+	{"trusted",	no_argument,		0,	't'},
 	{"userproxy",	no_argument,		0,	'u'},
 	{0, 0, 0, 0}
 };
@@ -1622,7 +1659,7 @@ int main(int argc, char **argv)
 		ckp.initial_args[ckp.args] = strdup(argv[ckp.args]);
 	ckp.initial_args[ckp.args] = NULL;
 
-	while ((c = getopt_long(argc, argv, "Ac:Dd:g:HhkLl:Nn:PpRS:s:u", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "Ac:Dd:g:HhkLl:Nn:PpRS:s:tu", long_options, &i)) != -1) {
 		switch (c) {
 			case 'A':
 				ckp.standalone = true;
@@ -1701,6 +1738,11 @@ int main(int argc, char **argv)
 				break;
 			case 's':
 				ckp.socket_dir = strdup(optarg);
+				break;
+			case 't':
+				if (ckp.proxy)
+					quit(1, "Cannot set a proxy type and trusted remote mode");
+				ckp.remote = true;
 				break;
 			case 'u':
 				if (ckp.proxy || ckp.redirector || ckp.passthrough || ckp.node)
