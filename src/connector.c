@@ -1059,9 +1059,10 @@ static void usend_process(ckpool_t *ckp, char *buf)
 		if (cs->fd > 0) {
 			LOGWARNING("Upstream pool failed, attempting reconnect while caching messages");
 			Close(cs->fd);
-			sleep(5);
-			connect_upstream(cs);
 		}
+		do
+			sleep(5);
+		while (!connect_upstream(cs));
 	}
 out:
 	free(buf);
