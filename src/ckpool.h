@@ -322,6 +322,8 @@ char *_ckdb_msg_call(const ckpool_t *ckp, const char *msg,  const char *file, co
 #define ckdb_msg_call(ckp, msg) _ckdb_msg_call(ckp, msg, __FILE__, __func__, __LINE__)
 
 json_t *json_rpc_call(connsock_t *cs, const char *rpc_req);
+bool send_json_msg(connsock_t *cs, const json_t *json_msg);
+json_t *json_msg_result(const char *msg, json_t **res_val, json_t **err_val);
 
 void childsighandler(const int sig);
 int process_exit(ckpool_t *ckp, const proc_instance_t *pi, int ret);

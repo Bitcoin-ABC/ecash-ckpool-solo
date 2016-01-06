@@ -421,24 +421,6 @@ out:
 	return ret;
 }
 
-/* This is for blocking sends of json messages */
-static bool send_json_msg(connsock_t *cs, const json_t *json_msg)
-{
-	int len, sent;
-	char *s;
-
-	s = json_dumps(json_msg, JSON_ESCAPE_SLASH | JSON_EOL);
-	LOGDEBUG("Sending json msg: %s", s);
-	len = strlen(s);
-	sent = write_socket(cs->fd, s, len);
-	dealloc(s);
-	if (sent != len) {
-		LOGNOTICE("Failed to send %d bytes sent %d in send_json_msg", len, sent);
-		return false;
-	}
-	return true;
-}
-
 static bool connect_proxy(ckpool_t *ckp, connsock_t *cs, proxy_instance_t *proxy)
 {
 	if (cs->fd > 0) {
@@ -465,60 +447,6 @@ static bool connect_proxy(ckpool_t *ckp, connsock_t *cs, proxy_instance_t *proxy
 		}
 	}
 	return true;
-}
-
-/* Decode a string that should have a json message and return just the contents
- * of the result key or NULL. */
-static json_t *json_result(json_t *val)
-{
-	json_t *res_val = NULL, *err_val;
-
-	res_val = json_object_get(val, "result");
-	/* (null) is a valid result while no value is an error, so mask out
-	 * (null) and only handle lack of result */
-	if (json_is_null(res_val))
-		res_val = NULL;
-	else if (!res_val) {
-		char *ss;
-
-		err_val = json_object_get(val, "error");
-		if (err_val)
-			ss = json_dumps(err_val, 0);
-		else
-			ss = strdup("(unknown reason)");
-
-		LOGNOTICE("JSON-RPC decode of json_result failed: %s", ss);
-		free(ss);
-	}
-	return res_val;
-}
-
-/* Return the error value if one exists */
-static json_t *json_errval(json_t *val)
-{
-	json_t *err_val = json_object_get(val, "error");
-
-	return err_val;
-}
-
-/* Parse a string and return the json value it contains, if any, and the
- * result in res_val. Return NULL if no result key is found. */
-static json_t *json_msg_result(char *msg, json_t **res_val, json_t **err_val)
-{
-	json_error_t err;
-	json_t *val;
-
-	*res_val = NULL;
-	val = json_loads(msg, 0, &err);
-	if (!val) {
-		LOGWARNING("Json decode failed(%d): %s", err.line, err.text);
-		goto out;
-	}
-	*res_val = json_result(val);
-	*err_val = json_errval(val);
-
-out:
-	return val;
 }
 
 /* For some reason notify is buried at various different array depths so use

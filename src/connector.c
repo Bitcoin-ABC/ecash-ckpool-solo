@@ -61,6 +61,9 @@ struct client_instance {
 	/* Are we currently sending a blocked message from this client */
 	sender_send_t *sending;
 
+	/* Is this a trusted remote server */
+	bool remote;
+
 	/* Is this the parent passthrough client */
 	bool passthrough;
 
@@ -146,6 +149,10 @@ struct connector_data {
 	redirect_t *redirects;
 	/* What redirect we're currently up to */
 	int redirect;
+
+	/* Pending sends to the upstream server */
+	ckmsgq_t *upstream_sends;
+	connsock_t upstream_cs;
 };
 
 typedef struct connector_data cdata_t;
@@ -979,6 +986,113 @@ static void passthrough_client(cdata_t *cdata, client_instance_t *client)
 	send_client(cdata, client->id, buf);
 }
 
+static void remote_server(cdata_t *cdata, client_instance_t *client)
+{
+	char *buf;
+
+	LOGWARNING("Connector adding client %"PRId64" %s as remote trusted server",
+		   client->id, client->address_name);
+	client->remote = true;
+	ASPRINTF(&buf, "{\"result\": true}\n");
+	send_client(cdata, client->id, buf);
+}
+
+static bool connect_upstream(connsock_t *cs)
+{
+	json_t *req, *val = NULL, *res_val, *err_val;
+	bool res, ret = false;
+	float timeout = 10;
+
+	cs->fd = connect_socket(cs->url, cs->port);
+	if (cs->fd < 0) {
+		LOGWARNING("Failed to connect to upstream server %s:%s", cs->url, cs->port);
+		goto out;
+	}
+	keep_sockalive(cs->fd);
+
+	JSON_CPACK(req, "{ss,s[s]}",
+			"method", "mining.remote",
+			"params", PACKAGE"/"VERSION);
+	res = send_json_msg(cs, req);
+	json_decref(req);
+	if (!res) {
+		LOGWARNING("Failed to send message in connect_upstream");
+		goto out;
+	}
+	if (read_socket_line(cs, &timeout) < 1) {
+		LOGWARNING("Failed to receive line in connect_upstream");
+		goto out;
+	}
+	val = json_msg_result(cs->buf, &res_val, &err_val);
+	if (!val || !res_val) {
+		LOGWARNING("Failed to get a json result in connect_upstream, got: %s",
+			 cs->buf);
+		goto out;
+	}
+	ret = json_is_true(res_val);
+	if (!ret) {
+		LOGWARNING("Denied upstream trusted connection");
+		goto out;
+	}
+	LOGWARNING("Connected to upstream server %s:%s as trusted remote", cs->url, cs->port);
+	ret = true;
+out:
+	return ret;
+}
+
+static void usend_process(ckpool_t *ckp, char *buf)
+{
+	cdata_t *cdata = ckp->data;
+	connsock_t *cs = &cdata->upstream_cs;
+	int len, sent;
+
+	if (unlikely(!buf || !strlen(buf))) {
+		LOGERR("Send empty message to usend_process");
+		goto out;
+	}
+	LOGDEBUG("Sending upstream msg: %s", buf);
+	len = strlen(buf);
+	while (42) {
+		sent = write_socket(cs->fd, buf, len);
+		if (sent == len)
+			break;
+		if (cs->fd > 0) {
+			LOGWARNING("Upstream pool failed, attempting reconnect while caching messages");
+			Close(cs->fd);
+			sleep(5);
+			connect_upstream(cs);
+		}
+	}
+out:
+	free(buf);
+}
+
+static bool setup_upstream(ckpool_t *ckp, cdata_t *cdata)
+{
+	connsock_t *cs = &cdata->upstream_cs;
+	bool ret = false;
+
+	cs->ckp = ckp;
+	if (!ckp->upstream) {
+		LOGEMERG("No upstream server set in remote trusted server mode");
+		goto out;
+	}
+	if (!extract_sockaddr(ckp->upstream, &cs->url, &cs->port)) {
+		LOGEMERG("Failed to extract upstream address from %s", ckp->upstream);
+		goto out;
+	}
+
+	/* Must succeed on initial connect to upstream pool */
+	if (!connect_upstream(cs)) {
+		LOGEMERG("Failed initial connect to upstream server %s:%s", cs->url, cs->port);
+		goto out;
+	}
+	cdata->upstream_sends = create_ckmsgq(ckp, "usender", &usend_process);
+	ret = true;
+out:
+	return ret;
+}
+
 static void process_client_msg(cdata_t *cdata, const char *buf)
 {
 	int64_t client_id;
@@ -1183,6 +1297,21 @@ retry:
 		}
 		passthrough_client(cdata, client);
 		dec_instance_ref(cdata, client);
+	} else if (cmdmatch(buf, "remote")) {
+		client_instance_t *client;
+
+		ret = sscanf(buf, "remote=%"PRId64, &client_id);
+		if (ret < 0) {
+			LOGDEBUG("Connector failed to parse remote command: %s", buf);
+			goto retry;
+		}
+		client = ref_client_by_id(cdata, client_id);
+		if (unlikely(!client)) {
+			LOGINFO("Connector failed to find client id %"PRId64" to add as remote", client_id);
+			goto retry;
+		}
+		remote_server(cdata, client);
+		dec_instance_ref(cdata, client);
 	} else if (cmdmatch(buf, "getxfd")) {
 		int fdno = -1;
 
@@ -1297,6 +1426,10 @@ int connector(proc_instance_t *pi)
 	if (tries)
 		LOGWARNING("Connector successfully bound to socket");
 
+	if (ckp->remote && !setup_upstream(ckp, cdata)) {
+		ret = 1;
+		goto out;
+	}
 	cklock_init(&cdata->lock);
 	cdata->pi = pi;
 	cdata->nfds = 0;

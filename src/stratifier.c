@@ -5241,6 +5241,23 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		return;
 	}
 
+	if (unlikely(cmdmatch(method, "mining.remote"))) {
+		char buf[256];
+
+		/* Add this client as a trusted remote node in the connector and
+		 * drop the client in the stratifier */
+		if (!ckp->trusted[client->server]) {
+			LOGNOTICE("Dropping client %"PRId64" %s trying to authorise as remote node on non trusted server %d",
+				  client_id, client->address, client->server);
+			connector_drop_client(ckp, client_id);
+		} else {
+			snprintf(buf, 255, "remote=%"PRId64, client_id);
+			send_proc(ckp->connector, buf);
+		}
+		drop_client(ckp, sdata, client_id);
+		return;
+	}
+
 	if (unlikely(cmdmatch(method, "mining.node"))) {
 		char buf[256];
 
