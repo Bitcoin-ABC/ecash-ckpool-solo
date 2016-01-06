@@ -2299,7 +2299,7 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 			continue;
 		}
 
-		if (client->node)
+		if (client->node || client->remote)
 			continue;
 
 		/* Test for clients that haven't authed in over a minute and drop them */
@@ -4435,6 +4435,15 @@ static double time_bias(const double tdiff, const double period)
 	return 1.0 - 1.0 / exp(dexp);
 }
 
+static void upstream_shares(ckpool_t *ckp, const char *workername, const int64_t diff)
+{
+	char buf[256];
+
+	sprintf(buf, "upstream={\"method\":\"shares\",\"workername\":\"%s\",\"diff\":%"PRId64"}\n",
+		workername, diff);
+	send_proc(ckp->connector, buf);
+}
+
 /* Needs to be entered with client holding a ref count. */
 static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double diff, const bool valid,
 		       const bool submit)
@@ -4458,6 +4467,9 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	if (valid) {
 		worker->shares += diff;
 		user->shares += diff;
+		/* Send shares to the upstream pool in trusted remote node */
+		if (ckp->remote)
+			upstream_shares(ckp, worker->workername, diff);
 	} else if (!submit)
 		return;
 
@@ -5447,6 +5459,7 @@ static void parse_remote_shares(sdata_t *sdata, json_t *val, const char *buf)
 		return;
 	}
 	user = user_by_workername(sdata, workername);
+	user->authorised = true;
 	worker = get_worker(sdata, user, workername);
 
 	mutex_lock(&sdata->stats_lock);
@@ -5462,7 +5475,7 @@ static void parse_remote_shares(sdata_t *sdata, json_t *val, const char *buf)
 	copy_tv(&worker->last_share, &now_t);
 	worker->idle = false;
 
-	LOGDEBUG("Added %"PRId64" shares to worker %s", diff, workername);
+	LOGINFO("Added %"PRId64" remote shares to worker %s", diff, workername);
 }
 
 static void parse_trusted_msg(sdata_t *sdata, json_t *val, const char *buf)

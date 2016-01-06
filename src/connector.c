@@ -1229,6 +1229,12 @@ retry:
 	 * so look for them first. */
 	if (likely(buf[0] == '{')) {
 		process_client_msg(cdata, buf);
+	} else if (cmdmatch(buf, "upstream=")) {
+		char *msg = strdup(buf + 9);
+
+		LOGDEBUG("Upstreaming %s", msg);
+		ckmsgq_add(cdata->upstream_sends, msg);
+		goto retry;
 	} else if (cmdmatch(buf, "dropclient")) {
 		client_instance_t *client;
 
