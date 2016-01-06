@@ -4762,6 +4762,26 @@ static void submit_share(stratum_instance_t *client, const int64_t jobid, const 
 	free(msg);
 }
 
+static void upstream_best_diff(ckpool_t *ckp, const char *workername, const double diff)
+{
+	char buf[256];
+
+	sprintf(buf, "upstream={\"method\":\"bestshare\",\"workername\":\"%s\",\"diff\":%lf}\n",
+		workername, diff);
+	send_proc(ckp->connector, buf);
+}
+
+static void set_best_diff(ckpool_t *ckp, user_instance_t *user, worker_instance_t *worker, const double sdiff)
+{
+	if (sdiff > worker->best_diff) {
+		worker->best_diff = sdiff;
+		if (ckp->remote)
+			upstream_best_diff(ckp, worker->workername, sdiff);
+	}
+	if (sdiff > user->best_diff)
+		user->best_diff = sdiff;
+}
+
 #define JSON_ERR(err) json_string(SHARE_ERR(err))
 
 /* Needs to be entered with client holding a ref count. */
@@ -4881,10 +4901,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		client->best_diff = sdiff;
 		LOGINFO("User %s worker %s client %"PRId64" new best diff %lf", user->username,
 			worker->workername, client->id, sdiff);
-		if (sdiff > worker->best_diff)
-			worker->best_diff = sdiff;
-		if (sdiff > user->best_diff)
-			user->best_diff = sdiff;
+		set_best_diff(ckp, user, worker, sdiff);
 	}
 	bswap_256(sharehash, hash);
 	__bin2hex(hexhash, sharehash, 32);
@@ -5478,7 +5495,32 @@ static void parse_remote_shares(sdata_t *sdata, json_t *val, const char *buf)
 	LOGINFO("Added %"PRId64" remote shares to worker %s", diff, workername);
 }
 
-static void parse_trusted_msg(sdata_t *sdata, json_t *val, const char *buf)
+static void parse_best_remote(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
+{
+	json_t *workername_val = json_object_get(val, "workername");
+	worker_instance_t *worker;
+	const char *workername;
+	user_instance_t *user;
+	double diff;
+
+	workername = json_string_value(workername_val);
+	if (unlikely(!workername_val || !workername)) {
+		LOGWARNING("Failed to get workername from remote message %s", buf);
+		return;
+	}
+	if (unlikely(!json_get_double(&diff, val, "diff") || diff <= 0)) {
+		LOGWARNING("Unable to parse valid diff from remote message %s", buf);
+		return;
+	}
+	user = user_by_workername(sdata, workername);
+	user->authorised = true;
+	worker = get_worker(sdata, user, workername);
+
+	LOGINFO("Checking best diff of %lf for worker %s", diff, workername);
+	set_best_diff(ckp, user, worker, diff);
+}
+
+static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
 {
 	json_t *method_val = json_object_get(val, "method");
 	const char *method;
@@ -5491,6 +5533,10 @@ static void parse_trusted_msg(sdata_t *sdata, json_t *val, const char *buf)
 	}
 	if (likely(!safecmp(method, "shares")))
 		parse_remote_shares(sdata, val, buf);
+	else if (!safecmp(method, "bestshare"))
+		parse_best_remote(ckp, sdata, val, buf);
+	else
+		LOGWARNING("unrecognised trusted message %s", buf);
 }
 
 /* Entered with client holding ref count */
@@ -5688,7 +5734,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 		LOGINFO("Stratifier added instance %"PRId64" server %d", client->id, server);
 
 	if (client->remote)
-		parse_trusted_msg(sdata, msg->json_msg, buf);
+		parse_trusted_msg(ckp, sdata, msg->json_msg, buf);
 	else if (ckp->node)
 		node_client_msg(ckp, msg->json_msg, buf, client);
 	else
