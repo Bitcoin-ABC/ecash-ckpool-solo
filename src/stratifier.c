@@ -6935,12 +6935,11 @@ int stratifier(proc_instance_t *pi)
 	/* Create 1/4 as many stratum processing threads as there are CPUs */
 	if (ckp->node)
 		threads = 1;
-	else {
-		sdata->ssends = create_ckmsgq(ckp, "ssender", &ssend_process);
+	else
 		threads = threads / 2 ? : 1;
-		sdata->sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
-		sdata->stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
-	}
+	sdata->ssends = create_ckmsgq(ckp, "ssender", &ssend_process);
+	sdata->sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
+	sdata->stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
 	sdata->srecvs = create_ckmsgqs(ckp, "sreceiver", &srecv_process, threads);
 	if (!CKP_STANDALONE(ckp)) {
 		sdata->ckdbq = create_ckmsgq(ckp, "ckdbqueue", &ckdbq_process);
