@@ -5829,6 +5829,7 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 {
 	json_t *val = msg->json_msg, *id_val, *method, *params;
 	int64_t client_id = msg->client_id;
+	int delays = 0;
 
 	if (client->reject == 2) {
 		LOGINFO("Dropping client %"PRId64" %s tagged for lazy invalidation",
@@ -5866,6 +5867,14 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 	if (unlikely(!params)) {
 		send_json_err(sdata, client_id, id_val, "-1:params not found");
 		goto out;
+	}
+	/* At startup we block until there's a current workbase otherwise we
+	 * will reject miners with the initialising message. A slightly delayed
+	 * response to subscribe is better tolerated. */
+	while (unlikely(!sdata->current_workbase)) {
+		cksleep_ms(100);
+		if (!(++delays % 50))
+			LOGWARNING("%d Second delay waiting for bitcoind at startup", delays / 10);
 	}
 	parse_method(ckp, sdata, client, client_id, id_val, method, params);
 out:
