@@ -5835,7 +5835,7 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 		LOGINFO("Dropping client %"PRId64" %s tagged for lazy invalidation",
 			client_id, client->address);
 		connector_drop_client(ckp, client_id);
-		goto out;
+		return;
 	}
 
 	/* Return back the same id_val even if it's null or not existent. */
@@ -5854,31 +5854,29 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 			else
 				LOGDEBUG("Received spurious response %s from client %"PRId64,
 					 result ? result : "", client_id);
-			goto out;
+			return;
 		}
 		send_json_err(sdata, client_id, id_val, "-3:method not found");
-		goto out;
+		return;
 	}
 	if (unlikely(!json_is_string(method))) {
 		send_json_err(sdata, client_id, id_val, "-1:method is not string");
-		goto out;
+		return;
 	}
 	params = json_object_get(val, "params");
 	if (unlikely(!params)) {
 		send_json_err(sdata, client_id, id_val, "-1:params not found");
-		goto out;
+		return;
 	}
 	/* At startup we block until there's a current workbase otherwise we
 	 * will reject miners with the initialising message. A slightly delayed
 	 * response to subscribe is better tolerated. */
-	while (unlikely(!sdata->current_workbase)) {
+	while (unlikely(!ckp->proxy && !sdata->current_workbase)) {
 		cksleep_ms(100);
 		if (!(++delays % 50))
 			LOGWARNING("%d Second delay waiting for bitcoind at startup", delays / 10);
 	}
 	parse_method(ckp, sdata, client, client_id, id_val, method, params);
-out:
-	free_smsg(msg);
 }
 
 static void srecv_process(ckpool_t *ckp, char *buf)
@@ -5962,6 +5960,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 		node_client_msg(ckp, msg->json_msg, buf, client);
 	else
 		parse_instance_msg(ckp, sdata, msg, client);
+	free_smsg(msg);
 	dec_instance_ref(sdata, client);
 out:
 	free(buf);
