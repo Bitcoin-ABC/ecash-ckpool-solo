@@ -5492,6 +5492,9 @@ static void parse_remote_shares(sdata_t *sdata, json_t *val, const char *buf)
 	copy_tv(&worker->last_share, &now_t);
 	worker->idle = false;
 
+	decay_user(user, diff, &now_t);
+	copy_tv(&user->last_share, &now_t);
+
 	LOGINFO("Added %"PRId64" remote shares to worker %s", diff, workername);
 }
 
