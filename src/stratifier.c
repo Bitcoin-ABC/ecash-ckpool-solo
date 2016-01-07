@@ -5457,7 +5457,46 @@ out:
 	return ret;
 }
 
-static void parse_remote_shares(sdata_t *sdata, json_t *val, const char *buf)
+static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workername)
+{
+	char *base_username = strdupa(workername), *username;
+	sdata_t *sdata = ckp->data;
+	bool new_user = false;
+	user_instance_t *user;
+	int len;
+
+	username = strsep(&base_username, "._");
+	if (!username || !strlen(username))
+		username = base_username;
+	len = strlen(username);
+	if (unlikely(len > 127))
+		username[127] = '\0';
+
+	ck_wlock(&sdata->instance_lock);
+	HASH_FIND_STR(sdata->user_instances, username, user);
+	if (!user) {
+		/* New user instance. Secondary user id will be NULL */
+		user = __create_user(sdata, username);
+		new_user = true;
+	}
+	ck_wunlock(&sdata->instance_lock);
+
+	if (CKP_STANDALONE(ckp) && new_user)
+		read_userstats(ckp, user);
+
+	if (new_user && !ckp->proxy) {
+		/* Is this a btc address based username? */
+		if (len > 26 && len < 35)
+			user->btcaddress = test_address(ckp, username);
+		LOGNOTICE("Added new remote user %s%s", username, user->btcaddress ?
+			  " as address based registration" : "");
+	}
+
+	return user;
+}
+
+
+static void parse_remote_shares(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
 {
 	json_t *workername_val = json_object_get(val, "workername");
 	worker_instance_t *worker;
@@ -5475,7 +5514,7 @@ static void parse_remote_shares(sdata_t *sdata, json_t *val, const char *buf)
 		LOGWARNING("Unable to parse valid diff from remote message %s", buf);
 		return;
 	}
-	user = user_by_workername(sdata, workername);
+	user = generate_remote_user(ckp, workername);
 	user->authorised = true;
 	worker = get_worker(sdata, user, workername);
 
@@ -5535,7 +5574,7 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const 
 		return;
 	}
 	if (likely(!safecmp(method, "shares")))
-		parse_remote_shares(sdata, val, buf);
+		parse_remote_shares(ckp, sdata, val, buf);
 	else if (!safecmp(method, "bestshare"))
 		parse_best_remote(ckp, sdata, val, buf);
 	else
