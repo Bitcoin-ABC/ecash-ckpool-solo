@@ -5570,7 +5570,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 
 	/* We should only accept subscribed requests from here on */
 	if (!client->subscribed) {
-		LOGINFO("Dropping unsubscribed client %"PRId64" %s", client_id, client->address);
+		LOGINFO("Dropping unsubscribed client %"PRId64" %s requesting method %s",
+			client_id, client->address, method);
 		connector_drop_client(ckp, client_id);
 		return;
 	}
