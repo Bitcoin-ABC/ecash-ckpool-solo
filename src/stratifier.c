@@ -5568,14 +5568,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		return;
 	}
 
-	/* We should only accept subscribed requests from here on */
-	if (!client->subscribed) {
-		LOGINFO("Dropping unsubscribed client %"PRId64" %s requesting method %s",
-			client_id, client->address, method);
-		connector_drop_client(ckp, client_id);
-		return;
-	}
-
+	/* We shouldn't really allow unsubscribed users to authorise first but
+	 * some broken stratum implementations do that and we can handle it. */
 	if (cmdmatch(method, "mining.auth")) {
 		json_params_t *jp;
 
@@ -5586,6 +5580,15 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		}
 		jp = create_json_params(client_id, method_val, params_val, id_val);
 		ckmsgq_add(sdata->sauthq, jp);
+		return;
+	}
+
+	/* We should only accept requests from subscribed and authed users here
+	 * on */
+	if (!client->subscribed) {
+		LOGINFO("Dropping %s from unsubscribed client %"PRId64" %s", method,
+			client_id, client->address);
+		connector_drop_client(ckp, client_id);
 		return;
 	}
 
