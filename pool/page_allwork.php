@@ -23,12 +23,13 @@ function doallwork($data, $user)
  if ($ans['STATUS'] == 'ok')
  {
 	$count = $ans['rows'];
+	$title = NULL;
 	for ($i = 0; $i < $count; $i++)
 	{
 		$pg .= workuser($data, $ans['username:'.$i],
 				$offset, $totshare, $totdiff,
 				$totshrate, $totinvalid, $totrate,
-				$blockacc, $blockreward, 3600);
+				$blockacc, $blockreward, 3600, false, false, $title);
 	}
  }
 

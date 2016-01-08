@@ -834,7 +834,7 @@ int _open_unix_server(const char *server_path, const char *file, const char *fun
 	if (unlikely(ret < 0))
 		LOGERR("Failed to set mode in open_unix_server - continuing");
 
-	ret = listen(sockd, 10);
+	ret = listen(sockd, SOMAXCONN);
 	if (unlikely(ret < 0)) {
 		LOGERR("Failed to listen to socket in open_unix_server");
 		close_unix_socket(sockd, server_path);

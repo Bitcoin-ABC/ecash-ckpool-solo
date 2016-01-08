@@ -98,13 +98,13 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 	if ($srt)
 		usort($all, 'workhashorder');
 
-	for ($i = 0; $i < $count; $i++)
+	foreach ($all as $arow)
 	{
-		$lst = $now - $all[$i]['w_lastshare'];
+		$lst = $now - $arow['w_lastshare'];
 		if ($old !== false && $lst > $old)
 			continue;
 
-		$lstacc = $now - $all[$i]['w_lastshareacc'];
+		$lstacc = $now - $arow['w_lastshareacc'];
 
 		if ((($offset) % 2) == 0)
 			$row = 'even';
@@ -112,18 +112,18 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 			$row = 'odd';
 
 		$pg .= "<tr class=$row>";
-		$pg .= '<td class=dl>'.htmlspecialchars($all[$i]['workername']).'</td>';
-		if ($all[$i]['w_lastdiff'] > 0)
-			$ld = difffmt($all[$i]['w_lastdiff']);
+		$pg .= '<td class=dl>'.htmlspecialchars($arow['workername']).'</td>';
+		if ($arow['w_lastdiff'] > 0)
+			$ld = difffmt($arow['w_lastdiff']);
 		else
 			$ld = '&nbsp;';
 		$pg .= "<td class=dr>$ld</td>";
 
 		$pg .= "<td class=dr data-srt=$lstacc>".howlongago($lstacc).'</td>';
 
-		$shareacc = number_format($all[$i]['w_shareacc'], 0);
-		$totshare += $all[$i]['w_shareacc'];
-		$dacc = $all[$i]['w_diffacc'];
+		$shareacc = number_format($arow['w_shareacc'], 0);
+		$totshare += $arow['w_shareacc'];
+		$dacc = $arow['w_diffacc'];
 		$diffacc = number_format($dacc, 0);
 		$ds = round($dacc);
 		$totdiff += $dacc;
@@ -132,7 +132,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 
 		$acthr = '0';
 		$acthrv = 0;
-		$actstt = $all[$i]['w_active_start'];
+		$actstt = $arow['w_active_start'];
 		if ($actstt <= 0 || ($now - $actstt) < 0)
 			$actsin = '&nbsp;';
 		else
@@ -141,7 +141,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 			$elapsed = $now - $actstt;
 			if ($elapsed > 0)
 			{
-				$acthrv = $all[$i]['w_active_diffacc'] *
+				$acthrv = $arow['w_active_diffacc'] *
 						pow(2,32) / $elapsed;
 				$acthr = dsprate($acthrv);
 				$totshrate += $acthrv;
@@ -150,7 +150,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 		$pg .= "<td class=dr data-srt=$acthrv>$acthr</td>";
 		$pg .= "<td class=dr>$actsin</td>";
 
-		$dinv = $all[$i]['w_diffinv'];
+		$dinv = $arow['w_diffinv'];
 		$dtot = $dacc + $dinv;
 		if ($dtot > 0)
 		{
@@ -168,8 +168,8 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 
 		foreach(array('sta','dup','hi','rej') as $fld)
 		{
-			$shr = number_format($all[$i]['w_share'.$fld]);
-			$dif = $all[$i]['w_diff'.$fld];
+			$shr = number_format($arow['w_share'.$fld]);
+			$dif = $arow['w_diff'.$fld];
 			$ddif = number_format($dif);
 			$sdif = number_format($dif,0,'','');
 			$pg .= "<td class=hid data-srt=$sdif data-hid=dr>$ddif/$shr</td>";
@@ -182,7 +182,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 
 		$pg .= "<td class=dr>$blkpct</td>";
 
-		$uhr = $all[$i]['w_uhr'];
+		$uhr = $arow['w_uhr'];
 		if ($uhr == '?')
 		{
 			$uhr = '?GHs';

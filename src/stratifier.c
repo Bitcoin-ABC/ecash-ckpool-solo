@@ -277,6 +277,7 @@ struct stratum_instance {
 	tv_t last_share;
 	tv_t last_decay;
 	time_t first_invalid; /* Time of first invalid in run of non stale rejects */
+	time_t upstream_invalid; /* As first_invalid but for upstream responses */
 	time_t start_time;
 
 	char address[INET6_ADDRSTRLEN];
@@ -3890,7 +3891,7 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 		/* Create a new extranonce1 based on a uint64_t pointer */
 		if (!new_enonce1(ckp, ckp_sdata, sdata, client)) {
 			stratum_send_message(sdata, client, "Pool full of clients");
-			client->reject = 2;
+			client->reject = 3;
 			return json_string("proxy full");
 		}
 		LOGINFO("Set new subscription %"PRId64" to new enonce1 %lx string %s", client->id,
@@ -5205,18 +5206,24 @@ out:
 		/* Is this the first in a run of invalids? */
 		if (client->first_invalid < client->last_share.tv_sec || !client->first_invalid)
 			client->first_invalid = now_t;
-		else if (client->first_invalid && client->first_invalid < now_t - 120) {
-			LOGNOTICE("Client %"PRId64" rejecting for 120s, disconnecting", client->id);
-			stratum_send_message(sdata, client, "Disconnecting for continuous invalid shares");
+		else if (client->first_invalid && client->first_invalid < now_t - 180 && client->reject < 3) {
+			LOGNOTICE("Client %"PRId64" rejecting for 180s, disconnecting", client->id);
+			if (ckp->node)
+				connector_drop_client(ckp, client->id);
+			else
+				stratum_send_message(sdata, client, "Disconnecting for continuous invalid shares");
+			client->reject = 3;
+		} else if (client->first_invalid && client->first_invalid < now_t - 120 && client->reject < 2) {
+			LOGNOTICE("Client %"PRId64" rejecting for 120s, reconnecting", client->id);
+			stratum_send_message(sdata, client, "Reconnecting for continuous invalid shares");
+			reconnect_client(sdata, client);
 			client->reject = 2;
-		} else if (client->first_invalid && client->first_invalid < now_t - 60) {
-			if (!client->reject) {
-				LOGINFO("Client %"PRId64" rejecting for 60s, sending update", client->id);
-				update_client(client, client->id);
-				client->reject = 1;
-			}
+		} else if (client->first_invalid && client->first_invalid < now_t - 60 && !client->reject) {
+			LOGNOTICE("Client %"PRId64" rejecting for 60s, sending update", client->id);
+			update_client(client, client->id);
+			client->reject = 1;
 		}
-	} else {
+	} else if (client->reject < 3) {
 		client->first_invalid = 0;
 		client->reject = 0;
 	}
@@ -5623,6 +5630,28 @@ static void free_smsg(smsg_t *msg)
 	free(msg);
 }
 
+/* Even though we check the results locally in node mode, check the upstream
+ * results in case of runs of invalids. */
+static void parse_share_result(ckpool_t *ckp, stratum_instance_t *client, json_t *val)
+{
+	time_t now_t;
+	ts_t now;
+
+	if (likely(json_is_true(val))) {
+		client->upstream_invalid = 0;
+		return;
+	}
+	ts_realtime(&now);
+	now_t = now.tv_sec;
+	if (client->upstream_invalid < client->last_share.tv_sec || !client->upstream_invalid)
+		client->upstream_invalid = now_t;
+	else if (client->upstream_invalid && client->upstream_invalid < now_t - 150) {
+		LOGNOTICE("Client %"PRId64" upstream rejects for 150s, disconnecting", client->id);
+		connector_drop_client(ckp, client->id);
+		client->reject = 3;
+	}
+}
+
 static void parse_diff(stratum_instance_t *client, json_t *val)
 {
 	double diff = json_number_value(json_array_get(val, 0));
@@ -5839,6 +5868,9 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, const char *buf, stratum
 			jp = create_json_params(client->id, method, params, id_val);
 			ckmsgq_add(sdata->sshareq, jp);
 			break;
+		case SM_SHARERESULT:
+			parse_share_result(ckp, client, res_val);
+			break;
 		case SM_DIFF:
 			parse_diff(client, params);
 			break;
@@ -5884,7 +5916,7 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 	int64_t client_id = msg->client_id;
 	int delays = 0;
 
-	if (client->reject == 2) {
+	if (client->reject == 3) {
 		LOGINFO("Dropping client %"PRId64" %s tagged for lazy invalidation",
 			client_id, client->address);
 		connector_drop_client(ckp, client_id);
@@ -6981,14 +7013,10 @@ int stratifier(proc_instance_t *pi)
 
 	mutex_init(&sdata->ckdb_lock);
 	mutex_init(&sdata->ckdb_msg_lock);
-	/* Create half as many share processing threads as there are CPUs */
+	/* Create half as many share processing and receiving threads as there
+	 * are CPUs */
 	threads = sysconf(_SC_NPROCESSORS_ONLN) / 2 ? : 1;
 	sdata->sshareq = create_ckmsgqs(ckp, "sprocessor", &sshare_process, threads);
-	/* Create 1/4 as many stratum processing threads as there are CPUs */
-	if (ckp->node)
-		threads = 1;
-	else
-		threads = threads / 2 ? : 1;
 	sdata->ssends = create_ckmsgq(ckp, "ssender", &ssend_process);
 	sdata->sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
 	sdata->stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
