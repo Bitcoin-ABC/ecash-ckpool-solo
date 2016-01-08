@@ -2905,8 +2905,6 @@ static void reconnect_client_id(sdata_t *sdata, const int64_t client_id)
 
 /* API commands */
 
-static user_instance_t *get_user(sdata_t *sdata, const char *username);
-
 static json_t *userinfo(const user_instance_t *user)
 {
 	json_t *val;
@@ -3024,8 +3022,6 @@ out:
 	send_api_response(val, *sockd);
 	_Close(sockd);
 }
-
-static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, const char *workername);
 
 static json_t *workerinfo(const user_instance_t *user, const worker_instance_t *worker)
 {
@@ -4129,18 +4125,31 @@ static user_instance_t *__create_user(sdata_t *sdata, const char *username)
 	return user;
 }
 
+
 /* Find user by username or create one if it doesn't already exist */
-static user_instance_t *get_user(sdata_t *sdata, const char *username)
+static user_instance_t *get_create_user(ckpool_t *ckp, sdata_t *sdata, const char *username, bool *new_user)
 {
 	user_instance_t *user;
 
 	ck_wlock(&sdata->instance_lock);
 	HASH_FIND_STR(sdata->user_instances, username, user);
-	if (unlikely(!user))
+	if (unlikely(!user)) {
 		user = __create_user(sdata, username);
+		*new_user = true;
+	}
 	ck_wunlock(&sdata->instance_lock);
 
+	if (CKP_STANDALONE(ckp) && *new_user)
+		read_userstats(ckp, user);
+
 	return user;
+}
+
+static user_instance_t *get_user(sdata_t *sdata, const char *username)
+{
+	bool dummy;
+
+	return get_create_user(sdata->ckp, sdata, username, &dummy);
 }
 
 static worker_instance_t *__create_worker(user_instance_t *user, const char *workername)
@@ -4169,17 +4178,30 @@ static worker_instance_t *__get_worker(user_instance_t *user, const char *worker
 
 /* Find worker amongst a user's workers by workername or create one if it
  * doesn't yet exist. */
-static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, const char *workername)
+static worker_instance_t *get_create_worker(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user,
+					    const char *workername, bool *new_worker)
 {
 	worker_instance_t *worker;
 
 	ck_wlock(&sdata->instance_lock);
 	worker = __get_worker(user, workername);
-	if (!worker)
+	if (!worker) {
 		worker = __create_worker(user, workername);
+		*new_worker = true;
+	}
 	ck_wunlock(&sdata->instance_lock);
 
+	if (CKP_STANDALONE(ckp) && *new_worker)
+		read_workerstats(ckp, worker);
+
 	return worker;
+}
+
+static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, const char *workername)
+{
+	bool dummy;
+
+	return get_create_worker(sdata->ckp, sdata, user, workername, &dummy);
 }
 
 /* Braindead check to see if this btcaddress is an M of N script address which
@@ -4198,6 +4220,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	char *base_username = strdupa(workername), *username;
 	bool new_user = false, new_worker = false;
 	sdata_t *sdata = ckp->data;
+	worker_instance_t *worker;
 	user_instance_t *user;
 	int len;
 
@@ -4208,29 +4231,17 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	if (unlikely(len > 127))
 		username[127] = '\0';
 
-	ck_wlock(&sdata->instance_lock);
-	HASH_FIND_STR(sdata->user_instances, username, user);
-	if (!user) {
-		/* New user instance. Secondary user id will be NULL */
-		user = __create_user(sdata, username);
-		new_user = true;
-	}
-	client->user_instance = user;
-	client->worker_instance = __get_worker(user, workername);
+	user = get_create_user(ckp, sdata, username, &new_user);
+	worker = get_create_worker(ckp, sdata, user, workername, &new_worker);
+
 	/* Create one worker instance for combined data from workers of the
 	 * same name */
-	if (!client->worker_instance) {
-		client->worker_instance = __create_worker(user, workername);
-		new_worker = true;
-	}
+	ck_wlock(&sdata->instance_lock);
+	client->user_instance = user;
+	client->worker_instance = worker;
 	DL_APPEND(user->clients, client);
 	__inc_worker(sdata,user);
 	ck_wunlock(&sdata->instance_lock);
-
-	if (CKP_STANDALONE(ckp) && new_user)
-		read_userstats(ckp, user);
-	if (CKP_STANDALONE(ckp) && new_worker)
-		read_workerstats(ckp, client->worker_instance);
 
 	if (new_user && !ckp->proxy) {
 		/* Is this a btc address based username? */
@@ -5726,17 +5737,7 @@ static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workerna
 	if (unlikely(len > 127))
 		username[127] = '\0';
 
-	ck_wlock(&sdata->instance_lock);
-	HASH_FIND_STR(sdata->user_instances, username, user);
-	if (!user) {
-		/* New user instance. Secondary user id will be NULL */
-		user = __create_user(sdata, username);
-		new_user = true;
-	}
-	ck_wunlock(&sdata->instance_lock);
-
-	if (CKP_STANDALONE(ckp) && new_user)
-		read_userstats(ckp, user);
+	user = get_create_user(ckp, sdata, username, &new_user);
 
 	if (new_user && !ckp->proxy) {
 		/* Is this a btc address based username? */
