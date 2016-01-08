@@ -4212,6 +4212,7 @@ static bool script_address(const char *btcaddress)
 	return btcaddress[0] == '3';
 }
 
+
 /* This simply strips off the first part of the workername and matches it to a
  * user or creates a new one. Needs to be entered with client holding a ref
  * count. */
