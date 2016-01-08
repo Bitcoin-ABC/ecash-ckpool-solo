@@ -179,6 +179,7 @@ struct user_instance {
 	worker_instance_t *worker_instances;
 
 	int workers;
+	int remote_workers;
 
 	double best_diff; /* Best share found by this user */
 
@@ -5563,6 +5564,28 @@ static void parse_best_remote(ckpool_t *ckp, sdata_t *sdata, json_t *val, const 
 	set_best_diff(ckp, user, worker, diff);
 }
 
+/* Get the remote worker count once per minute from all the remote servers */
+static void parse_remote_workers(sdata_t *sdata, json_t *val, const char *buf)
+{
+	json_t *username_val = json_object_get(val, "username");
+	user_instance_t *user;
+	const char *username;
+	int workers;
+
+	username = json_string_value(username_val);
+	if (unlikely(!username_val || !username)) {
+		LOGWARNING("Failed to get username from remote message %s", buf);
+		return;
+	}
+	user = get_user(sdata, username);
+	if (unlikely(!json_get_int(&workers, val, "workers"))) {
+		LOGWARNING("Failed to get workers from remote message %s", buf);
+		return;
+	}
+	user->remote_workers += workers;
+	LOGDEBUG("Adding %d remote workers to user %s", workers, username);
+}
+
 static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
 {
 	json_t *method_val = json_object_get(val, "method");
@@ -5578,6 +5601,8 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const 
 		parse_remote_shares(ckp, sdata, val, buf);
 	else if (!safecmp(method, "bestshare"))
 		parse_best_remote(ckp, sdata, val, buf);
+	else if (!safecmp(method, "workers"))
+		parse_remote_workers(sdata, val, buf);
 	else
 		LOGWARNING("unrecognised trusted message %s", buf);
 }
@@ -6241,6 +6266,15 @@ static void dump_log_entries(log_entry_t **entries)
 	}
 }
 
+static void upstream_workers(ckpool_t *ckp, user_instance_t *user)
+{
+	char buf[256];
+
+	sprintf(buf, "upstream={\"method\":\"workers\",\"username\":\"%s\",\"workers\":%d}\n",
+		user->username, user->workers);
+	send_proc(ckp->connector, buf);
+}
+
 static void *statsupdate(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
@@ -6367,9 +6401,12 @@ static void *statsupdate(void *arg)
 					"hashrate1d", suffix1440,
 					"hashrate7d", suffix10080,
 					"lastupdate", now.tv_sec,
-					"workers", user->workers,
+					"workers", user->workers + user->remote_workers,
 					"shares", user->shares,
 					"bestshare", user->best_diff);
+
+			/* Reset the remote_workers count once per minute */
+			user->remote_workers = 0;
 
 			ASPRINTF(&fname, "%s/users/%s", ckp->logdir, user->username);
 			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL);
@@ -6381,6 +6418,8 @@ static void *statsupdate(void *arg)
 				add_msg_entry(&char_list, &sp);
 			}
 			json_decref(val);
+			if (ckp->remote)
+				upstream_workers(ckp, user);
 		}
 		ck_runlock(&sdata->instance_lock);
 
