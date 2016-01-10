@@ -15,7 +15,14 @@ function doregres($data, $u)
  else
 	$mail = '';
 
- $pg = makeForm('')."<br>
+ $pg = "<br><span class=urg>WARNING:</span>&nbsp;
+<b>Do not</b> give your username+password to anyone else.<br>
+<b>Do not</b> give your username+password to apps or web sites.<br>
+A monitoring app or web site will <b>ONLY</b> need your username+API key.<br>
+You can setup an API key from the 'Account'->'User Settings' menu page after you login.<br>
+Your miner password should be '<b>x</b>' and <b>must not</b> use your login password.<br>";
+
+ $pg .= makeForm('')."<br>
 <table cellpadding=0 cellspacing=0 border=0><tr>
 <td>User:</td><td><input type=text name=User size=10 value=''></td>
 <td>&nbsp;Pass:</td><td><input type=password name=Pass size=10 value=''></td>

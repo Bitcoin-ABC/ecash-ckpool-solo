@@ -301,6 +301,7 @@ struct stratum_instance {
 	char *useragent;
 	char *workername;
 	char *password;
+	bool messages; /* Is this a client that understands stratum messages */
 	int user_id;
 	int server; /* Which server is this instance bound to */
 
@@ -2420,6 +2421,11 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 
 		if (!client_active(client))
 			continue;
+
+		/* Only send messages to whitelisted clients */
+		if (msg_type == SM_MSG && !client->messages)
+			continue;
+
 		client_msg = ckalloc(sizeof(ckmsg_t));
 		msg = ckzalloc(sizeof(smsg_t));
 		if (passthrough_subclient(client->id))
@@ -2629,12 +2635,23 @@ static json_t *user_stats(const user_instance_t *user)
 	return val;
 }
 
+static void upstream_block(ckpool_t *ckp, const int height, const char *workername,
+			   const double diff)
+{
+	char buf[512];
+
+	snprintf(buf, 511, "upstream={\"method\":\"block\",\"workername\":\"%s\",\"diff\":%lf,\"height\":%d,\"name\":\"%s\"}\n",
+		 workername, diff, height, ckp->name);
+	send_proc(ckp->connector, buf);
+}
+
 static void block_solve(ckpool_t *ckp, const char *blockhash)
 {
 	ckmsg_t *block, *tmp, *found = NULL;
 	char *msg, *workername = NULL;
 	sdata_t *sdata = ckp->data;
 	char cdfield[64];
+	double diff = 0;
 	int height = 0;
 	ts_t ts_now;
 	json_t *val;
@@ -2676,6 +2693,7 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 	json_set_string(val, "createdate", cdfield);
 	json_set_string(val, "createcode", __func__);
 	json_get_int(&height, val, "height");
+	json_get_double(&diff, val, "diff");
 	ckdbq_add(ckp, ID_BLOCK, val);
 	free(found);
 
@@ -2710,6 +2728,8 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 	}
 	stratum_broadcast_message(sdata, msg);
 	free(msg);
+	if (ckp->remote)
+		upstream_block(ckp, height, workername, diff);
 
 	free(workername);
 
@@ -3858,6 +3878,10 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 	} else
 		client->useragent = ckzalloc(1);
 
+	/* Whitelist cgminer based clients to receive stratum messages */
+	if (strcasestr(client->useragent, "gminer"))
+		client->messages = true;
+
 	/* We got what we needed */
 	if (ckp->node)
 		return NULL;
@@ -4602,6 +4626,9 @@ static void stratum_send_message(sdata_t *sdata, const stratum_instance_t *clien
 {
 	json_t *json_msg;
 
+	/* Only send messages to whitelisted clients */
+	if (!client->messages)
+		return;
 	JSON_CPACK(json_msg, "{sosss[s]}", "id", json_null(), "method", "client.show_message",
 			     "params", msg);
 	stratum_add_send(sdata, json_msg, client->id, SM_MSG);
@@ -4617,18 +4644,19 @@ static double time_bias(const double tdiff, const double period)
 	return 1.0 - 1.0 / exp(dexp);
 }
 
-static void upstream_shares(ckpool_t *ckp, const char *workername, const int64_t diff)
+static void upstream_shares(ckpool_t *ckp, const char *workername, const int64_t diff,
+			    const double sdiff)
 {
 	char buf[256];
 
-	sprintf(buf, "upstream={\"method\":\"shares\",\"workername\":\"%s\",\"diff\":%"PRId64"}\n",
-		workername, diff);
+	sprintf(buf, "upstream={\"method\":\"shares\",\"workername\":\"%s\",\"diff\":%"PRId64",\"sdiff\":%lf}\n",
+		workername, diff, sdiff);
 	send_proc(ckp->connector, buf);
 }
 
 /* Needs to be entered with client holding a ref count. */
 static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double diff, const bool valid,
-		       const bool submit)
+		       const bool submit, const double sdiff)
 {
 	sdata_t *ckp_sdata = ckp->data, *sdata = client->sdata;
 	worker_instance_t *worker = client->worker_instance;
@@ -4651,7 +4679,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 		user->shares += diff;
 		/* Send shares to the upstream pool in trusted remote node */
 		if (ckp->remote)
-			upstream_shares(ckp, worker->workername, diff);
+			upstream_shares(ckp, worker->workername, diff, sdiff);
 	} else if (!submit)
 		return;
 
@@ -4828,6 +4856,7 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 			"createcode", __func__,
 			"createinet", ckp->serverurl[client->server]);
 	val_copy = json_deep_copy(val);
+	json_set_double(val_copy, "diff", diff);
 	block_ckmsg = ckalloc(sizeof(ckmsg_t));
 	block_ckmsg->data = val_copy;
 
@@ -4972,28 +5001,29 @@ static void submit_share(stratum_instance_t *client, const int64_t jobid, const 
 	free(msg);
 }
 
-static void upstream_best_diff(ckpool_t *ckp, const char *workername, const double diff)
+static void check_best_diff(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user,
+			    worker_instance_t *worker, const double sdiff, stratum_instance_t *client)
 {
 	char buf[256];
+	bool best_ever = false, best_worker = false, best_user = false;
 
-	sprintf(buf, "upstream={\"method\":\"bestshare\",\"workername\":\"%s\",\"diff\":%lf}\n",
-		workername, diff);
-	send_proc(ckp->connector, buf);
-}
-
-static void set_best_diff(ckpool_t *ckp, user_instance_t *user, worker_instance_t *worker, const double sdiff)
-{
+	if (sdiff > user->best_ever) {
+		user->best_ever = sdiff;
+		best_ever = true;
+	}
 	if (sdiff > worker->best_diff) {
 		worker->best_diff = sdiff;
-		if (ckp->remote)
-			upstream_best_diff(ckp, worker->workername, sdiff);
+		best_worker = true;
 	}
-	if (sdiff > worker->best_ever)
-		worker->best_ever = sdiff;
-	if (sdiff > user->best_diff)
+	if (sdiff > user->best_diff) {
 		user->best_diff = sdiff;
-	if (sdiff > user->best_ever)
-		user->best_ever = sdiff;
+		best_user = true;
+	}
+	if (likely(!CKP_STANDALONE(ckp) || (!best_user && !best_worker) || !client))
+		return;
+	sprintf(buf, "New best %sshare for %s: %lf", best_ever ? "ever " : "",
+		best_user ? "user" : "worker", sdiff);
+	stratum_send_message(sdata, client, buf);
 }
 
 #define JSON_ERR(err) json_string(SHARE_ERR(err))
@@ -5115,7 +5145,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		client->best_diff = sdiff;
 		LOGINFO("User %s worker %s client %"PRId64" new best diff %lf", user->username,
 			worker->workername, client->id, sdiff);
-		set_best_diff(ckp, user, worker, sdiff);
+		check_best_diff(ckp, sdata, user, worker, sdiff, client);
 	}
 	bswap_256(sharehash, hash);
 	__bin2hex(hexhash, sharehash, 32);
@@ -5174,7 +5204,7 @@ out_unlock:
 		submit_share(client, id, nonce2, ntime, nonce);
 	}
 
-	add_submit(ckp, client, diff, result, submit);
+	add_submit(ckp, client, diff, result, submit, sdiff);
 
 	/* Now write to the pool's sharelog. */
 	val = json_object();
@@ -5769,6 +5799,7 @@ static void parse_remote_shares(ckpool_t *ckp, sdata_t *sdata, json_t *val, cons
 	worker_instance_t *worker;
 	const char *workername;
 	user_instance_t *user;
+	double sdiff = 0;
 	int64_t diff;
 	tv_t now_t;
 
@@ -5781,9 +5812,11 @@ static void parse_remote_shares(ckpool_t *ckp, sdata_t *sdata, json_t *val, cons
 		LOGWARNING("Unable to parse valid diff from remote message %s", buf);
 		return;
 	}
+	json_get_double(&sdiff, val, "sdiff");
 	user = generate_remote_user(ckp, workername);
 	user->authorised = true;
 	worker = get_worker(sdata, user, workername);
+	check_best_diff(ckp, sdata, user, worker, sdiff, NULL);
 
 	mutex_lock(&sdata->stats_lock);
 	sdata->stats.unaccounted_shares++;
@@ -5802,31 +5835,6 @@ static void parse_remote_shares(ckpool_t *ckp, sdata_t *sdata, json_t *val, cons
 	copy_tv(&user->last_share, &now_t);
 
 	LOGINFO("Added %"PRId64" remote shares to worker %s", diff, workername);
-}
-
-static void parse_best_remote(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
-{
-	json_t *workername_val = json_object_get(val, "workername");
-	worker_instance_t *worker;
-	const char *workername;
-	user_instance_t *user;
-	double diff;
-
-	workername = json_string_value(workername_val);
-	if (unlikely(!workername_val || !workername)) {
-		LOGWARNING("Failed to get workername from remote message %s", buf);
-		return;
-	}
-	if (unlikely(!json_get_double(&diff, val, "diff") || diff <= 0)) {
-		LOGWARNING("Unable to parse valid diff from remote message %s", buf);
-		return;
-	}
-	user = user_by_workername(sdata, workername);
-	user->authorised = true;
-	worker = get_worker(sdata, user, workername);
-
-	LOGINFO("Checking best diff of %lf for worker %s", diff, workername);
-	set_best_diff(ckp, user, worker, diff);
 }
 
 /* Get the remote worker count once per minute from all the remote servers */
@@ -5851,6 +5859,36 @@ static void parse_remote_workers(sdata_t *sdata, json_t *val, const char *buf)
 	LOGDEBUG("Adding %d remote workers to user %s", workers, username);
 }
 
+static void parse_remote_block(sdata_t *sdata, json_t *val, const char *buf)
+{
+	json_t *workername_val = json_object_get(val, "workername"),
+		*name_val = json_object_get(val, "name");
+	const char *workername, *name;
+	double diff = 0;
+	int height = 0;
+	char *msg;
+
+	workername = json_string_value(workername_val);
+	if (unlikely(!workername_val || !workername)) {
+		LOGWARNING("Failed to get workername from remote message %s", buf);
+		workername = "";
+	}
+	name = json_string_value(name_val);
+	if (unlikely(!name_val || !name)) {
+		LOGWARNING("Failed to get name from remote message %s", buf);
+		name = "";
+	}
+	if (unlikely(!json_get_int(&height, val, "height")))
+		LOGWARNING("Failed to get height from remote message %s", buf);
+	if (unlikely(!json_get_double(&diff, val, "diff")))
+		LOGWARNING("Failed to get diff from remote message %s", buf);
+	ASPRINTF(&msg, "Block %d solved by %s @ %s!", height, workername, name);
+	LOGWARNING("%s", msg);
+	stratum_broadcast_message(sdata, msg);
+	free(msg);
+	reset_bestshares(sdata);
+}
+
 static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
 {
 	json_t *method_val = json_object_get(val, "method");
@@ -5864,10 +5902,10 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const 
 	}
 	if (likely(!safecmp(method, "shares")))
 		parse_remote_shares(ckp, sdata, val, buf);
-	else if (!safecmp(method, "bestshare"))
-		parse_best_remote(ckp, sdata, val, buf);
 	else if (!safecmp(method, "workers"))
 		parse_remote_workers(sdata, val, buf);
+	else if (!safecmp(method, "block"))
+		parse_remote_block(sdata, val, buf);
 	else
 		LOGWARNING("unrecognised trusted message %s", buf);
 }
