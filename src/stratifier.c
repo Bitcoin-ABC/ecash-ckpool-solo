@@ -5011,6 +5011,10 @@ static void check_best_diff(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user
 		user->best_ever = sdiff;
 		best_ever = true;
 	}
+	if (sdiff > worker->best_ever) {
+		worker->best_ever = sdiff;
+		best_ever = true;
+	}
 	if (sdiff > worker->best_diff) {
 		worker->best_diff = sdiff;
 		best_worker = true;
