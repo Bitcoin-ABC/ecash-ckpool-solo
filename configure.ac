@@ -79,6 +79,7 @@ AC_ARG_WITH([ckdb],
 	[ckdb=$withval]
 	)
 
+AC_SEARCH_LIBS(clock_nanosleep, rt, , "Error: Required library rt not found." && exit 1)
 AC_SEARCH_LIBS(exp, m, , echo "Error: Required library math not found." && exit 1)
 AC_SEARCH_LIBS(pthread_mutex_trylock, pthread, , "Error: Required library pthreads not found." && exit 1)
 

@@ -4172,7 +4172,7 @@ static user_instance_t *get_create_user(ckpool_t *ckp, sdata_t *sdata, const cha
 
 static user_instance_t *get_user(sdata_t *sdata, const char *username)
 {
-	bool dummy;
+	bool dummy = false;
 
 	return get_create_user(sdata->ckp, sdata, username, &dummy);
 }
@@ -4224,7 +4224,7 @@ static worker_instance_t *get_create_worker(ckpool_t *ckp, sdata_t *sdata, user_
 
 static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, const char *workername)
 {
-	bool dummy;
+	bool dummy = false;
 
 	return get_create_worker(sdata->ckp, sdata, user, workername, &dummy);
 }
