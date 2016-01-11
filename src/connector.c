@@ -832,7 +832,8 @@ static void test_redirector_shares(ckpool_t *ckp, client_instance_t *client, con
 	int64_t id;
 
 	if (!val) {
-		LOGNOTICE("Invalid json response to client %"PRId64, client->id);
+		/* Can happen when responding to invalid json from client */
+		LOGINFO("Invalid json response to client %"PRId64 "%s", client->id, buf);
 		return;
 	}
 	if (!json_get_int64(&id, val, "id")) {
