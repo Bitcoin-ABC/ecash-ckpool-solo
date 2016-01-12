@@ -220,6 +220,9 @@ struct worker_instance {
 	user_instance_t *user_instance;
 	char *workername;
 
+	/* Number of stratum instances attached as this one worker */
+	int instance_count;
+
 	worker_instance_t *next;
 	worker_instance_t *prev;
 
@@ -1333,18 +1336,20 @@ static void __kill_instance(sdata_t *sdata, stratum_instance_t *client)
 
 /* Called with instance_lock held. Note stats.users is protected by
  * instance lock to avoid recursive locking. */
-static void __inc_worker(sdata_t *sdata, user_instance_t *instance)
+static void __inc_worker(sdata_t *sdata, user_instance_t *user, worker_instance_t *worker)
 {
 	sdata->stats.workers++;
-	if (!instance->workers++)
+	if (!user->workers++)
 		sdata->stats.users++;
+	worker->instance_count++;
 }
 
-static void __dec_worker(sdata_t *sdata, user_instance_t *instance)
+static void __dec_worker(sdata_t *sdata, user_instance_t *user, worker_instance_t *worker)
 {
 	sdata->stats.workers--;
-	if (!--instance->workers)
+	if (!--user->workers)
 		sdata->stats.users--;
+	worker->instance_count--;
 }
 
 static void __disconnect_session(sdata_t *sdata, const stratum_instance_t *client)
@@ -1387,7 +1392,7 @@ static void __del_client(sdata_t *sdata, stratum_instance_t *client)
 	HASH_DEL(sdata->stratum_instances, client);
 	if (user) {
 		DL_DELETE(user->clients, client);
-		__dec_worker(sdata, user);
+		__dec_worker(sdata, user, client->worker_instance);
 	}
 }
 
@@ -4266,7 +4271,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	client->user_instance = user;
 	client->worker_instance = worker;
 	DL_APPEND(user->clients, client);
-	__inc_worker(sdata,user);
+	__inc_worker(sdata,user, worker);
 	ck_wunlock(&sdata->instance_lock);
 
 	if (new_user && !ckp->proxy) {
