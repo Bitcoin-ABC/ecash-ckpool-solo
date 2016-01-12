@@ -6518,11 +6518,12 @@ static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 			ghs5 = worker->dsps5 * nonces;
 			ghs60 = worker->dsps60 * nonces;
 			ghs1440 = worker->dsps1440 * nonces;
-			JSON_CPACK(val, "{ss,si,ss,ss,sf,sf,sf,sf,sb,ss,ss,ss,ss}",
+			JSON_CPACK(val, "{ss,si,ss,ss,si,sf,sf,sf,sf,sb,ss,ss,ss,ss}",
 					"poolinstance", ckp->name,
 					"elapsed", elapsed,
 					"username", user->username,
 					"workername", worker->workername,
+					"instances", worker->instance_count,
 					"hashrate", ghs1,
 					"hashrate5m", ghs5,
 					"hashrate1hr", ghs60,
