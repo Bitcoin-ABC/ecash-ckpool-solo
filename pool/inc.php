@@ -138,7 +138,7 @@ h1 {margin-top:20px;float:middle;font-size:20px;}
 .ft {color:blue;font-size:7px;}
 .ftl {text-align:left;color:blue;font-size:7px;display:inline-block;width:20%;white-space:nowrap;}
 .ftm {text-align:middle;font-size:10pt;display:inline-block;width:60%;white-space:nowrap;}
-.ftr {text-align:rigth;color:blue;font-size:7px;display:inline-block;width:20%;white-space:nowrap;}
+.ftr {text-align:right;color:blue;font-size:7px;display:inline-block;width:20%;white-space:nowrap;}
 ";
  return $h;
 }
