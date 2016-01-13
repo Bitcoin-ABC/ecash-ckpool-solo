@@ -253,6 +253,11 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 				$fmt = $ans[$name];
 				break;
 		}
+		if ($dsp == 'Elapsed Seconds')
+		{
+			$pl = $ans['diffacc_total'] * pow(2,32) / $ans['pplns_elapsed'];
+			$fmt .= ' ' . dsprate($pl);
+		}
 		$pg .= "<td class=dr>$fmt</td>";
 		$pg .= "</tr>\n";
 	}
