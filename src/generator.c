@@ -1717,19 +1717,25 @@ static void *proxy_send(void *arg)
 
 static void passthrough_send(ckpool_t *ckp, pass_msg_t *pm)
 {
+	proxy_instance_t *proxy = pm->proxy;
 	connsock_t *cs = pm->cs;
 	int len, sent;
 
+	if (unlikely(!proxy->alive || cs->fd < 0)) {
+		LOGDEBUG("Dropping send to dead proxy of upstream json msg: %s", pm->msg);
+		goto out;
+	}
 	LOGDEBUG("Sending upstream json msg: %s", pm->msg);
 	len = strlen(pm->msg);
 	sent = write_socket(cs->fd, pm->msg, len);
-	if (unlikely(sent != len && cs->fd)) {
+	if (unlikely(sent != len)) {
 		LOGWARNING("Failed to passthrough %d bytes of message %s, attempting reconnect",
 			   len, pm->msg);
 		Close(cs->fd);
-		pm->proxy->alive = false;
+		proxy->alive = false;
 		reconnect_generator(ckp);
 	}
+out:
 	free(pm->msg);
 	free(pm);
 }
