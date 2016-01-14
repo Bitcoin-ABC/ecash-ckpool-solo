@@ -1111,7 +1111,7 @@ static char *cmd_workerstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	K_ITEM *i_poolinstance, *i_elapsed, *i_username, *i_workername;
 	K_ITEM *i_hashrate, *i_hashrate5m, *i_hashrate1hr, *i_hashrate24hr;
-	K_ITEM *i_idle;
+	K_ITEM *i_idle, *i_instances;
 	bool ok = false, idle;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
@@ -1154,6 +1154,8 @@ static char *cmd_workerstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	idle = (strcasecmp(transfer_data(i_idle), TRUE_STR) == 0);
 
+	i_instances = optional_name(trf_root, "instances", 1, NULL, reply, siz);
+
 	ok = workerstats_add(transfer_data(i_poolinstance),
 			     transfer_data(i_elapsed),
 			     transfer_data(i_username),
@@ -1161,8 +1163,9 @@ static char *cmd_workerstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 			     transfer_data(i_hashrate),
 			     transfer_data(i_hashrate5m),
 			     transfer_data(i_hashrate1hr),
-			     transfer_data(i_hashrate24hr),
-			     idle, by, code, inet, cd, trf_root);
+			     transfer_data(i_hashrate24hr), idle,
+			     i_instances ? transfer_data(i_instances) : NULL,
+			     by, code, inet, cd, trf_root);
 
 	if (!ok) {
 		LOGERR("%s() %s.failed.DATA", __func__, id);
@@ -2089,10 +2092,12 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 					double w_sharehi, w_sharerej;
 					double w_active_diffacc;
 					tv_t w_active_start;
+					int w_instances;
 
 					w_hashrate5m = w_hashrate1hr =
 					w_hashrate24hr = 0.0;
 					w_elapsed = -1;
+					w_instances = NO_INSTANCE_DATA;
 
 					if (!ws_item) {
 						w_lastshare.tv_sec =
@@ -2143,6 +2148,12 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 							w_hashrate24hr += userstats->hashrate24hr;
 							if (w_elapsed == -1 || w_elapsed > userstats->elapsed)
 								w_elapsed = userstats->elapsed;
+							w_instances += userstats->instances;
+							if (userstats->instances != NO_INSTANCE_DATA) {
+								if (w_instances == NO_INSTANCE_DATA)
+									w_instances = 0;
+								w_instances += userstats->instances;
+							}
 						}
 					}
 					K_RUNLOCK(userstats_free);
@@ -2231,6 +2242,9 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 					snprintf(tmp, sizeof(tmp), "w_active_start:%d=%s%c", rows, reply, FLDSEP);
 					APPEND_REALLOC(buf, off, len, tmp);
 
+					int_to_buf(w_instances, reply, sizeof(reply));
+					snprintf(tmp, sizeof(tmp), "w_instances:%d=%s%c", rows, reply, FLDSEP);
+					APPEND_REALLOC(buf, off, len, tmp);
 				}
 				rows++;
 			}
@@ -2251,7 +2265,7 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 		 "w_diffsta,w_diffdup,w_diffhi,w_diffrej,"
 		 "w_shareacc,w_shareinv,"
 		 "w_sharesta,w_sharedup,w_sharehi,w_sharerej,"
-		 "w_active_diffacc,w_active_start" : "",
+		 "w_active_diffacc,w_active_start,w_instances" : "",
 		 FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 

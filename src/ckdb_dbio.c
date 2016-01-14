@@ -6544,6 +6544,7 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 	TXT_TO_DOUBLE("hashrate1hr", hashrate1hr, row->hashrate1hr);
 	TXT_TO_DOUBLE("hashrate24hr", hashrate24hr, row->hashrate24hr);
 	row->idle = idle;
+	row->instances = NO_INSTANCE_DATA;
 	row->summarylevel[0] = SUMMARY_NONE;
 	row->summarylevel[1] = '\0';
 	row->summarycount = 1;
@@ -6612,8 +6613,8 @@ bool userstats_add(char *poolinstance, char *elapsed, char *username,
 bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 			char *workername, char *hashrate, char *hashrate5m,
 			char *hashrate1hr, char *hashrate24hr, bool idle,
-			char *by, char *code, char *inet, tv_t *cd,
-			K_TREE *trf_root)
+			char *instances, char *by, char *code, char *inet,
+			tv_t *cd, K_TREE *trf_root)
 {
 	K_ITEM *us_item, *u_item, *us_match;
 	USERSTATS *row, *match;
@@ -6652,6 +6653,10 @@ bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 	TXT_TO_DOUBLE("hashrate1hr", hashrate1hr, row->hashrate1hr);
 	TXT_TO_DOUBLE("hashrate24hr", hashrate24hr, row->hashrate24hr);
 	row->idle = idle;
+	if (instances)
+		TXT_TO_INT("instances", instances, row->instances);
+	else
+		row->instances = NO_INSTANCE_DATA;
 	row->summarylevel[0] = SUMMARY_NONE;
 	row->summarylevel[1] = '\0';
 	row->summarycount = 1;

@@ -42,7 +42,7 @@ function workhashorder($a, $b)
 function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 			&$totshrate, &$totinvalid, &$totrate, &$blockacc,
 			&$blockreward, $old = false, $srt = false,
-			 $one = false, &$title)
+			 $one = false, &$title, &$instances)
 {
  $ans = getWorkers($user);
 
@@ -93,6 +93,8 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 				'w_active_diffacc' => $ans['w_active_diffacc:'.$i],
 				'w_active_start' => $ans['w_active_start:'.$i],
 				'w_uhr' => $uhr);
+
+		$instances += $ans['w_instances:'.$i];
 	}
 
 	if ($srt)
@@ -205,16 +207,21 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 }
 #
 function worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
-			$totrate, $blockacc, $blockreward)
+			$totrate, $blockacc, $blockreward, $instances)
 {
  $pg = '';
  $totshrate = dsprate($totshrate);
  $totrate = dsprate($totrate);
+# if ($instances >= 0)
+#	$dspinst = " ($instances miners)";
+# else
+	$dspinst = '';
+
  if (($offset % 2) == 0)
 	$row = 'even';
  else
 	$row = 'odd';
- $pg .= "<tr class=$row><td class=dl>Total: $offset</td><td colspan=2 class=dl></td>";
+ $pg .= "<tr class=$row><td class=dl colspan=3>Total: $offset$dspinst</td>";
  $shareacc = number_format($totshare, 0);
  $pg .= "<td class=dr>$shareacc</td>";
  $diffacc = number_format($totdiff, 0);
@@ -250,13 +257,14 @@ function doworker($data, $user)
  $offset = 0;
  $blockacc = 0;
  $blockreward = 0;
+ $instances = 0;
 
  $pg .= worktitle($data, $user);
  $pg .= workuser($data, $user, $offset, $totshare, $totdiff, $totshrate,
 			$totinvalid, $totrate, $blockacc, $blockreward,
-			false, true, true, $title);
+			false, true, true, $title, $instances);
  $pg .= worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
-			$totrate, $blockacc, $blockreward);
+			$totrate, $blockacc, $blockreward, $instances);
 
  if (false && $blockacc > 0 && $blockreward > 0)
  {

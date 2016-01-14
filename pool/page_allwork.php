@@ -16,6 +16,7 @@ function doallwork($data, $user)
  $offset = 0;
  $blockacc = 0;
  $blockreward = 0;
+ $instances = 0;
 
  $pg .= worktitle($data, $user);
 
@@ -29,12 +30,14 @@ function doallwork($data, $user)
 		$pg .= workuser($data, $ans['username:'.$i],
 				$offset, $totshare, $totdiff,
 				$totshrate, $totinvalid, $totrate,
-				$blockacc, $blockreward, 3600, false, false, $title);
+				$blockacc, $blockreward,
+				3600, false, false,
+				$title, $instances);
 	}
  }
 
  $pg .= worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
-		  $totrate, $blockacc, $blockreward);
+		  $totrate, $blockacc, $blockreward, $instances);
 
  $pg .= "</table>\n";
 

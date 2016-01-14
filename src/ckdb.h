@@ -51,7 +51,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.4"
-#define CKDB_VERSION DB_VERSION"-1.913"
+#define CKDB_VERSION DB_VERSION"-1.914"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -1777,6 +1777,7 @@ typedef struct userstats {
 	double hashrate1hr;
 	double hashrate24hr;
 	bool idle; // non-DB field
+	int instances;
 	char summarylevel[TXT_FLAG+1]; // SUMMARY_NONE in RAM
 	int32_t summarycount;
 	tv_t statsdate;
@@ -1799,6 +1800,8 @@ extern K_LIST *userstats_free;
 extern K_STORE *userstats_store;
 // Awaiting EOS
 extern K_STORE *userstats_eos_store;
+
+#define NO_INSTANCE_DATA -1
 
 /* 1.5 x how often we expect to get user's stats from ckpool
  * This is used when grouping the sub-worker stats into a single user
@@ -2629,8 +2632,8 @@ extern bool userstats_add(char *poolinstance, char *elapsed, char *username,
 extern bool workerstats_add(char *poolinstance, char *elapsed, char *username,
 			    char *workername, char *hashrate, char *hashrate5m,
 			    char *hashrate1hr, char *hashrate24hr, bool idle,
-			    char *by, char *code, char *inet, tv_t *cd,
-			    K_TREE *trf_root);
+			    char *instances, char *by, char *code, char *inet,
+			    tv_t *cd, K_TREE *trf_root);
 extern bool userstats_fill(PGconn *conn);
 extern bool markersummary_add(PGconn *conn, K_ITEM *ms_item, char *by, char *code,
 				char *inet, tv_t *cd, K_TREE *trf_root);
