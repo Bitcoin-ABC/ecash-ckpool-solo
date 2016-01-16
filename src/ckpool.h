@@ -76,9 +76,12 @@ struct connsock {
 	char *url;
 	char *port;
 	char *auth;
+
 	char *buf;
 	int bufofs;
 	int buflen;
+	int bufsize;
+
 	ckpool_t *ckp;
 	/* Semaphore used to serialise request/responses */
 	sem_t sem;

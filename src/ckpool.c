@@ -518,9 +518,10 @@ void empty_buffer(connsock_t *cs)
  * only unprocessed data of bufofs length. */
 static void clear_bufline(connsock_t *cs)
 {
-	if (unlikely(!cs->buf))
+	if (unlikely(!cs->buf)) {
 		cs->buf = ckzalloc(PAGESIZE);
-	else if (cs->buflen) {
+		cs->bufsize = PAGESIZE;
+	} else if (cs->buflen) {
 		memmove(cs->buf, cs->buf + cs->bufofs, cs->buflen);
 		memset(cs->buf + cs->buflen, 0, cs->bufofs);
 		cs->bufofs = cs->buflen;
@@ -532,14 +533,16 @@ static void clear_bufline(connsock_t *cs)
 static void add_buflen(connsock_t *cs, const char *readbuf, const int len)
 {
 	int backoff = 1;
-	size_t buflen;
+	int buflen;
 	char *newbuf;
 
 	buflen = round_up_page(cs->bufofs + len + 1);
-	while (42) {
+	while (cs->bufsize < buflen) {
 		newbuf = realloc(cs->buf, buflen);
-		if (likely(newbuf))
+		if (likely(newbuf)) {
+			cs->bufsize = buflen;
 			break;
+		}
 		if (backoff == 1)
 			fprintf(stderr, "Failed to realloc %d in read_socket_line, retrying\n", (int)buflen);
 		cksleep_ms(backoff);
