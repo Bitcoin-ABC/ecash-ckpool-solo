@@ -1930,7 +1930,7 @@ static void *passthrough_recv(void *arg)
 	alive = proxi->alive;
 
 	while (42) {
-		float timeout = 90;
+		float timeout = 5;
 		int ret;
 
 		while (!proxy_alive(ckp, proxi, cs, true)) {
@@ -1943,15 +1943,17 @@ static void *passthrough_recv(void *arg)
 			alive = true;
 		}
 
-		/* Make sure we receive a line within 90 seconds */
 		cksem_wait(&cs->sem);
 		ret = read_socket_line(cs, &timeout);
 		/* Simply forward the message on, as is, to the connector to
 		 * process. Possibly parse parameters sent by upstream pool
 		 * here */
 		if (likely(ret > 0)) {
-			LOGDEBUG("Received upstream msg: %s", cs->buf);
-			send_proc(ckp->connector, cs->buf);
+			if (strchr(cs->buf, '\n')) {
+				LOGDEBUG("Passthrough recv received upstream msg: %s", cs->buf);
+				send_proc(ckp->connector, cs->buf);
+			} else
+				LOGDEBUG("Passthrough recv received partial message");
 		} else if (ret < 0) {
 			/* Read failure */
 			LOGWARNING("Passthrough %d:%s failed to read_socket_line in passthrough_recv, attempting reconnect",
