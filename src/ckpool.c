@@ -534,13 +534,14 @@ static void add_buflen(connsock_t *cs, const char *readbuf, const int len)
 {
 	int backoff = 1;
 	int buflen;
-	char *newbuf;
 
 	buflen = round_up_page(cs->bufofs + len + 1);
 	while (cs->bufsize < buflen) {
-		newbuf = realloc(cs->buf, buflen);
+		char *newbuf = realloc(cs->buf, buflen);
+
 		if (likely(newbuf)) {
 			cs->bufsize = buflen;
+			cs->buf = newbuf;
 			break;
 		}
 		if (backoff == 1)
@@ -548,9 +549,6 @@ static void add_buflen(connsock_t *cs, const char *readbuf, const int len)
 		cksleep_ms(backoff);
 		backoff <<= 1;
 	}
-	cs->buf = newbuf;
-	if (unlikely(!cs->buf))
-		quit(1, "Failed to alloc buf of %d bytes in read_socket_line", (int)buflen);
 	memcpy(cs->buf + cs->bufofs, readbuf, len);
 	cs->bufofs += len;
 	cs->buf[cs->bufofs] = '\0';
