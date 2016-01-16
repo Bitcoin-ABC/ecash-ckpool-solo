@@ -515,7 +515,7 @@ void empty_buffer(connsock_t *cs)
 /* If there is any cs->buflen it implies a full line was received on the last
  * pass through read_socket_line and subsequently processed, leaving
  * unprocessed data beyond cs->bufofs. Otherwise a zero buflen means there is
- * only unprocessed data of bufos length. */
+ * only unprocessed data of bufofs length. */
 static void clear_bufline(connsock_t *cs)
 {
 	if (unlikely(!cs->buf))
