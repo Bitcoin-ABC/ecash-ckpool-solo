@@ -512,6 +512,10 @@ void empty_buffer(connsock_t *cs)
 	cs->buflen = cs->bufofs = 0;
 }
 
+/* If there is any cs->buflen it implies a full line was received on the last
+ * pass through read_socket_line and subsequently processed, leaving
+ * unprocessed data beyond cs->bufofs. Otherwise a zero buflen means there is
+ * only unprocessed data of bufos length. */
 static void clear_bufline(connsock_t *cs)
 {
 	if (unlikely(!cs->buf))
@@ -522,8 +526,7 @@ static void clear_bufline(connsock_t *cs)
 		cs->bufofs = cs->buflen;
 		cs->buflen = 0;
 		cs->buf[cs->bufofs] = '\0';
-	} else
-		cs->bufofs = 0;
+	}
 }
 
 static void add_buflen(connsock_t *cs, const char *readbuf, const int len)
@@ -552,7 +555,9 @@ static void add_buflen(connsock_t *cs, const char *readbuf, const int len)
 
 /* Read from a socket into cs->buf till we get an '\n', converting it to '\0'
  * and storing how much extra data we've received, to be moved to the beginning
- * of the buffer for use on the next receive. */
+ * of the buffer for use on the next receive. Returns length of the line if a
+ * whole line is received, zero if none/some data is received without an EOL
+ * and -1 on error. */
 int read_socket_line(connsock_t *cs, float *timeout)
 {
 	char *eom = NULL;

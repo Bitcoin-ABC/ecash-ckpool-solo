@@ -1949,11 +1949,8 @@ static void *passthrough_recv(void *arg)
 		 * process. Possibly parse parameters sent by upstream pool
 		 * here */
 		if (likely(ret > 0)) {
-			if (strchr(cs->buf, '\n')) {
-				LOGDEBUG("Passthrough recv received upstream msg: %s", cs->buf);
-				send_proc(ckp->connector, cs->buf);
-			} else
-				LOGDEBUG("Passthrough recv received partial message");
+			LOGDEBUG("Passthrough recv received upstream msg: %s", cs->buf);
+			send_proc(ckp->connector, cs->buf);
 		} else if (ret < 0) {
 			/* Read failure */
 			LOGWARNING("Passthrough %d:%s failed to read_socket_line in passthrough_recv, attempting reconnect",
@@ -1961,7 +1958,7 @@ static void *passthrough_recv(void *arg)
 			alive = proxi->alive = false;
 			Close(cs->fd);
 			reconnect_generator(ckp);
-		} else /* Idle, likely no clients */
+		} else /* No messages during timeout */
 			LOGDEBUG("Passthrough %d:%s no messages received", proxi->id, proxi->url);
 		cksem_post(&cs->sem);
 	}
