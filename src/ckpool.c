@@ -519,8 +519,12 @@ void empty_buffer(connsock_t *cs)
 static void clear_bufline(connsock_t *cs)
 {
 	if (unlikely(!cs->buf)) {
+		socklen_t optlen = sizeof(cs->rcvbufsiz);
+
 		cs->buf = ckzalloc(PAGESIZE);
 		cs->bufsize = PAGESIZE;
+		getsockopt(cs->fd, SOL_SOCKET, SO_RCVBUF, &cs->rcvbufsiz, &optlen);
+		LOGDEBUG("connsock rcvbufsiz set to %d", cs->rcvbufsiz);
 	} else if (cs->buflen) {
 		memmove(cs->buf, cs->buf + cs->bufofs, cs->buflen);
 		memset(cs->buf + cs->buflen, 0, cs->bufofs);
@@ -548,6 +552,34 @@ static void add_buflen(connsock_t *cs, const char *readbuf, const int len)
 			fprintf(stderr, "Failed to realloc %d in read_socket_line, retrying\n", (int)buflen);
 		cksleep_ms(backoff);
 		backoff <<= 1;
+	}
+	/* Increase receive buffer if possible to larger than the largest
+	 * message we're likely to buffer */
+	if (buflen > cs->rcvbufsiz && !cs->rcvbufsiz_setfail) {
+		socklen_t optlen;
+		int opt;
+
+		optlen = sizeof(opt);
+		opt = buflen * 4 / 3;
+		setsockopt(cs->fd, SOL_SOCKET, SO_RCVBUF, &opt, optlen);
+		getsockopt(cs->fd, SOL_SOCKET, SO_RCVBUF, &opt, &optlen);
+		opt /= 2;
+		if (opt < buflen) {
+			LOGDEBUG("Failed to set desired rcvbufsiz of %d unprivileged, only got %d",
+				 buflen, opt);
+			optlen = sizeof(opt);
+			opt = buflen * 4 / 3;
+			setsockopt(cs->fd, SOL_SOCKET, SO_RCVBUFFORCE, &opt, optlen);
+			getsockopt(cs->fd, SOL_SOCKET, SO_RCVBUF, &opt, &optlen);
+			opt /= 2;
+		}
+		cs->rcvbufsiz = opt;
+		if (opt < buflen) {
+			LOGWARNING("Failed to increase rcvbufsiz to %d, increase rmem_max or start %s privileged",
+				   buflen, cs->ckp->name);
+			cs->rcvbufsiz_setfail = true;
+		} else
+			LOGDEBUG("Increased rcvbufsiz to %d of desired %d", opt, buflen);
 	}
 	memcpy(cs->buf + cs->bufofs, readbuf, len);
 	cs->bufofs += len;
