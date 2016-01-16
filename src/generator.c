@@ -2836,6 +2836,7 @@ static void setup_servers(ckpool_t *ckp)
 		si->notify = ckp->btcdnotify[i];
 		si->id = i;
 		cs = &si->cs;
+		cs->ckp = ckp;
 		cksem_init(&cs->sem);
 		cksem_post(&cs->sem);
 	}
