@@ -526,7 +526,7 @@ static void clear_bufline(connsock_t *cs)
 		cs->bufofs = 0;
 }
 
-static void add_bufline(connsock_t *cs, const char *readbuf, const int len)
+static void add_buflen(connsock_t *cs, const char *readbuf, const int len)
 {
 	int backoff = 1;
 	size_t buflen;
@@ -601,7 +601,7 @@ int read_socket_line(connsock_t *cs, float *timeout)
 			ret = -1;
 			goto out;
 		}
-		add_bufline(cs, readbuf, ret);
+		add_buflen(cs, readbuf, ret);
 		eom = strchr(cs->buf, '\n');
 		tv_time(&now);
 		diff = tvdiff(&now, &start);
