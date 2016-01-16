@@ -553,6 +553,24 @@ static void add_buflen(connsock_t *cs, const char *readbuf, const int len)
 	cs->buf[cs->bufofs] = '\0';
 }
 
+/* Receive as much data is currently available without blocking into a connsock
+ * buffer. Returns total length of data read. */
+static int recv_available(connsock_t *cs)
+{
+	char readbuf[PAGESIZE];
+	int len = 0, ret;
+
+	do {
+		ret = recv(cs->fd, readbuf, PAGESIZE - 4, MSG_DONTWAIT);
+		if (ret > 0) {
+			add_buflen(cs, readbuf, ret);
+			len += ret;
+		}
+	} while (ret > 0);
+
+	return len;
+}
+
 /* Read from a socket into cs->buf till we get an '\n', converting it to '\0'
  * and storing how much extra data we've received, to be moved to the beginning
  * of the buffer for use on the next receive. Returns length of the line if a
@@ -566,6 +584,7 @@ int read_socket_line(connsock_t *cs, float *timeout)
 	float diff;
 
 	clear_bufline(cs);
+	recv_available(cs); // Intentionally ignore return value
 	eom = strchr(cs->buf, '\n');
 
 	tv_time(&start);
