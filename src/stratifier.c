@@ -6078,9 +6078,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 			parse_node_msg(ckp, msg->json_msg, buf);
 		else
 			LOGWARNING("Failed to extract client_id from connector json smsg %s", buf);
-		json_decref(msg->json_msg);
-		free(msg);
-		goto out;
+		goto out_freemsg;
 	}
 
 	msg->client_id = json_integer_value(val);
@@ -6089,9 +6087,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	val = json_object_get(msg->json_msg, "address");
 	if (unlikely(!val)) {
 		LOGWARNING("Failed to extract address from connector json smsg %s", buf);
-		json_decref(msg->json_msg);
-		free(msg);
-		goto out;
+		goto out_freemsg;
 	}
 	strcpy(address, json_string_value(val));
 	json_object_clear(val);
@@ -6099,9 +6095,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	val = json_object_get(msg->json_msg, "server");
 	if (unlikely(!val)) {
 		LOGWARNING("Failed to extract server from connector json smsg %s", buf);
-		json_decref(msg->json_msg);
-		free(msg);
-		goto out;
+		goto out_freemsg;
 	}
 	server = json_integer_value(val);
 	json_object_clear(val);
@@ -6124,8 +6118,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 		LOGNOTICE("Stratifier skipped dropped instance %"PRId64" message from server %d",
 			  msg->client_id, server);
 		connector_drop_client(ckp, msg->client_id);
-		free_smsg(msg);
-		goto out;
+		goto out_freemsg;
 	}
 	if (unlikely(noid))
 		LOGINFO("Stratifier added instance %"PRId64" server %d", client->id, server);
@@ -6136,8 +6129,9 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 		node_client_msg(ckp, msg->json_msg, buf, client);
 	else
 		parse_instance_msg(ckp, sdata, msg, client);
-	free_smsg(msg);
 	dec_instance_ref(sdata, client);
+out_freemsg:
+	free_smsg(msg);
 out:
 	free(buf);
 }
