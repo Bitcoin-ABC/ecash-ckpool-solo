@@ -2793,7 +2793,7 @@ static void block_reject(sdata_t *sdata, const char *blockhash)
 	json_decref(val);
 	free(found);
 
-	LOGWARNING("Submitted, but rejected block %d", height);
+	LOGWARNING("Submitted, but had block %d rejected", height);
 }
 
 /* Some upstream pools (like p2pool) don't update stratum often enough and

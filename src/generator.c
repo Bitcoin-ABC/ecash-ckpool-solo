@@ -2766,7 +2766,7 @@ retry:
 		char blockmsg[80];
 		bool ret;
 
-		LOGNOTICE("Submitting likely block solve share to upstream pool");
+		LOGNOTICE("Submitting likely block solve share from upstream pool");
 		ret = submit_block(cs, buf + 12 + 64 + 1);
 		memset(buf + 12 + 64, 0, 1);
 		sprintf(blockmsg, "%sblock:%s", ret ? "" : "no", buf + 12);
