@@ -524,7 +524,8 @@ static void clear_bufline(connsock_t *cs)
 		cs->buf = ckzalloc(PAGESIZE);
 		cs->bufsize = PAGESIZE;
 		getsockopt(cs->fd, SOL_SOCKET, SO_RCVBUF, &cs->rcvbufsiz, &optlen);
-		LOGDEBUG("connsock rcvbufsiz set to %d", cs->rcvbufsiz);
+		cs->rcvbufsiz /= 2;
+		LOGDEBUG("connsock rcvbufsiz detected as %d", cs->rcvbufsiz);
 	} else if (cs->buflen) {
 		memmove(cs->buf, cs->buf + cs->bufofs, cs->buflen);
 		memset(cs->buf + cs->buflen, 0, cs->bufofs);
