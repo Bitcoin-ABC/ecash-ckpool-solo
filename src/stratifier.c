@@ -932,7 +932,7 @@ static void send_node_workinfo(sdata_t *sdata, const workbase_t *wb)
 
 	if (bulk_send) {
 		LOGINFO("Sending workinfo to mining nodes");
-		ssend_bulk_prepend(sdata, bulk_send, messages);
+		ssend_bulk_append(sdata, bulk_send, messages);
 	}
 }
 
