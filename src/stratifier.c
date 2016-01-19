@@ -5918,7 +5918,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 
 		/* Add this client as a passthrough in the connector and
 		 * add it to the list of mining nodes in the stratifier */
-		if (!ckp->nodeserver[client->server]) {
+		if (!ckp->nodeserver[client->server] || ckp->btcsolo) {
 			LOGNOTICE("Dropping client %"PRId64" %s trying to authorise as node on non node server %d",
 				  client_id, client->address, client->server);
 			connector_drop_client(ckp, client_id);
