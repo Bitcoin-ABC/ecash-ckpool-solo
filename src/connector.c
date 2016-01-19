@@ -681,32 +681,8 @@ static bool send_sender_send(ckpool_t *ckp, cdata_t *cdata, sender_send_t *sende
 
 	/* Increase sendbufsize to match large messages sent to clients - this
 	 * usually only applies to clients as mining nodes. */
-	if (unlikely(sender_send->len > client->sendbufsize && !cdata->wmem_warn)) {
-		int opt, len = sender_send->len;
-		socklen_t optlen;
-
-		optlen = sizeof(opt);
-		opt = len * 4 / 3;
-		setsockopt(client->fd, SOL_SOCKET, SO_SNDBUF, &opt, optlen);
-		getsockopt(client->fd, SOL_SOCKET, SO_SNDBUF, &opt, &optlen);
-		opt /= 2;
-		if (opt < len) {
-			LOGDEBUG("Failed to set desired sendbufsize of %d unprivileged, only got %d",
-				 len, opt);
-			optlen = sizeof(opt);
-			opt = len * 4 / 3;
-			setsockopt(client->fd, SOL_SOCKET, SO_SNDBUFFORCE, &opt, optlen);
-			getsockopt(client->fd, SOL_SOCKET, SO_SNDBUF, &opt, &optlen);
-			opt /= 2;
-		}
-		client->sendbufsize = opt;
-		if (opt < len) {
-			LOGWARNING("Failed to increase sendbufsize to %d, increase wmem_max or start %s privileged",
-				   len, ckp->name);
-			cdata->wmem_warn = true;
-		} else
-			LOGDEBUG("Increased sendbufsize to %d of desired %d", opt, len);
-	}
+	if (unlikely(!ckp->wmem_warn && sender_send->len > client->sendbufsize))
+		client->sendbufsize = set_sendbufsize(ckp, client->fd, sender_send->len);
 
 	while (sender_send->len) {
 		int ret = write(client->fd, sender_send->buf + sender_send->ofs, sender_send->len);
@@ -1003,7 +979,7 @@ static bool client_exists(cdata_t *cdata, const int64_t id)
 	return !!client;
 }
 
-static void passthrough_client(cdata_t *cdata, client_instance_t *client)
+static void passthrough_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
 {
 	char *buf;
 
@@ -1011,9 +987,13 @@ static void passthrough_client(cdata_t *cdata, client_instance_t *client)
 	client->passthrough = true;
 	ASPRINTF(&buf, "{\"result\": true}\n");
 	send_client(cdata, client->id, buf);
+	if (!ckp->rmem_warn)
+		set_recvbufsize(ckp, client->fd, 1048576);
+	if (!ckp->wmem_warn)
+		client->sendbufsize = set_sendbufsize(ckp, client->fd, 1048576);
 }
 
-static void remote_server(cdata_t *cdata, client_instance_t *client)
+static void remote_server(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
 {
 	char *buf;
 
@@ -1022,9 +1002,11 @@ static void remote_server(cdata_t *cdata, client_instance_t *client)
 	client->remote = true;
 	ASPRINTF(&buf, "{\"result\": true}\n");
 	send_client(cdata, client->id, buf);
+	if (!ckp->rmem_warn)
+		set_recvbufsize(ckp, client->fd, 1048576);
 }
 
-static bool connect_upstream(connsock_t *cs)
+static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 {
 	json_t *req, *val = NULL, *res_val, *err_val;
 	bool res, ret = false;
@@ -1036,6 +1018,10 @@ static bool connect_upstream(connsock_t *cs)
 		goto out;
 	}
 	keep_sockalive(cs->fd);
+
+	/* We want large send buffers for upstreaming messages */
+	if (!ckp->wmem_warn)
+		cs->sendbufsiz = set_sendbufsize(ckp, cs->fd, 1048576);
 
 	JSON_CPACK(req, "{ss,s[s]}",
 			"method", "mining.remote",
@@ -1089,7 +1075,7 @@ static void usend_process(ckpool_t *ckp, char *buf)
 		}
 		do
 			sleep(5);
-		while (!connect_upstream(cs));
+		while (!connect_upstream(ckp, cs));
 	}
 out:
 	free(buf);
@@ -1111,7 +1097,7 @@ static bool setup_upstream(ckpool_t *ckp, cdata_t *cdata)
 	}
 
 	/* Must succeed on initial connect to upstream pool */
-	if (!connect_upstream(cs)) {
+	if (!connect_upstream(ckp, cs)) {
 		LOGEMERG("Failed initial connect to upstream server %s:%s", cs->url, cs->port);
 		goto out;
 	}
@@ -1329,7 +1315,7 @@ retry:
 			LOGINFO("Connector failed to find client id %"PRId64" to pass through", client_id);
 			goto retry;
 		}
-		passthrough_client(cdata, client);
+		passthrough_client(ckp, cdata, client);
 		dec_instance_ref(cdata, client);
 	} else if (cmdmatch(buf, "remote")) {
 		client_instance_t *client;
@@ -1344,7 +1330,7 @@ retry:
 			LOGINFO("Connector failed to find client id %"PRId64" to add as remote", client_id);
 			goto retry;
 		}
-		remote_server(cdata, client);
+		remote_server(ckp, cdata, client);
 		dec_instance_ref(cdata, client);
 	} else if (cmdmatch(buf, "getxfd")) {
 		int fdno = -1;

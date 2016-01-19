@@ -445,6 +445,12 @@ static bool connect_proxy(ckpool_t *ckp, connsock_t *cs, proxy_instance_t *proxy
 				cs->fd, proxy->epfd);
 			return false;
 		}
+	} else {
+		/* We want large send/recv buffers on passthroughs */
+		if (!ckp->rmem_warn)
+			cs->rcvbufsiz = set_recvbufsize(ckp, cs->fd, 1048576);
+		if (!ckp->wmem_warn)
+			cs->sendbufsiz = set_sendbufsize(ckp, cs->fd, 1048576);
 	}
 	return true;
 }

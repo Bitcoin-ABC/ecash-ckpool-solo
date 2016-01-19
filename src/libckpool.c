@@ -738,6 +738,59 @@ out:
 	return sockd;
 }
 
+/* Measure the minimum round trip time it should take to get to a url by attempting
+ * to connect to what should be a closed socket on port 1042. This is a blocking
+ * function so can take many seconds. Returns 0 on failure */
+int round_trip(char *url)
+{
+	struct addrinfo servinfobase, *p, hints;
+	int sockd = -1, ret = 0, i, diff;
+	tv_t start_tv, end_tv;
+	char port[] = "1042";
+
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	memset(&servinfobase, 0, sizeof(struct addrinfo));
+	p = &servinfobase;
+
+	if (getaddrinfo(url, port, &hints, &p) != 0) {
+		LOGWARNING("Failed to resolve (?wrong URL) %s:%s", url, port);
+		return ret;
+	}
+	/* This function should be called only on already-resolved IP addresses so
+	 * we only need to use the first result from servinfobase */
+	sockd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+	if (sockd == -1) {
+		LOGERR("Failed socket");
+		goto out;
+	}
+	/* Attempt to connect 5 times to what should be a closed port and measure
+	 * the time it takes to get a refused message */
+	for (i = 0; i < 5; i++) {
+		tv_time(&start_tv);
+		if (!connect(sockd, p->ai_addr, p->ai_addrlen) || errno != ECONNREFUSED) {
+			LOGINFO("Unable to get round trip due to %s:%s connect not being refused",
+				url, port);
+			goto out;
+		}
+		tv_time(&end_tv);
+		diff = ms_tvdiff(&end_tv, &start_tv);
+		if (!ret || diff < ret)
+			ret = diff;
+	}
+	if (ret > 500) {
+		LOGINFO("Round trip to %s:%s greater than 500ms at %d, clamping to 500",
+			url, port, diff);
+		diff = 500;
+	}
+	LOGINFO("Minimum round trip to %s:%s calculated as %dms", url, port, ret);
+out:
+	Close(sockd);
+	freeaddrinfo(p);
+	return ret;
+}
+
 int write_socket(int fd, const void *buf, size_t nbyte)
 {
 	int ret;

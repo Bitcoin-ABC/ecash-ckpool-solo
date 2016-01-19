@@ -82,7 +82,7 @@ struct connsock {
 	int buflen;
 	int bufsize;
 	int rcvbufsiz;
-	bool rcvbufsiz_setfail;
+	int sendbufsiz;
 
 	ckpool_t *ckp;
 	/* Semaphore used to serialise request/responses */
@@ -212,6 +212,10 @@ struct ckpool_instance {
 	/* Should we daemonise the ckpool process */
 	bool daemon;
 
+	/* Have we given warnings about the inability to raise buf sizes */
+	bool wmem_warn;
+	bool rmem_warn;
+
 	/* Bitcoind data */
 	int btcds;
 	char **btcdurl;
@@ -275,6 +279,7 @@ enum stratum_msgtype {
 	SM_PING,
 	SM_WORKINFO,
 	SM_SUGGESTDIFF,
+	SM_BLOCK,
 	SM_NONE
 };
 
@@ -295,6 +300,7 @@ static const char __maybe_unused *stratum_msgs[] = {
 	"ping",
 	"workinfo",
 	"suggestdiff",
+	"block",
 	""
 };
 
@@ -317,6 +323,8 @@ ckpool_t *global_ckp;
 
 bool ping_main(ckpool_t *ckp);
 void empty_buffer(connsock_t *cs);
+int set_sendbufsize(ckpool_t *ckp, const int fd, const int len);
+int set_recvbufsize(ckpool_t *ckp, const int fd, const int len);
 int read_socket_line(connsock_t *cs, float *timeout);
 void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
 #define send_proc(pi, msg) _send_proc(pi, msg, __FILE__, __func__, __LINE__)
@@ -339,6 +347,7 @@ bool json_get_string(char **store, const json_t *val, const char *res);
 bool json_get_int64(int64_t *store, const json_t *val, const char *res);
 bool json_get_int(int *store, const json_t *val, const char *res);
 bool json_get_double(double *store, const json_t *val, const char *res);
+bool json_get_uint32(uint32_t *store, const json_t *val, const char *res);
 bool json_get_bool(bool *store, const json_t *val, const char *res);
 bool json_getdel_int(int *store, json_t *val, const char *res);
 bool json_getdel_int64(int64_t *store, json_t *val, const char *res);

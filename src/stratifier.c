@@ -90,6 +90,7 @@ struct workbase {
 	char idstring[20];
 
 	ts_t gentime;
+	tv_t retired;
 
 	/* GBT/shared variables */
 	char target[68];
@@ -295,6 +296,8 @@ struct stratum_instance {
 			 * or other problem and should be dropped lazily if
 			 * this is set to 2 */
 
+	int latency; /* Latency when on a mining node */
+
 	bool reconnect; /* This client really needs to reconnect */
 	time_t reconnect_request; /* The time we sent a reconnect message */
 
@@ -478,6 +481,7 @@ struct stratifier_data {
 	ckmsgq_t *sshareq;	// Stratum share sends
 	ckmsgq_t *sauthq;	// Stratum authorisations
 	ckmsgq_t *stxnq;	// Transaction requests
+	ckmsg_t *postponed;	// List of messages postponed till next update
 
 	int user_instance_id;
 
@@ -874,6 +878,32 @@ static void ssend_bulk_prepend(sdata_t *sdata, ckmsg_t *bulk_send, const int mes
 	mutex_unlock(ssends->lock);
 }
 
+/* List of messages we intentionally want to postpone till after the next bulk
+ * update - eg. workinfo which is large and we don't want to delay updates */
+static void ssend_bulk_postpone(sdata_t *sdata, ckmsg_t *bulk_send, const int messages)
+{
+	ckmsgq_t *ssends = sdata->ssends;
+
+	mutex_lock(ssends->lock);
+	DL_CONCAT(sdata->postponed, bulk_send);
+	ssends->messages += messages;
+	mutex_unlock(ssends->lock);
+}
+
+/* Send any postponed bulk messages */
+static void send_postponed(sdata_t *sdata)
+{
+	ckmsgq_t *ssends = sdata->ssends;
+
+	mutex_lock(ssends->lock);
+	if (sdata->postponed) {
+		DL_CONCAT(ssends->msgs, sdata->postponed);
+		sdata->postponed = NULL;
+		pthread_cond_signal(ssends->cond);
+	}
+	mutex_unlock(ssends->lock);
+}
+
 static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_id,
 			     const int msg_type);
 
@@ -930,9 +960,15 @@ static void send_node_workinfo(sdata_t *sdata, const workbase_t *wb)
 	}
 	ck_runlock(&sdata->instance_lock);
 
+	/* We send workinfo postponed till after the stratum updates are sent
+	 * out to minimise any lag seen by clients getting updates. It means
+	 * the remote node will know about the block change later which will
+	 * make it think clients are sending invalid shares (which won't count)
+	 * and potentially not be able to submit a block locally if it doesn't
+	 * have the workinfo in time. */
 	if (bulk_send) {
 		LOGINFO("Sending workinfo to mining nodes");
-		ssend_bulk_append(sdata, bulk_send, messages);
+		ssend_bulk_postpone(sdata, bulk_send, messages);
 	}
 }
 
@@ -1086,6 +1122,8 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 		}
 	}
 	HASH_ADD_I64(sdata->workbases, id, wb);
+	if (sdata->current_workbase)
+		tv_time(&sdata->current_workbase->retired);
 	sdata->current_workbase = wb;
 	ck_wunlock(&sdata->workbase_lock);
 
@@ -1330,6 +1368,256 @@ static void add_node_base(ckpool_t *ckp, json_t *val)
 	add_base(ckp, sdata, wb, &new_block);
 	if (new_block)
 		LOGNOTICE("Block hash changed to %s", sdata->lastswaphash);
+}
+
+/* Calculate share diff and fill in hash and swap */
+static double
+share_diff(char *coinbase, const uchar *enonce1bin, const workbase_t *wb, const char *nonce2,
+	   const uint32_t ntime32, const char *nonce, uchar *hash, uchar *swap, int *cblen)
+{
+	unsigned char merkle_root[32], merkle_sha[64];
+	uint32_t *data32, *swap32, benonce32;
+	uchar hash1[32];
+	char data[80];
+	int i;
+
+	memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
+	*cblen = wb->coinb1len;
+	memcpy(coinbase + *cblen, enonce1bin, wb->enonce1constlen + wb->enonce1varlen);
+	*cblen += wb->enonce1constlen + wb->enonce1varlen;
+	hex2bin(coinbase + *cblen, nonce2, wb->enonce2varlen);
+	*cblen += wb->enonce2varlen;
+	memcpy(coinbase + *cblen, wb->coinb2bin, wb->coinb2len);
+	*cblen += wb->coinb2len;
+
+	gen_hash((uchar *)coinbase, merkle_root, *cblen);
+	memcpy(merkle_sha, merkle_root, 32);
+	for (i = 0; i < wb->merkles; i++) {
+		memcpy(merkle_sha + 32, &wb->merklebin[i], 32);
+		gen_hash(merkle_sha, merkle_root, 64);
+		memcpy(merkle_sha, merkle_root, 32);
+	}
+	data32 = (uint32_t *)merkle_sha;
+	swap32 = (uint32_t *)merkle_root;
+	flip_32(swap32, data32);
+
+	/* Copy the cached header binary and insert the merkle root */
+	memcpy(data, wb->headerbin, 80);
+	memcpy(data + 36, merkle_root, 32);
+
+	/* Insert the nonce value into the data */
+	hex2bin(&benonce32, nonce, 4);
+	data32 = (uint32_t *)(data + 64 + 12);
+	*data32 = benonce32;
+
+	/* Insert the ntime value into the data */
+	data32 = (uint32_t *)(data + 68);
+	*data32 = htobe32(ntime32);
+
+	/* Hash the share */
+	data32 = (uint32_t *)data;
+	swap32 = (uint32_t *)swap;
+	flip_80(swap32, data32);
+	sha256(swap, 80, hash1);
+	sha256(hash1, 32, hash);
+
+	/* Calculate the diff of the share here */
+	return diff_from_target(hash);
+}
+
+/* passthrough subclients have client_ids in the high bits */
+static inline bool passthrough_subclient(const int64_t client_id)
+{
+	return (client_id > 0xffffffffll);
+}
+
+/* Note recursive lock here - entered with workbase lock held, grabs instance lock */
+static void send_node_block(sdata_t *sdata, const char *enonce1, const char *nonce,
+			    const char *nonce2, const uint32_t ntime32, const int64_t jobid,
+			    const double diff, const int64_t client_id)
+{
+	stratum_instance_t *client;
+	int64_t skip, messages = 0;
+	ckmsg_t *bulk_send = NULL;
+
+	/* Don't send the block back to a remote node if that's where it was
+	 * found. */
+	if (passthrough_subclient(client_id))
+		skip = client_id >> 32;
+	else
+		skip = 0;
+
+	ck_rlock(&sdata->instance_lock);
+	if (sdata->node_instances) {
+		json_t *val = json_object();
+
+		json_set_string(val, "node.method", stratum_msgs[SM_BLOCK]);
+		json_set_string(val, "enonce1", enonce1);
+		json_set_string(val, "nonce", nonce);
+		json_set_string(val, "nonce2", nonce2);
+		json_set_uint32(val, "ntime32", ntime32);
+		json_set_int64(val, "jobid", jobid);
+		json_set_double(val, "diff", diff);
+		DL_FOREACH(sdata->node_instances, client) {
+			ckmsg_t *client_msg;
+			json_t *json_msg;
+			smsg_t *msg;
+
+			if (client->id == skip)
+				continue;
+			json_msg = json_deep_copy(val);
+			client_msg = ckalloc(sizeof(ckmsg_t));
+			msg = ckzalloc(sizeof(smsg_t));
+			msg->json_msg = json_msg;
+			msg->client_id = client->id;
+			client_msg->data = msg;
+			DL_APPEND(bulk_send, client_msg);
+			messages++;
+		}
+		json_decref(val);
+	}
+	ck_runlock(&sdata->instance_lock);
+
+	if (bulk_send) {
+		LOGNOTICE("Sending block to mining nodes");
+		ssend_bulk_prepend(sdata, bulk_send, messages);
+	}
+}
+
+static void
+process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const int cblen,
+	      const uchar *data, const uchar *hash, uchar *swap32, char *blockhash)
+{
+	int transactions = wb->transactions + 1;
+	char *gbt_block, varint[12];
+	char hexcoinbase[1024];
+
+	gbt_block = ckalloc(1024);
+	flip_32(swap32, hash);
+	__bin2hex(blockhash, swap32, 32);
+
+	/* Message format: "submitblock:hash,data" */
+	sprintf(gbt_block, "submitblock:%s,", blockhash);
+	__bin2hex(gbt_block + 12 + 64 + 1, data, 80);
+	if (transactions < 0xfd) {
+		uint8_t val8 = transactions;
+
+		__bin2hex(varint, (const unsigned char *)&val8, 1);
+	} else if (transactions <= 0xffff) {
+		uint16_t val16 = htole16(transactions);
+
+		strcat(gbt_block, "fd");
+		__bin2hex(varint, (const unsigned char *)&val16, 2);
+	} else {
+		uint32_t val32 = htole32(transactions);
+
+		strcat(gbt_block, "fe");
+		__bin2hex(varint, (const unsigned char *)&val32, 4);
+	}
+	strcat(gbt_block, varint);
+	__bin2hex(hexcoinbase, coinbase, cblen);
+	strcat(gbt_block, hexcoinbase);
+	if (wb->transactions)
+		realloc_strcat(&gbt_block, wb->txn_data);
+	send_generator(ckp, gbt_block, GEN_PRIORITY);
+	free(gbt_block);
+
+
+}
+
+static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
+{
+	char *coinbase = NULL, *enonce1 = NULL, *nonce = NULL, *nonce2 = NULL;
+	uchar *enonce1bin = NULL, hash[32], swap[80], swap32[32];
+	char blockhash[68], cdfield[64];
+	int enonce1len, cblen;
+	workbase_t *wb = NULL;
+	ckmsg_t *block_ckmsg;
+	json_t *bval = NULL;
+	uint32_t ntime32;
+	double diff;
+	ts_t ts_now;
+	int64_t id;
+
+	if (unlikely(!json_get_string(&enonce1, val, "enonce1"))) {
+		LOGWARNING("Failed to get enonce1 from node method block");
+		goto out;
+	}
+	if (unlikely(!json_get_string(&nonce, val, "nonce"))) {
+		LOGWARNING("Failed to get nonce from node method block");
+		goto out;
+	}
+	if (unlikely(!json_get_string(&nonce2, val, "nonce2"))) {
+		LOGWARNING("Failed to get nonce2 from node method block");
+		goto out;
+	}
+	if (unlikely(!json_get_uint32(&ntime32, val, "ntime32"))) {
+		LOGWARNING("Failed to get ntime32 from node method block");
+		goto out;
+	}
+	if (unlikely(!json_get_int64(&id, val, "jobid"))) {
+		LOGWARNING("Failed to get jobid from node method block");
+		goto out;
+	}
+	if (unlikely(!json_get_double(&diff, val, "diff"))) {
+		LOGWARNING("Failed to get diff from node method block");
+		goto out;
+	}
+
+	LOGWARNING("Possible upstream block solve diff %f !", diff);
+
+	ts_realtime(&ts_now);
+	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
+
+	ck_rlock(&sdata->workbase_lock);
+	HASH_FIND_I64(sdata->workbases, &id, wb);
+	if (unlikely(!wb))
+		goto out_unlock;
+	/* Now we have enough to assemble a block */
+	coinbase = ckalloc(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len);
+	enonce1len = wb->enonce1constlen + wb->enonce1varlen;
+	enonce1bin = ckalloc(enonce1len);
+	hex2bin(enonce1bin, enonce1, enonce1len);
+
+	/* Fill in the hashes */
+	share_diff(coinbase, enonce1bin, wb, nonce2, ntime32, nonce, hash, swap, &cblen);
+	process_block(ckp, wb, coinbase, cblen, swap, hash, swap32, blockhash);
+
+	JSON_CPACK(bval, "{si,ss,ss,sI,ss,ss,ss,sI,sf,ss,ss,ss,ss}",
+			 "height", wb->height,
+			 "blockhash", blockhash,
+			 "confirmed", "n",
+			 "workinfoid", wb->id,
+			 "enonce1", enonce1,
+			 "nonce2", nonce2,
+			 "nonce", nonce,
+			 "reward", wb->coinbasevalue,
+			 "diff", diff,
+			 "createdate", cdfield,
+			 "createby", "code",
+			 "createcode", __func__,
+			 "createinet", ckp->serverurl[0]);
+out_unlock:
+	ck_runlock(&sdata->workbase_lock);
+
+	if (unlikely(!wb))
+		LOGWARNING("Failed to find workbase with jobid %"PRId64" in node method block", id);
+	else {
+		block_ckmsg = ckalloc(sizeof(ckmsg_t));
+		block_ckmsg->data = json_deep_copy(bval);
+
+		mutex_lock(&sdata->block_lock);
+		DL_APPEND(sdata->block_solves, block_ckmsg);
+		mutex_unlock(&sdata->block_lock);
+
+		ckdbq_add(ckp, ID_BLOCK, bval);
+	}
+out:
+	free(enonce1bin);
+	free(coinbase);
+	free(nonce2);
+	free(nonce);
+	free(enonce1);
 }
 
 static void update_base(ckpool_t *ckp, const int prio)
@@ -2349,6 +2637,17 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t i
 	/* Points to ckp sdata in ckpool mode, but is changed later in proxy
 	 * mode . */
 	client->sdata = sdata;
+	if (passthrough_subclient(id)) {
+		stratum_instance_t *passthrough;
+		int64_t pass_id = id >> 32;
+
+		passthrough = __instance_by_id(sdata, pass_id);
+		if (passthrough && passthrough->node) {
+			client->latency = passthrough->latency;
+			LOGINFO("Client %"PRId64" inherited node latency of %d",
+				id, client->latency);
+		}
+	}
 	return client;
 }
 
@@ -2390,12 +2689,6 @@ static void connector_test_client(ckpool_t *ckp, const int64_t id)
 	LOGDEBUG("Stratifier requesting connector test client %"PRId64, id);
 	snprintf(buf, 255, "testclient=%"PRId64, id);
 	send_proc(ckp->connector, buf);
-}
-
-/* passthrough subclients have client_ids in the high bits */
-static inline bool passthrough_subclient(const int64_t client_id)
-{
-	return (client_id > 0xffffffffll);
 }
 
 /* For creating a list of sends without locking that can then be concatenated
@@ -2469,10 +2762,10 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 
 	json_decref(val);
 
-	if (!bulk_send)
-		return;
-
-	ssend_bulk_append(sdata, bulk_send, messages);
+	if (likely(bulk_send))
+		ssend_bulk_append(sdata, bulk_send, messages);
+	if (msg_type == SM_UPDATE)
+		send_postponed(sdata);
 }
 
 static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_id,
@@ -4806,17 +5099,14 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 static void
 test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uchar *data,
 		const uchar *hash, const double diff, const char *coinbase, int cblen,
-		const char *nonce2, const char *nonce)
+		const char *nonce2, const char *nonce, const uint32_t ntime32)
 {
-	int transactions = wb->transactions + 1;
-	char hexcoinbase[1024], blockhash[68];
+	char blockhash[68], cdfield[64];
 	sdata_t *sdata = client->sdata;
 	json_t *val = NULL, *val_copy;
-	char *gbt_block, varint[12];
 	ckpool_t *ckp = wb->ckp;
 	ckmsg_t *block_ckmsg;
-	char cdfield[64];
-	uchar swap[32];
+	uchar swap32[32];
 	ts_t ts_now;
 
 	/* Submit anything over 99.9% of the diff in case of rounding errors */
@@ -4831,35 +5121,10 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	ts_realtime(&ts_now);
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
-	gbt_block = ckalloc(1024);
-	flip_32(swap, hash);
-	__bin2hex(blockhash, swap, 32);
+	process_block(ckp, wb, coinbase, cblen, data, hash, swap32, blockhash);
 
-	/* Message format: "submitblock:hash,data" */
-	sprintf(gbt_block, "submitblock:%s,", blockhash);
-	__bin2hex(gbt_block + 12 + 64 + 1, data, 80);
-	if (transactions < 0xfd) {
-		uint8_t val8 = transactions;
-
-		__bin2hex(varint, (const unsigned char *)&val8, 1);
-	} else if (transactions <= 0xffff) {
-		uint16_t val16 = htole16(transactions);
-
-		strcat(gbt_block, "fd");
-		__bin2hex(varint, (const unsigned char *)&val16, 2);
-	} else {
-		uint32_t val32 = htole32(transactions);
-
-		strcat(gbt_block, "fe");
-		__bin2hex(varint, (const unsigned char *)&val32, 4);
-	}
-	strcat(gbt_block, varint);
-	__bin2hex(hexcoinbase, coinbase, cblen);
-	strcat(gbt_block, hexcoinbase);
-	if (wb->transactions)
-		realloc_strcat(&gbt_block, wb->txn_data);
-	send_generator(ckp, gbt_block, GEN_PRIORITY);
-	free(gbt_block);
+	send_node_block(sdata, client->enonce1, nonce, nonce2, ntime32, wb->id,
+			diff, client->id);
 
 	JSON_CPACK(val, "{si,ss,ss,sI,ss,ss,sI,ss,ss,ss,sI,ss,ss,ss,ss}",
 			"height", wb->height,
@@ -4973,7 +5238,7 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 	ret = diff_from_target(hash);
 
 	/* Test we haven't solved a block regardless of share status */
-	test_blocksolve(client, wb, swap, hash, ret, coinbase, cblen, nonce2, nonce);
+	test_blocksolve(client, wb, swap, hash, ret, coinbase, cblen, nonce2, nonce, ntime32);
 
 	return ret;
 }
@@ -5177,10 +5442,24 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	__bin2hex(hexhash, sharehash, 32);
 
 	if (id < sdata->blockchange_id) {
+		/* Accept shares if they're received on remote nodes before the
+		 * workbase was retired. */
+		if (client->latency) {
+			int latency;
+			tv_t now_tv;
+
+			ts_to_tv(&now_tv, &now);
+			latency = ms_tvdiff(&now_tv, &wb->retired);
+			if (latency < client->latency) {
+				LOGDEBUG("Accepting %dms late share from client %"PRId64, latency, client->id);
+				goto no_stale;
+			}
+		}
 		err = SE_STALE;
 		json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
 		goto out_submit;
 	}
+no_stale:
 	/* Ntime cannot be less, but allow forward ntime rolling up to max */
 	if (ntime32 < wb->ntime32 || ntime32 > wb->ntime32 + 7000) {
 		err = SE_NTIME_INVALID;
@@ -5535,16 +5814,38 @@ static void init_client(sdata_t *sdata, const stratum_instance_t *client, const 
 		stratum_send_update(sdata, client_id, true);
 }
 
+static void *set_node_latency(void *arg)
+{
+	stratum_instance_t *client = (stratum_instance_t *)arg;
+
+	pthread_detach(pthread_self());
+
+	client->latency = round_trip(client->address) / 2;
+	LOGNOTICE("Node client %"PRId64" %s latency set to %dms", client->id,
+		  client->address, client->latency);
+	dec_instance_ref(client->sdata, client);
+	return NULL;
+}
+
+/* Create a thread to asynchronously set latency to the node to not
+ * block. Increment the ref count to prevent the client pointer
+ * dereferencing under us, allowing the thread to decrement it again when
+ * finished. */
 static void add_mining_node(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *client)
 {
+	pthread_t pth;
+
 	client->node = true;
 
 	ck_wlock(&sdata->instance_lock);
 	DL_APPEND(sdata->node_instances, client);
+	__inc_instance_ref(client);
 	ck_wunlock(&sdata->instance_lock);
 
 	LOGWARNING("Added client %"PRId64" %s as mining node on server %d:%s", client->id,
 		   client->address, client->server, ckp->serverurl[client->server]);
+
+	create_pthread(&pth, set_node_latency, client);
 }
 
 /* Enter with client holding ref count */
@@ -5982,7 +6283,7 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, const char *buf, stratum
 	}
 }
 
-static void parse_node_msg(ckpool_t *ckp, json_t *val, const char *buf)
+static void parse_node_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
 {
 	int msg_type = node_msg_type(val);
 
@@ -5994,6 +6295,9 @@ static void parse_node_msg(ckpool_t *ckp, json_t *val, const char *buf)
 	switch (msg_type) {
 		case SM_WORKINFO:
 			add_node_base(ckp, val);
+			break;
+		case SM_BLOCK:
+			submit_node_block(ckp, sdata, val);
 			break;
 		default:
 			break;
@@ -6075,7 +6379,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	val = json_object_get(msg->json_msg, "client_id");
 	if (unlikely(!val)) {
 		if (ckp->node)
-			parse_node_msg(ckp, msg->json_msg, buf);
+			parse_node_msg(ckp, sdata, msg->json_msg, buf);
 		else
 			LOGWARNING("Failed to extract client_id from connector json smsg %s", buf);
 		goto out_freemsg;
