@@ -1373,7 +1373,7 @@ void realloc_strcat(char **ptr, const char *s)
 	else
 		old = strlen(*ptr);
 	len = old + new + 1;
-	align_len(&len);
+	len = round_up_page(len);
 	while (42) {
 		new_ptr = realloc(*ptr, len);
 		if (likely(new_ptr))
