@@ -464,34 +464,33 @@ static void parse_redirector_share(client_instance_t *client, const json_t *val)
 static void parse_client_msg(cdata_t *cdata, client_instance_t *client)
 {
 	ckpool_t *ckp = cdata->ckp;
-	int buflen, ret, ofs;
+	int buflen, ret;
 	char *msg, *eol;
 	json_t *val;
 
 retry:
-	ofs = client->bufofs;
-	if (unlikely(ofs > MAX_MSGSIZE)) {
+	if (unlikely(client->bufofs > MAX_MSGSIZE)) {
 		if (!client->remote) {
 			LOGNOTICE("Client id %"PRId64" fd %d overloaded buffer without EOL, disconnecting",
 				client->id, client->fd);
 			invalidate_client(ckp, cdata, client);
 			return;
 		}
-		client->buf = realloc(client->buf, round_up_page(ofs + MAX_MSGSIZE + 1));
+		client->buf = realloc(client->buf, round_up_page(client->bufofs + MAX_MSGSIZE + 1));
 	}
 	/* This read call is non-blocking since the socket is set to O_NOBLOCK */
-	ret = read(client->fd, client->buf + ofs, MAX_MSGSIZE);
+	ret = read(client->fd, client->buf + client->bufofs, MAX_MSGSIZE);
 	if (ret < 1) {
 		if (likely(errno == EAGAIN || errno == EWOULDBLOCK || !ret))
 			return;
-		LOGINFO("Client id %"PRId64" fd %d disconnected - recv fail with bufofs %d ret %d errno %d %s",
-			client->id, client->fd, ofs, ret, errno, ret && errno ? strerror(errno) : "");
+		LOGINFO("Client id %"PRId64" fd %d disconnected - recv fail with bufofs %lu ret %d errno %d %s",
+			client->id, client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
 		invalidate_client(ckp, cdata, client);
 		return;
 	}
 	client->bufofs += ret;
 reparse:
-	eol = memchr(client->buf + ofs, '\n', client->bufofs);
+	eol = memchr(client->buf, '\n', client->bufofs);
 	if (!eol)
 		goto retry;
 
