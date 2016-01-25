@@ -369,7 +369,7 @@ static inline void json_strdup(char **buf, json_t *val, const char *key)
 static inline void _json_set_string(json_t *val, const char *key, const char *str,
 				    const char *file, const char *func, const int line)
 {
-	if (unlikely(json_object_set_new_nocheck(val, key, json_string(str))))
+	if (unlikely(json_object_set_new(val, key, json_string(str))))
 		LOGERR("Failed to set json string from %s %s:%d", file, func, line);
 }
 #define json_set_string(val, key, str) _json_set_string(val, key, str, __FILE__, __func__, __LINE__)

@@ -11,6 +11,15 @@ function app_txt($ones)
  return $app;
 }
 #
+function app_time()
+{
+ $app = "Apps to check that your device time is accurate:<br>";
+ $app .= "<span class=hil>";
+ $app .= "Android: Google Play '<b>ClockSync</b>' by Sergey Baranov<br>";
+ $app .= "</span><br>";
+ return $app;
+}
+#
 function set_2fa($data, $user, $tfa, $ans, $err, $msg)
 {
  $draw = false;
@@ -121,6 +130,7 @@ function set_2fa($data, $user, $tfa, $ans, $err, $msg)
  $pg .= 'that you type into the "<span class=st1>*</span>2nd Authentication:" field on any page that has it.<br><br>';
  $pg .= '<b>IMPORTANT:</b> the TOTP algorithm uses the time on your device,<br>';
  $pg .= "so it is important that your device's clock is accurate within a few seconds.<br><br>";
+ $pg .= app_time();
  $pg .= '<b>IMPORTANT:</b> you enter the value from your App at the time you submit data.<br>';
  $pg .= "The value is valid only once for a maximum of 30 seconds.<br>";
  $pg .= "In both the Apps it has a 'dial' that shows the 30 seconds running out.<br>";
