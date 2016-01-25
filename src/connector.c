@@ -55,7 +55,7 @@ struct client_instance {
 	/* Which serverurl is this instance connected to */
 	int server;
 
-	char buf[PAGESIZE];
+	char *buf;
 	unsigned long bufofs;
 
 	/* Are we currently sending a blocked message from this client */
@@ -208,6 +208,10 @@ static client_instance_t *recruit_client(cdata_t *cdata)
 		client = ckzalloc(sizeof(client_instance_t));
 	} else
 		LOGDEBUG("Connector recycled client instance");
+
+	client->buf = realloc(client->buf, PAGESIZE);
+	client->buf[0] = '\0';
+
 	return client;
 }
 
@@ -460,42 +464,46 @@ static void parse_redirector_share(client_instance_t *client, const json_t *val)
 static void parse_client_msg(cdata_t *cdata, client_instance_t *client)
 {
 	ckpool_t *ckp = cdata->ckp;
-	char msg[PAGESIZE], *eol;
-	int buflen, ret;
+	int buflen, ret, ofs;
+	char *msg, *eol;
 	json_t *val;
 
 retry:
-	if (unlikely(client->bufofs > MAX_MSGSIZE)) {
-		LOGNOTICE("Client id %"PRId64" fd %d overloaded buffer without EOL, disconnecting",
-			  client->id, client->fd);
-		invalidate_client(ckp, cdata, client);
-		return;
+	ofs = client->bufofs;
+	if (unlikely(ofs > MAX_MSGSIZE)) {
+		if (!client->remote) {
+			LOGNOTICE("Client id %"PRId64" fd %d overloaded buffer without EOL, disconnecting",
+				client->id, client->fd);
+			invalidate_client(ckp, cdata, client);
+			return;
+		}
+		client->buf = realloc(client->buf, round_up_page(ofs + MAX_MSGSIZE + 1));
 	}
-	buflen = PAGESIZE - client->bufofs;
 	/* This read call is non-blocking since the socket is set to O_NOBLOCK */
-	ret = read(client->fd, client->buf + client->bufofs, buflen);
+	ret = read(client->fd, client->buf + ofs, MAX_MSGSIZE);
 	if (ret < 1) {
 		if (likely(errno == EAGAIN || errno == EWOULDBLOCK || !ret))
 			return;
-		LOGINFO("Client id %"PRId64" fd %d disconnected - recv fail with bufofs %lu ret %d errno %d %s",
-			client->id, client->fd, client->bufofs, ret, errno, ret && errno ? strerror(errno) : "");
+		LOGINFO("Client id %"PRId64" fd %d disconnected - recv fail with bufofs %d ret %d errno %d %s",
+			client->id, client->fd, ofs, ret, errno, ret && errno ? strerror(errno) : "");
 		invalidate_client(ckp, cdata, client);
 		return;
 	}
 	client->bufofs += ret;
 reparse:
-	eol = memchr(client->buf, '\n', client->bufofs);
+	eol = memchr(client->buf + ofs, '\n', client->bufofs);
 	if (!eol)
 		goto retry;
 
 	/* Do something useful with this message now */
 	buflen = eol - client->buf + 1;
-	if (unlikely(buflen > MAX_MSGSIZE)) {
+	if (unlikely(buflen > MAX_MSGSIZE && !client->remote)) {
 		LOGNOTICE("Client id %"PRId64" fd %d message oversize, disconnecting", client->id, client->fd);
 		invalidate_client(ckp, cdata, client);
 		return;
 	}
 
+	msg = alloca(round_up_page(buflen + 1));
 	memcpy(msg, client->buf, buflen);
 	msg[buflen] = '\0';
 	client->bufofs -= buflen;
