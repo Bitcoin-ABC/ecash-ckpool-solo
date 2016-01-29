@@ -7065,9 +7065,12 @@ static void *statsupdate(void *arg)
 		HASH_ITER(hh, sdata->user_instances, user, tmpuser) {
 			worker_instance_t *worker;
 			bool idle = false;
+			json_t *user_array;
 
 			if (!user->authorised)
 				continue;
+
+			user_array = json_array();
 
 			/* Decay times per worker */
 			DL_FOREACH(user->worker_instances, worker) {
@@ -7107,7 +7110,9 @@ static void *statsupdate(void *arg)
 				ASPRINTF(&fname, "%s/workers/%s", ckp->logdir, worker->workername);
 				s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL);
 				add_log_entry(&log_entries, &fname, &s);
-				json_decref(val);
+				json_set_string(val, "workername", worker->workername);
+				json_array_append_new(user_array, val);
+				val = NULL;
 			}
 
 			/* Decay times per user */
@@ -7148,15 +7153,16 @@ static void *statsupdate(void *arg)
 			/* Reset the remote_workers count once per minute */
 			user->remote_workers = 0;
 
-			ASPRINTF(&fname, "%s/users/%s", ckp->logdir, user->username);
-			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL);
-			add_log_entry(&log_entries, &fname, &s);
 			if (!idle) {
 				s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 				ASPRINTF(&sp, "User %s:%s", user->username, s);
 				dealloc(s);
 				add_msg_entry(&char_list, &sp);
 			}
+			json_object_set_new_nocheck(val, "worker", user_array);
+			ASPRINTF(&fname, "%s/users/%s", ckp->logdir, user->username);
+			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL);
+			add_log_entry(&log_entries, &fname, &s);
 			json_decref(val);
 			if (ckp->remote)
 				upstream_workers(ckp, user);
