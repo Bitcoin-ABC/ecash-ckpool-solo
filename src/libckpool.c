@@ -795,7 +795,7 @@ int write_socket(int fd, const void *buf, size_t nbyte)
 {
 	int ret;
 
-	ret = wait_write_select(fd, 5);
+	ret = wait_write_select(fd, 60);
 	if (ret < 1) {
 		if (!ret)
 			LOGNOTICE("Select timed out in write_socket");
