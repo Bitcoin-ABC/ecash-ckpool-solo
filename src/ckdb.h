@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2015 Andrew Smith
+ * Copyright 1995-2016 Andrew Smith
  * Copyright 2014 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -51,7 +51,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.4"
-#define CKDB_VERSION DB_VERSION"-1.914"
+#define CKDB_VERSION DB_VERSION"-1.921"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -376,6 +376,252 @@ extern cklock_t btc_lock;
 extern char *by_default;
 extern char *inet_default;
 extern char *id_default;
+
+// Number of seconds per poolinstance message for run
+#define POOLINSTANCE_MSG_EVERY 30
+
+#define FAILED_PI "failed.PI"
+
+#define POOLINSTANCE_RESET_MSG(_txt) do { \
+		int64_t _workinfo, _ageworkinfo, _auth, _addrauth, _poolstats; \
+		int64_t _userstats, _workerstats, _workmarkers, _marks; \
+		bool msg = false; \
+		ck_wlock(&poolinstance_lock); \
+		if (mismatch_all_total) { \
+			msg = true; \
+			last_mismatch_message = time(NULL); \
+			_workinfo = mismatch_all_workinfo; \
+			_ageworkinfo = mismatch_all_ageworkinfo; \
+			_auth = mismatch_all_auth; \
+			_addrauth = mismatch_all_addrauth; \
+			_poolstats = mismatch_all_poolstats; \
+			_userstats = mismatch_all_userstats; \
+			_workerstats = mismatch_all_workerstats; \
+			_workmarkers = mismatch_all_workmarkers; \
+			_marks = mismatch_all_marks; \
+			mismatch_workinfo = mismatch_ageworkinfo = \
+			mismatch_auth = mismatch_addrauth = \
+			mismatch_poolstats = mismatch_userstats = \
+			mismatch_workerstats = mismatch_workmarkers = \
+			mismatch_marks = mismatch_total = 0; \
+			mismatch_all_workinfo = mismatch_all_ageworkinfo = \
+			mismatch_all_auth = mismatch_all_addrauth = \
+			mismatch_all_poolstats = mismatch_all_userstats = \
+			mismatch_all_workerstats = mismatch_all_workmarkers = \
+			mismatch_all_marks = mismatch_all_total = 0; \
+		} \
+		ck_wunlock(&poolinstance_lock); \
+		if (msg) { \
+			char reply[1024], *buf; \
+			size_t len, off; \
+			APPEND_REALLOC_INIT(buf, off, len); \
+			snprintf(reply, sizeof(reply), "%s() %s PI total:", \
+				 __func__, _txt); \
+			APPEND_REALLOC(buf, off, len, reply); \
+			if (_workinfo) { \
+				snprintf(reply, sizeof(reply), " wi=%"PRId64, _workinfo); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_ageworkinfo) { \
+				snprintf(reply, sizeof(reply), " age=%"PRId64, _ageworkinfo); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_auth) { \
+				snprintf(reply, sizeof(reply), " auth=%"PRId64, _auth); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_addrauth) { \
+				snprintf(reply, sizeof(reply), " addr=%"PRId64, _addrauth); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_poolstats) { \
+				snprintf(reply, sizeof(reply), " ps=%"PRId64, _poolstats); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_userstats) { \
+				snprintf(reply, sizeof(reply), " us=%"PRId64, _userstats); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_workerstats) { \
+				snprintf(reply, sizeof(reply), " ws=%"PRId64, _workerstats); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_workmarkers) { \
+				snprintf(reply, sizeof(reply), " wm=%"PRId64, _workmarkers); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_marks) { \
+				snprintf(reply, sizeof(reply), " mark=%"PRId64, _marks); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			LOGWARNING("WARN: %s", buf); \
+			FREENULL(buf); \
+		} \
+	} while (0)
+
+// Checks mismatch_total outside lock since it's not critical
+#define POOLINSTANCE_DATA_MSG() do { \
+		int64_t _workinfo, _ageworkinfo, _auth, _addrauth, _poolstats; \
+		int64_t _userstats, _workerstats, _workmarkers, _marks; \
+		bool warn = false; \
+		time_t now; \
+		if (mismatch_total) { \
+			ck_wlock(&poolinstance_lock); \
+			if (mismatch_total) { \
+				now = time(NULL); \
+				if ((now - last_mismatch_message) >= POOLINSTANCE_MSG_EVERY) { \
+					warn = true; \
+					last_mismatch_message = now; \
+					_workinfo = mismatch_workinfo; \
+					_ageworkinfo = mismatch_ageworkinfo; \
+					_auth = mismatch_auth; \
+					_addrauth = mismatch_addrauth; \
+					_poolstats = mismatch_poolstats; \
+					_userstats = mismatch_userstats; \
+					_workerstats = mismatch_workerstats; \
+					_workmarkers = mismatch_workmarkers; \
+					_marks = mismatch_marks; \
+					mismatch_workinfo = mismatch_ageworkinfo = \
+					mismatch_auth = mismatch_addrauth = \
+					mismatch_poolstats = mismatch_userstats = \
+					mismatch_workerstats = mismatch_workmarkers = \
+					mismatch_marks = mismatch_total = 0; \
+				} \
+			} \
+			ck_wunlock(&poolinstance_lock); \
+		} \
+		if (warn) { \
+			char reply[1024], *buf; \
+			size_t len, off; \
+			APPEND_REALLOC_INIT(buf, off, len); \
+			snprintf(reply, sizeof(reply), "%s() PI:", __func__); \
+			APPEND_REALLOC(buf, off, len, reply); \
+			if (_workinfo) { \
+				snprintf(reply, sizeof(reply), " wi=%"PRId64, _workinfo); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_ageworkinfo) { \
+				snprintf(reply, sizeof(reply), " age=%"PRId64, _ageworkinfo); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_auth) { \
+				snprintf(reply, sizeof(reply), " auth=%"PRId64, _auth); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_addrauth) { \
+				snprintf(reply, sizeof(reply), " addr=%"PRId64, _addrauth); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_poolstats) { \
+				snprintf(reply, sizeof(reply), " ps=%"PRId64, _poolstats); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_userstats) { \
+				snprintf(reply, sizeof(reply), " us=%"PRId64, _userstats); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_workerstats) { \
+				snprintf(reply, sizeof(reply), " ws=%"PRId64, _workerstats); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_workmarkers) { \
+				snprintf(reply, sizeof(reply), " wm=%"PRId64, _workmarkers); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			if (_marks) { \
+				snprintf(reply, sizeof(reply), " mark=%"PRId64, _marks); \
+				APPEND_REALLOC(buf, off, len, reply); \
+			} \
+			LOGWARNING("WARN: %s", buf); \
+			FREENULL(buf); \
+		} \
+	} while (0)
+
+#define POOLINSTANCE_DATA_SET(_obj, _pi) do { \
+		bool warn = false; \
+		ck_wlock(&poolinstance_lock); \
+		if (mismatch_all_ ## _obj++ == 0) { \
+			warn = true; \
+		} \
+		mismatch_ ## _obj++; \
+		mismatch_all_total++; \
+		mismatch_total++; \
+		ck_wunlock(&poolinstance_lock); \
+		if (warn) { \
+			char *pist = NULL; \
+			LOGWARNING("WARN: %s() " #_obj " first invalid " \
+				   "poolinstance '%s'", __func__, \
+				   pist = safe_text_nonull(_pi)); \
+			FREENULL(pist); \
+		} \
+		POOLINSTANCE_DATA_MSG(); \
+	} while (0)
+
+#define POOLINSTANCE_DBLOAD_SET(_obj, _pi) do { \
+		bool warn = false; \
+		ck_wlock(&poolinstance_lock); \
+		if (mismatch_all_ ## _obj++ == 0) \
+			warn = true; \
+		mismatch_ ## _obj++; \
+		mismatch_all_total++; \
+		mismatch_total++; \
+		ck_wunlock(&poolinstance_lock); \
+		if (warn) { \
+			char *pist = NULL; \
+			LOGWARNING("WARN: %s() dbload " #_obj " first " \
+				   "invalid poolinstance '%s'", __func__, \
+				   pist = safe_text_nonull(_pi)); \
+			FREENULL(pist); \
+		} \
+	} while (0)
+
+/* DBLoad message resets _obj and _all_obj back to zero
+ *  since it's counting a single table_fill() */
+#define POOLINSTANCE_DBLOAD_MSG(_obj) do { \
+		int64_t tot = 0; \
+		ck_wlock(&poolinstance_lock); \
+		if (mismatch_all_ ## _obj) { \
+			tot = mismatch_all_ ## _obj; \
+			mismatch_all_total -= mismatch_all_ ## _obj; \
+			mismatch_all_ ## _obj = 0; \
+			mismatch_total -= mismatch_ ## _obj; \
+			mismatch_ ## _obj = 0; \
+		} \
+		ck_wunlock(&poolinstance_lock); \
+		if (tot) { \
+			LOGWARNING("WARN: %s() dbload " #_obj " total " \
+				   "invalid poolinstance %"PRId64, \
+				   __func__, tot); \
+		} \
+	} while (0)
+
+// NULL or poolinstance must match
+extern const char *poolinstance;
+// lock for accessing all mismatch variables
+extern cklock_t poolinstance_lock;
+extern time_t last_mismatch_message;
+
+extern int64_t mismatch_workinfo;
+extern int64_t mismatch_ageworkinfo;
+extern int64_t mismatch_auth;
+extern int64_t mismatch_addrauth;
+extern int64_t mismatch_poolstats;
+extern int64_t mismatch_userstats;
+extern int64_t mismatch_workerstats;
+extern int64_t mismatch_workmarkers;
+extern int64_t mismatch_marks;
+extern int64_t mismatch_total;
+
+extern int64_t mismatch_all_workinfo;
+extern int64_t mismatch_all_ageworkinfo;
+extern int64_t mismatch_all_auth;
+extern int64_t mismatch_all_addrauth;
+extern int64_t mismatch_all_poolstats;
+extern int64_t mismatch_all_userstats;
+extern int64_t mismatch_all_workerstats;
+extern int64_t mismatch_all_workmarkers;
+extern int64_t mismatch_all_marks;
+extern int64_t mismatch_all_total;
 
 enum cmd_values {
 	CMD_UNSET,
@@ -2012,8 +2258,8 @@ typedef struct marks {
  *  marktype is one of:
  *   b - block end
  *   p - pplns begin
- *   s - shift begin (not yet used)
- *   e - shift end (not yet used)
+ *   s - shift begin (not used)
+ *   e - shift end
  *   o - other begin
  *   f - other finish/end
  *  description generated will be:
@@ -2030,7 +2276,7 @@ typedef struct marks {
  *  next/prev valid workinfoid, not simply +1 or -1
  *  i.e. all workinfoid in marks and workmarkers must exist in workinfo
  *
- * Until we start using shifts:
+ * Until we started using shifts:
  *  workmarkers can be created up to ending in the largest 'p' "-1"
  *  workmarkers will always be the smallest of:
  *   Block NNN-1 "+1" to Block NNN

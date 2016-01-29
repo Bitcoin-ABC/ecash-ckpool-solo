@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2015 Andrew Smith
+ * Copyright 1995-2016 Andrew Smith
  * Copyright 2014 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -294,6 +294,34 @@ cklock_t btc_lock;
 char *by_default = "code";
 char *inet_default = "127.0.0.1";
 char *id_default = "42";
+
+// NULL or poolinstance must match
+const char *poolinstance = NULL;
+// lock for accessing all mismatch variables
+cklock_t poolinstance_lock;
+time_t last_mismatch_message;
+
+int64_t mismatch_workinfo;
+int64_t mismatch_ageworkinfo;
+int64_t mismatch_auth;
+int64_t mismatch_addrauth;
+int64_t mismatch_poolstats;
+int64_t mismatch_userstats;
+int64_t mismatch_workerstats;
+int64_t mismatch_workmarkers;
+int64_t mismatch_marks;
+int64_t mismatch_total;
+
+int64_t mismatch_all_workinfo;
+int64_t mismatch_all_ageworkinfo;
+int64_t mismatch_all_auth;
+int64_t mismatch_all_addrauth;
+int64_t mismatch_all_poolstats;
+int64_t mismatch_all_userstats;
+int64_t mismatch_all_workerstats;
+int64_t mismatch_all_workmarkers;
+int64_t mismatch_all_marks;
+int64_t mismatch_all_total;
 
 // LOGQUEUE
 K_LIST *logqueue_free;
@@ -1599,6 +1627,9 @@ static bool setup_data()
 	if (!getdata3() || everyone_die)
 		return false;
 
+	/* This should never display anything since POOLINSTANCE_DBLOAD_MSG()
+	 *  resets each _obj's modified counters */
+	POOLINSTANCE_RESET_MSG("dbload");
 	setnow(&db_fin);
 	sec = tvdiff(&db_fin, &db_stt);
 	min = floor(sec / 60.0);
@@ -1612,6 +1643,7 @@ static bool setup_data()
 	if (!reload() || everyone_die)
 		return false;
 
+	POOLINSTANCE_RESET_MSG("reload");
 	setnow(&rel_fin);
 	sec = tvdiff(&rel_fin, &rel_stt);
 	min = floor(sec / 60.0);
@@ -3344,7 +3376,7 @@ static void make_a_shift_mark()
 	K_ITEM *b_item = NULL;
 	K_ITEM wi_look, ss_look;
 	SHARESUMMARY *sharesummary, looksharesummary;
-	WORKINFO *workinfo, lookworkinfo;
+	WORKINFO *workinfo = NULL, lookworkinfo;
 	BLOCKS *blocks = NULL;
 	MARKS *marks = NULL, *sh_marks = NULL;
 	int64_t ss_age_wid, last_marks_wid, marks_wid, prev_wid;
@@ -3398,11 +3430,11 @@ static void make_a_shift_mark()
 			return;
 
 		setnow(&now);
-		ok = marks_process(NULL, true, EMPTY, workinfo->workinfoid,
-				   description, EMPTY, MARKTYPE_OTHER_BEGIN_STR,
-				   MARK_USED_STR, (char *)by_default,
-				   (char *)__func__, (char *)inet_default,
-				   &now, NULL);
+		ok = marks_process(NULL, true, workinfo->poolinstance,
+				   workinfo->workinfoid, description, EMPTY,
+				   MARKTYPE_OTHER_BEGIN_STR, MARK_USED_STR,
+				   (char *)by_default, (char *)__func__,
+				   (char *)inet_default, &now, NULL);
 		if (ok) {
 			LOGWARNING("%s() FIRST mark %"PRId64"/%s/%s/%s/",
 				   __func__, workinfo->workinfoid,
@@ -3766,10 +3798,10 @@ static void make_a_shift_mark()
 		}
 
 		setnow(&now);
-		ok = marks_process(NULL, true, EMPTY, marks_wid, des, extra,
-				   shifttype, status, (char *)by_default,
-				   (char *)__func__, (char *)inet_default,
-				   &now, NULL);
+		ok = marks_process(NULL, true, workinfo->poolinstance,
+				   marks_wid, des, extra, shifttype, status,
+				   (char *)by_default, (char *)__func__,
+				   (char *)inet_default, &now, NULL);
 
 		if (ok) {
 			LOGWARNING("%s() mark %"PRId64"/%s/%s/%s/%s/",
@@ -5028,6 +5060,8 @@ static void *listener(void *arg)
 			tv_t now;
 			ts_t abs;
 
+			POOLINSTANCE_DATA_MSG();
+
 			tv_time(&now);
 			tv_to_ts(&abs, &now);
 			timeraddspec(&abs, &tsdiff);
@@ -5044,6 +5078,8 @@ sayonara:
 
 	if (conn)
 		PQfinish(conn);
+
+	POOLINSTANCE_RESET_MSG("exiting");
 
 	return NULL;
 }
@@ -5629,6 +5665,7 @@ static struct option long_options[] = {
 	// generate = enable payout pplns auto generation
 	{ "generate",		no_argument,		0,	'g' },
 	{ "help",		no_argument,		0,	'h' },
+	{ "pool-instance",	required_argument,	0,	'i' },
 	{ "killold",		no_argument,		0,	'k' },
 	{ "loglevel",		required_argument,	0,	'l' },
 	// marker = enable mark/workmarker/markersummary auto generation
@@ -5678,7 +5715,7 @@ int main(int argc, char **argv)
 	memset(&ckp, 0, sizeof(ckp));
 	ckp.loglevel = LOG_NOTICE;
 
-	while ((c = getopt_long(argc, argv, "c:d:ghkl:mM:n:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "c:d:ghi:kl:mM:n:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
 		switch(c) {
 			case 'c':
 				ckp.config = strdup(optarg);
@@ -5703,6 +5740,14 @@ int main(int argc, char **argv)
 						FREE_MODE_FAST_STR,
 						optarg);
 				}
+				break;
+			/* WARNING - enabling -i will require a DB data update
+			 *  if you've used ckdb before 1.920
+			 * All (old) marks and workmarkers in the DB will need
+			 *  to have poolinstance set to the given -i value
+			 *  since they will be blank */
+			case 'i':
+				poolinstance = (const char *)strdup(optarg);
 				break;
 			case 'g':
 				genpayout_auto = true;
@@ -5893,6 +5938,7 @@ int main(int argc, char **argv)
 
 	cklock_init(&last_lock);
 	cklock_init(&btc_lock);
+	cklock_init(&poolinstance_lock);
 
 	// Emulate a list for lock checking
 	process_pplns_free = k_lock_only_list("ProcessPPLNS");

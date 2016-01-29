@@ -212,9 +212,9 @@ function worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
  $pg = '';
  $totshrate = dsprate($totshrate);
  $totrate = dsprate($totrate);
-# if ($instances >= 0)
-#	$dspinst = " ($instances miners)";
-# else
+ if ($instances >= 0)
+	$dspinst = " ($instances miners)";
+ else
 	$dspinst = '';
 
  if (($offset % 2) == 0)

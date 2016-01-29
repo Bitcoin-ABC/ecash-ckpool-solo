@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2015 Andrew Smith
+ * Copyright 1995-2016 Andrew Smith
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -2980,15 +2980,20 @@ bool workinfo_fill(PGconn *conn)
 				break;
 			}
 
+			PQ_GET_FLD(res, i, "poolinstance", field, ok);
+			if (!ok)
+				break;
+			if (poolinstance && strcmp(field, poolinstance)) {
+				k_add_head(workinfo_free, item);
+				POOLINSTANCE_DBLOAD_SET(workinfo, field);
+				continue;
+			}
+			TXT_TO_STR("poolinstance", field, row->poolinstance);
+
 			PQ_GET_FLD(res, i, "workinfoid", field, ok);
 			if (!ok)
 				break;
 			TXT_TO_BIGINT("workinfoid", field, row->workinfoid);
-
-			PQ_GET_FLD(res, i, "poolinstance", field, ok);
-			if (!ok)
-				break;
-			TXT_TO_STR("poolinstance", field, row->poolinstance);
 
 /* Not currently needed in RAM
 			PQ_GET_FLD(res, i, "transactiontree", field, ok);
@@ -3098,6 +3103,7 @@ flail:
 		LOGWARNING("%s(): fetched %d workinfo records", __func__, n);
 	}
 
+	POOLINSTANCE_DBLOAD_MSG(workinfo);
 	return ok;
 }
 
@@ -6438,6 +6444,11 @@ bool poolstats_fill(PGconn *conn)
 		PQ_GET_FLD(res, i, "poolinstance", field, ok);
 		if (!ok)
 			break;
+		if (poolinstance && strcmp(field, poolinstance)) {
+			k_add_head(poolstats_free, item);
+			POOLINSTANCE_DBLOAD_SET(poolstats, field);
+			continue;
+		}
 		TXT_TO_STR("poolinstance", field, row->poolinstance);
 
 		PQ_GET_FLD(res, i, "elapsed", field, ok);
@@ -6499,6 +6510,7 @@ bool poolstats_fill(PGconn *conn)
 	}
 clean:
 	free(sel);
+	POOLINSTANCE_DBLOAD_MSG(poolstats);
 	return ok;
 }
 
@@ -7304,16 +7316,21 @@ bool workmarkers_fill(PGconn *conn)
 			break;
 		}
 
+		PQ_GET_FLD(res, i, "poolinstance", field, ok);
+		if (!ok)
+			break;
+		if (poolinstance && strcmp(field, poolinstance)) {
+			k_add_head(workmarkers_free, item);
+			POOLINSTANCE_DBLOAD_SET(workmarkers, field);
+			continue;
+		}
+		TXT_TO_PTR("poolinstance", field, row->poolinstance);
+		LIST_MEM_ADD(workmarkers_free, row->poolinstance);
+
 		PQ_GET_FLD(res, i, "markerid", field, ok);
 		if (!ok)
 			break;
 		TXT_TO_BIGINT("markerid", field, row->markerid);
-
-		PQ_GET_FLD(res, i, "poolinstance", field, ok);
-		if (!ok)
-			break;
-		TXT_TO_PTR("poolinstance", field, row->poolinstance);
-		LIST_MEM_ADD(workmarkers_free, row->poolinstance);
 
 		PQ_GET_FLD(res, i, "workinfoidend", field, ok);
 		if (!ok)
@@ -7403,6 +7420,7 @@ bool workmarkers_fill(PGconn *conn)
 		LOGWARNING("%s(): loaded %d workmarkers records", __func__, n);
 	}
 
+	POOLINSTANCE_DBLOAD_MSG(workmarkers);
 	return ok;
 }
 
@@ -7631,6 +7649,11 @@ bool marks_fill(PGconn *conn)
 		PQ_GET_FLD(res, i, "poolinstance", field, ok);
 		if (!ok)
 			break;
+		if (poolinstance && strcmp(field, poolinstance)) {
+			k_add_head(marks_free, item);
+			POOLINSTANCE_DBLOAD_SET(marks, field);
+			continue;
+		}
 		TXT_TO_PTR("poolinstance", field, row->poolinstance);
 		LIST_MEM_ADD(marks_free, row->poolinstance);
 
@@ -7683,6 +7706,7 @@ bool marks_fill(PGconn *conn)
 		LOGWARNING("%s(): loaded %d marks records", __func__, n);
 	}
 
+	POOLINSTANCE_DBLOAD_MSG(marks);
 	return ok;
 }
 

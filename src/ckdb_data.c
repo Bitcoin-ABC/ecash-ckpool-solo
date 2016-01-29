@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2015 Andrew Smith
+ * Copyright 1995-2016 Andrew Smith
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -4707,7 +4707,8 @@ static bool gen_workmarkers(PGconn *conn, MARKS *stt, bool after, MARKS *fin,
 			 stt->description, after ? "++" : "",
 			 fin->description, before ? "--" : "");
 
-		ok = workmarkers_process(conn, false, true, 0, EMPTY,
+		ok = workmarkers_process(conn, false, true, 0,
+					 wi_fin->poolinstance,
 					 wi_fin->workinfoid, wi_stt->workinfoid,
 					 description, MARKER_READY_STR,
 					 by, code, inet, cd, trf_root);
@@ -4716,7 +4717,7 @@ static bool gen_workmarkers(PGconn *conn, MARKS *stt, bool after, MARKS *fin,
 			return false;
 	}
 
-	ok = marks_process(conn, true, EMPTY, fin->workinfoid,
+	ok = marks_process(conn, true, wi_fin->poolinstance, fin->workinfoid,
 			   fin->description, fin->extra, fin->marktype,
 			   MARK_USED_STR, by, code, inet, cd, trf_root);
 

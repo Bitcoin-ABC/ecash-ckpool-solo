@@ -78,6 +78,9 @@ struct client_instance {
 
 	/* The size of the socket send buffer */
 	int sendbufsize;
+
+	/* Does this client accept bkeys */
+	bool bkey;
 };
 
 struct sender_send {
@@ -162,6 +165,13 @@ struct connector_data {
 };
 
 typedef struct connector_data cdata_t;
+
+struct binmsg {
+	char *buf;
+	int len;
+};
+
+typedef struct binmsg binmsg_t;
 
 /* Increase the reference count of instance */
 static void __inc_instance_ref(client_instance_t *client)
@@ -430,7 +440,7 @@ static void drop_all_clients(cdata_t *cdata)
 	ck_wunlock(&cdata->lock);
 }
 
-static void send_client(cdata_t *cdata, int64_t id, char *buf);
+static void send_client(cdata_t *cdata, const int64_t id, char *buf, int slen, int len);
 
 /* Look for shares being submitted via a redirector and add them to a linked
  * list for looking up the responses. */
@@ -460,12 +470,29 @@ static void parse_redirector_share(client_instance_t *client, const json_t *val)
 	}
 }
 
+static void send_client_msg(cdata_t *cdata, const int64_t id, char *buf)
+{
+	uint32_t len;
+
+	if (unlikely(!buf)) {
+		LOGWARNING("Connector send_client sent a null buffer");
+		return;
+	}
+	len = strlen(buf);
+	if (unlikely(!len)) {
+		LOGWARNING("Connector send_client sent a zero length buffer");
+		free(buf);
+		return;
+	}
+	send_client(cdata, id, buf, len, len);
+}
+
 /* Client is holding a reference count from being on the epoll list */
 static void parse_client_msg(cdata_t *cdata, client_instance_t *client)
 {
+	int buflen, ret, slen = 0, blen = 0;
 	ckpool_t *ckp = cdata->ckp;
-	int buflen, ret;
-	char *msg, *eol;
+	char *eol, *bkey = NULL;
 	json_t *val;
 
 retry:
@@ -493,31 +520,41 @@ reparse:
 	eol = memchr(client->buf, '\n', client->bufofs);
 	if (!eol)
 		goto retry;
+	if (unlikely(client->bufofs > 5 && (bkey = strstr(eol - 5, "bkey\n" )))) {
+		int len;
+
+		/* We have bkey data. Do we have enough to parse it? */
+		slen = bkey - client->buf - 1;
+		len = client->bufofs - slen;
+		if (len < BKEY_LENOFS + BKEY_LENLEN)
+			goto retry;
+		blen = bkey_len(bkey);
+		if (len < blen)
+			goto retry;
+		buflen = slen + blen + 1;
+	} else
+		buflen = eol - client->buf + 1;
 
 	/* Do something useful with this message now */
-	buflen = eol - client->buf + 1;
 	if (unlikely(buflen > MAX_MSGSIZE && !client->remote)) {
 		LOGNOTICE("Client id %"PRId64" fd %d message oversize, disconnecting", client->id, client->fd);
 		invalidate_client(ckp, cdata, client);
 		return;
 	}
-
-	msg = alloca(round_up_page(buflen + 1));
-	memcpy(msg, client->buf, buflen);
-	msg[buflen] = '\0';
-	client->bufofs -= buflen;
-	memmove(client->buf, client->buf + buflen, client->bufofs);
-	client->buf[client->bufofs] = '\0';
-	if (!(val = json_loads(msg, 0, NULL))) {
+	if (!(val = json_loads(client->buf, JSON_DISABLE_EOF_CHECK, NULL))) {
 		char *buf = strdup("Invalid JSON, disconnecting\n");
 
-		LOGINFO("Client id %"PRId64" sent invalid json message %s", client->id, msg);
-		send_client(cdata, client->id, buf);
+		LOGINFO("Client id %"PRId64" sent invalid json message %s", client->id, client->buf);
+		send_client_msg(cdata, client->id, buf);
 		invalidate_client(ckp, cdata, client);
 		return;
 	} else {
 		char *s;
 
+		if (unlikely(blen)) {
+			json_append_bkeys(val, bkey, blen);
+			blen = 0;
+		}
 		if (client->passthrough) {
 			int64_t passthrough_id;
 
@@ -525,7 +562,7 @@ reparse:
 			passthrough_id = (client->id << 32) | passthrough_id;
 			json_object_set_new_nocheck(val, "client_id", json_integer(passthrough_id));
 		} else {
-			if (ckp->redirector && !client->redirected && strstr(msg, "mining.submit"))
+			if (ckp->redirector && !client->redirected && strstr(client->buf, "mining.submit"))
 				parse_redirector_share(client, val);
 			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
 			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
@@ -546,6 +583,10 @@ reparse:
 		free(s);
 		json_decref(val);
 	}
+	client->bufofs -= buflen;
+	if (client->bufofs)
+		memmove(client->buf, client->buf + buflen, client->bufofs);
+	client->buf[client->bufofs] = '\0';
 
 	if (client->bufofs)
 		goto reparse;
@@ -890,29 +931,28 @@ out:
 
 /* Send a client by id a heap allocated buffer, allowing this function to
  * free the ram. */
-static void send_client(cdata_t *cdata, const int64_t id, char *buf)
+static void send_client(cdata_t *cdata, const int64_t id, char *buf, int slen, int len)
 {
 	ckpool_t *ckp = cdata->ckp;
 	sender_send_t *sender_send;
 	client_instance_t *client;
-	int len;
+	uint32_t blen = 0;
+	char *bkey = NULL;
+	json_t *val;
 
-	if (unlikely(!buf)) {
-		LOGWARNING("Connector send_client sent a null buffer");
-		return;
-	}
-	len = strlen(buf);
-	if (unlikely(!len)) {
-		LOGWARNING("Connector send_client sent a zero length buffer");
-		free(buf);
-		return;
-	}
-
+	/* Node messages will have come from the generator which will have
+	 * already extracted any bkeys */
 	if (unlikely(ckp->node && !id)) {
 		LOGDEBUG("Message for node: %s", buf);
 		send_proc(ckp->stratifier, buf);
 		free(buf);
 		return;
+	}
+
+	if (unlikely(len > slen)) {
+		bkey = strstr(buf + slen - 5, "bkey\n");
+		if (bkey)
+			blen = len - (bkey - buf);
 	}
 
 	/* Grab a reference to this client until the sender_send has
@@ -946,14 +986,19 @@ static void send_client(cdata_t *cdata, const int64_t id, char *buf)
 			return;
 		}
 		if (ckp->node) {
-			json_t *val = json_loads(buf, 0, NULL);
 			char *msg;
 
-			if (!val) // Can happen if client sent invalid json message
+			val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+			if (!val) {
+				// Can happen if client sent invalid json message
+				len = slen;
 				goto out;
+			}
 			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
 			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
 			json_object_set_new_nocheck(val, "server", json_integer(client->server));
+			if (bkey)
+				json_append_bkeys(val, bkey, blen);
 			msg = json_dumps(val, JSON_COMPACT);
 			json_decref(val);
 			send_proc(ckp->stratifier, msg);
@@ -961,6 +1006,22 @@ static void send_client(cdata_t *cdata, const int64_t id, char *buf)
 		}
 		if (ckp->redirector && !client->redirected)
 			test_redirector_shares(ckp, client, buf);
+	}
+
+	/* Append bkeys as regular json for clients that can't decode them */
+	if (unlikely(bkey && !client->bkey)) {
+		val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+		if (unlikely(!val)) {
+			LOGERR("Failed to decode json in bkey encoded message %s", buf);
+			bkey = '\0';
+			len = strlen(buf);
+			goto out;
+		}
+		json_append_bkeys(val, bkey, blen);
+		free(buf);
+		buf = json_dumps(val, JSON_COMPACT | JSON_EOL);
+		len = strlen(buf);
+		json_decref(val);
 	}
 out:
 	sender_send = ckzalloc(sizeof(sender_send_t));
@@ -992,8 +1053,8 @@ static void passthrough_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t 
 
 	LOGINFO("Connector adding passthrough client %"PRId64, client->id);
 	client->passthrough = true;
-	ASPRINTF(&buf, "{\"result\": true}\n");
-	send_client(cdata, client->id, buf);
+	ASPRINTF(&buf, "{\"result\":true,\"bkey\":true}\n");
+	send_client_msg(cdata, client->id, buf);
 	if (!ckp->rmem_warn)
 		set_recvbufsize(ckp, client->fd, 1048576);
 	if (!ckp->wmem_warn)
@@ -1007,10 +1068,12 @@ static void remote_server(ckpool_t *ckp, cdata_t *cdata, client_instance_t *clie
 	LOGWARNING("Connector adding client %"PRId64" %s as remote trusted server",
 		   client->id, client->address_name);
 	client->remote = true;
-	ASPRINTF(&buf, "{\"result\": true}\n");
-	send_client(cdata, client->id, buf);
+	ASPRINTF(&buf, "{\"result\":true,\"bkey\":true}\n");
+	send_client_msg(cdata, client->id, buf);
 	if (!ckp->rmem_warn)
-		set_recvbufsize(ckp, client->fd, 1048576);
+		set_recvbufsize(ckp, client->fd, 2097152);
+	if (!ckp->wmem_warn)
+		client->sendbufsize = set_sendbufsize(ckp, client->fd, 2097152);
 }
 
 static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
@@ -1028,11 +1091,14 @@ static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 	keep_sockalive(cs->fd);
 
 	/* We want large send buffers for upstreaming messages */
+	if (!ckp->rmem_warn)
+		set_recvbufsize(ckp, cs->fd, 2097152);
 	if (!ckp->wmem_warn)
-		cs->sendbufsiz = set_sendbufsize(ckp, cs->fd, 1048576);
+		cs->sendbufsiz = set_sendbufsize(ckp, cs->fd, 2097152);
 
-	JSON_CPACK(req, "{ss,s[s]}",
+	JSON_CPACK(req, "{ss,sb,s[s]}",
 			"method", "mining.remote",
+			"bkey", true,
 			"params", PACKAGE"/"VERSION);
 	res = send_json_msg(cs, req);
 	json_decref(req);
@@ -1063,21 +1129,20 @@ out:
 	return ret;
 }
 
-static void usend_process(ckpool_t *ckp, char *buf)
+static void usend_process(ckpool_t *ckp, binmsg_t *binmsg)
 {
 	cdata_t *cdata = ckp->data;
 	connsock_t *cs = &cdata->upstream_cs;
-	int len, sent;
+	int sent;
 
-	if (unlikely(!buf || !strlen(buf))) {
+	if (unlikely(!binmsg->buf || !strlen(binmsg->buf))) {
 		LOGERR("Send empty message to usend_process");
 		goto out;
 	}
-	LOGDEBUG("Sending upstream msg: %s", buf);
-	len = strlen(buf);
+	LOGDEBUG("Sending upstream msg: %s", binmsg->buf);
 	while (42) {
-		sent = write_socket(cs->fd, buf, len);
-		if (sent == len)
+		sent = write_socket(cs->fd, binmsg->buf, binmsg->len);
+		if (sent == binmsg->len)
 			break;
 		if (cs->fd > 0) {
 			LOGWARNING("Upstream pool failed, attempting reconnect while caching messages");
@@ -1088,28 +1153,69 @@ static void usend_process(ckpool_t *ckp, char *buf)
 		while (!connect_upstream(ckp, cs));
 	}
 out:
-	free(buf);
+	free(binmsg->buf);
+	free(binmsg);
 }
 
 static void parse_remote_submitblock(ckpool_t *ckp, const json_t *val, const char *buf)
 {
-	const char *gbt_block = json_string_value(json_object_get(val, "submitblock"));
+	json_t *hash_val, *data_val;
+	const char *hash, *data;
+	char *gbt_block;
 
-	if (unlikely(!gbt_block)) {
-		LOGWARNING("Failed to find submitblock data from upstream submitblock method %s",
-			   buf);
+	hash_val = json_object_get(val, "hash");
+	hash = json_string_value(hash_val);
+	data_val = json_object_get(val, "data");
+	data = json_string_value(data_val);
+	if (unlikely(!hash || !data)) {
+		LOGWARNING("Failed to extract hash and data from remote submitblock msg %s", buf);
 		return;
 	}
+	ASPRINTF(&gbt_block, "submitblock:%s,%s", hash, data);
 	LOGWARNING("Submitting possible upstream block!");
 	send_proc(ckp->generator, gbt_block);
+	free(gbt_block);
 }
 
 static void ping_upstream(cdata_t *cdata)
 {
-	char *buf;
+	binmsg_t *binmsg = ckalloc(sizeof(binmsg_t));
 
-	ASPRINTF(&buf, "{\"method\":\"ping\"}\n");
-	ckmsgq_add(cdata->upstream_sends, buf);
+	ASPRINTF(&binmsg->buf, "{\"method\":\"ping\"}\n");
+	binmsg->len = strlen(binmsg->buf);
+	ckmsgq_add(cdata->upstream_sends, binmsg);
+}
+
+static json_t *urecv_loads(const char *buf, const int len)
+{
+	json_t *val = NULL;
+	char *bkey = NULL;
+	int slen;
+
+	slen = strlen(buf);
+	if (unlikely(!slen)) {
+		LOGWARNING("Received empty message from upstream pool");
+		goto out;
+	}
+	val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+	if (unlikely(!val)) {
+		LOGWARNING("Received non-json msg from upstream pool %s",
+			   buf);
+		goto out;
+	}
+	if (len == slen)
+		goto out;
+	bkey = strstr(buf + slen - 5, "bkey\n");
+	if (likely(bkey)) {
+		int blen;
+
+		LOGDEBUG("Bkey found in upstream pool msg");
+		blen = len - (bkey - buf);
+		json_append_bkeys(val, bkey, blen);
+	} else
+		LOGWARNING("Non-bkey extranous data from upstream pool msg %s", buf);
+out:
+	return val;
 }
 
 static void *urecv_process(void *arg)
@@ -1144,12 +1250,9 @@ static void *urecv_process(void *arg)
 			goto nomsg;
 		}
 		alive = true;
-		val = json_loads(cs->buf, 0, NULL);
-		if (unlikely(!val)) {
-			LOGWARNING("Received non-json msg from upstream pool %s",
-				   cs->buf);
+		val = urecv_loads(cs->buf, ret);
+		if (unlikely(!val))
 			goto nomsg;
-		}
 		method = json_string_value(json_object_get(val, "method"));
 		if (unlikely(!method)) {
 			LOGWARNING("Failed to find method from upstream pool json %s",
@@ -1202,13 +1305,22 @@ out:
 	return ret;
 }
 
-static void process_client_msg(cdata_t *cdata, const char *buf)
+static void process_client_msg(cdata_t *cdata, char *buf, uint32_t msglen)
 {
+	char *msg, *bkey = NULL;
+	uint32_t slen, blen = 0;
 	int64_t client_id;
 	json_t *json_msg;
-	char *msg;
 
-	json_msg = json_loads(buf, 0, NULL);
+	slen = strlen(buf);
+	if (likely(slen > 5)) {
+		bkey = strstr(buf + slen - 5, "bkey\n");
+		if (bkey) {
+			LOGDEBUG("Bkey found in process_client_msg");
+			blen = msglen - (bkey - buf);
+		}
+	}
+	json_msg = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
 	if (unlikely(!json_msg)) {
 		LOGWARNING("Invalid json message in process_client_msg: %s", buf);
 		return;
@@ -1223,7 +1335,16 @@ static void process_client_msg(cdata_t *cdata, const char *buf)
 		json_object_set_new_nocheck(json_msg, "client_id", json_integer(client_id & 0xffffffffll));
 
 	msg = json_dumps(json_msg, JSON_EOL | JSON_COMPACT);
-	send_client(cdata, client_id, msg);
+	slen = strlen(msg);
+	if (blen) {
+		/* We're overwriting the EOL so remove it from msglen */
+		msglen = slen + blen - 1;
+		msg = realloc(msg, msglen);
+		/* Overwrite the EOL here */
+		memcpy(msg + slen - 1, bkey, blen);
+		send_client(cdata, client_id, msg, slen, msglen);
+	} else
+		send_client(cdata, client_id, msg, slen, slen);
 	json_decref(json_msg);
 }
 
@@ -1238,7 +1359,7 @@ static void drop_passthrough_client(cdata_t *cdata, const int64_t id)
 	/* We have a direct connection to the passthrough's connector so we
 	 * can send it any regular commands. */
 	ASPRINTF(&msg, "dropclient=%"PRId64"\n", client_id);
-	send_client(cdata, id, msg);
+	send_client_msg(cdata, id, msg);
 }
 
 static char *connector_stats(cdata_t *cdata, const int runtime)
@@ -1336,12 +1457,16 @@ retry:
 	/* The bulk of the messages will be json messages to send to clients
 	 * so look for them first. */
 	if (likely(buf[0] == '{')) {
-		process_client_msg(cdata, buf);
+		process_client_msg(cdata, buf, umsg->msglen);
 	} else if (cmdmatch(buf, "upstream=")) {
-		char *msg = strdup(buf + 9);
+		binmsg_t *binmsg = ckalloc(sizeof(binmsg_t));
 
-		LOGDEBUG("Upstreaming %s", msg);
-		ckmsgq_add(cdata->upstream_sends, msg);
+		binmsg->buf = ckalloc(umsg->msglen);
+		binmsg->len = umsg->msglen - 9;
+		memcpy(binmsg->buf, buf + 9, binmsg->len);
+
+		LOGDEBUG("Upstreaming %s", umsg->buf);
+		ckmsgq_add(cdata->upstream_sends, binmsg);
 		goto retry;
 	} else if (cmdmatch(buf, "dropclient")) {
 		client_instance_t *client;
@@ -1426,6 +1551,22 @@ retry:
 			goto retry;
 		}
 		remote_server(ckp, cdata, client);
+		dec_instance_ref(cdata, client);
+	} else if (cmdmatch(buf, "bkeyclient")) {
+		client_instance_t *client;
+
+		ret = sscanf(buf, "bkeyclient=%"PRId64, &client_id);
+		if (ret < 0) {
+			LOGDEBUG("Connector failed to parse bkeyclient command: %s", buf);
+			goto retry;
+		}
+		client = ref_client_by_id(cdata, client_id);
+		if (unlikely(!client)) {
+			LOGINFO("Connector failed to find client id %"PRId64" to set bkey", client_id);
+			goto retry;
+		}
+		LOGINFO("Set bkey on client %"PRId64, client_id);
+		client->bkey = true;
 		dec_instance_ref(cdata, client);
 	} else if (cmdmatch(buf, "getxfd")) {
 		int fdno = -1;

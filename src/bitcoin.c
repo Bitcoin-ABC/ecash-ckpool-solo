@@ -405,10 +405,15 @@ retry:
 		}
 		goto out;
 	}
-	if (!json_is_true(res_val)) {
+	if (!json_is_null(res_val)) {
 		res_ret = json_string_value(res_val);
 		if (res_ret && strlen(res_ret)) {
 			LOGWARNING("SUBMIT BLOCK RETURNED: %s", res_ret);
+			/* Consider duplicate response as an accepted block */
+			if (safecmp(res_ret, "duplicate"))
+				goto out;
+		} else {
+			LOGWARNING("SUBMIT BLOCK GOT NO RESPONSE!");
 			goto out;
 		}
 	}

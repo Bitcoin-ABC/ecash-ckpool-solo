@@ -39,6 +39,7 @@ struct unix_msg {
 	unix_msg_t *prev;
 	int sockd;
 	char *buf;
+	uint32_t msglen;
 };
 
 struct ckmsgq {
@@ -328,6 +329,9 @@ void empty_buffer(connsock_t *cs);
 int set_sendbufsize(ckpool_t *ckp, const int fd, const int len);
 int set_recvbufsize(ckpool_t *ckp, const int fd, const int len);
 int read_socket_line(connsock_t *cs, float *timeout);
+void _send_proc_data(proc_instance_t *pi, const char *msg, uint32_t len, const char *file,
+		     const char *func, const int line);
+#define send_proc_data(pi, msg, len) _send_proc_data(pi, msg, len, __FILE__, __func__, __LINE__)
 void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
 #define send_proc(pi, msg) _send_proc(pi, msg, __FILE__, __func__, __LINE__)
 char *_send_recv_proc(proc_instance_t *pi, const char *msg, int writetimeout, int readtimedout,
