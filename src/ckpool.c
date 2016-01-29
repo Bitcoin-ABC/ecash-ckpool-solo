@@ -223,7 +223,6 @@ static void *unix_receiver(void *arg)
 
 	while (42) {
 		unix_msg_t *umsg;
-		uint32_t msglen;
 		char *buf;
 
 		sockd = accept(rsockd, NULL, NULL);
@@ -232,7 +231,7 @@ static void *unix_receiver(void *arg)
 			childsighandler(15);
 			break;
 		}
-		buf = recv_unix(sockd, &msglen);
+		buf = recv_unix_msg(sockd);
 		if (unlikely(!buf)) {
 			Close(sockd);
 			LOGWARNING("Failed to get message on %s socket", qname);
@@ -241,7 +240,6 @@ static void *unix_receiver(void *arg)
 		umsg = ckalloc(sizeof(unix_msg_t));
 		umsg->sockd = sockd;
 		umsg->buf = buf;
-		umsg->msglen = msglen;
 
 		mutex_lock(&pi->rmsg_lock);
 		DL_APPEND(pi->unix_msgs, umsg);
@@ -579,7 +577,6 @@ static void clear_bufline(connsock_t *cs)
 	if (unlikely(!cs->buf)) {
 		socklen_t optlen = sizeof(cs->rcvbufsiz);
 
-		cs->bufofs = 0;
 		cs->buf = ckzalloc(PAGESIZE);
 		cs->bufsize = PAGESIZE;
 		getsockopt(cs->fd, SOL_SOCKET, SO_RCVBUF, &cs->rcvbufsiz, &optlen);
@@ -590,8 +587,8 @@ static void clear_bufline(connsock_t *cs)
 		memset(cs->buf + cs->buflen, 0, cs->bufofs);
 		cs->bufofs = cs->buflen;
 		cs->buflen = 0;
+		cs->buf[cs->bufofs] = '\0';
 	}
-	cs->buf[cs->bufofs] = '\0';
 }
 
 static void add_buflen(ckpool_t *ckp, connsock_t *cs, const char *readbuf, const int len)
@@ -641,62 +638,6 @@ static int recv_available(ckpool_t *ckp, connsock_t *cs)
 	return len;
 }
 
-static bool read_cs_length(ckpool_t *ckp, connsock_t *cs, float *timeout, int len)
-{
-	bool ret = false;
-	tv_t start;
-
-	tv_time(&start);
-
-	while (cs->bufofs < len) {
-		float diff;
-		tv_t now;
-		int res;
-
-		if (*timeout < 0) {
-			LOGDEBUG("Timed out in read_cs_length");
-			ret = 0;
-			goto out;
-		}
-		res = wait_read_select(cs->fd, *timeout);
-		if (res < 1)
-			goto out;
-		res = recv_available(ckp, cs);
-		if (res < 1)
-			goto out;
-		tv_time(&now);
-		diff = tvdiff(&now, &start);
-		copy_tv(&start, &now);
-		*timeout -= diff;
-	}
-	ret = true;
-out:
-	return ret;
-}
-
-static char *bkey_eom(ckpool_t *ckp, connsock_t *cs, char *bkey, float *timeout)
-{
-	int slen, msglen;
-	char *ret;
-
-	/* String length till bkey */
-	slen = bkey - cs->buf - 1;
-	if (!read_cs_length(ckp, cs, timeout, slen + BKEY_LENOFS + BKEY_LENLEN)) {
-		LOGWARNING("Failed to read cs bkey header");
-		ret = cs->buf + cs->bufofs;
-		goto out;
-	}
-	msglen = bkey_len(bkey);
-	if (!read_cs_length(ckp, cs, timeout, slen + msglen)) {
-		LOGWARNING("Failed to read cs bkey msg length %d", msglen);
-		ret = cs->buf + cs->bufofs;
-		goto out;
-	}
-	ret = cs->buf + slen + msglen;
-out:
-	return ret;
-}
-
 /* Read from a socket into cs->buf till we get an '\n', converting it to '\0'
  * and storing how much extra data we've received, to be moved to the beginning
  * of the buffer for use on the next receive. Returns length of the line if a
@@ -704,9 +645,9 @@ out:
  * and -1 on error. */
 int read_socket_line(connsock_t *cs, float *timeout)
 {
-	char *eom = NULL, *bkey = NULL;
 	ckpool_t *ckp = cs->ckp;
 	bool proxy = ckp->proxy;
+	char *eom = NULL;
 	tv_t start, now;
 	float diff;
 	int ret;
@@ -757,18 +698,14 @@ int read_socket_line(connsock_t *cs, float *timeout)
 		copy_tv(&start, &now);
 		*timeout -= diff;
 	}
-
 	ret = eom - cs->buf;
-	if (unlikely(ret > 5 && (bkey = strstr(cs->buf + ret - 5, "bkey\n")))) {
-		eom = bkey_eom(ckp, cs, bkey, timeout);
-		ret = eom - cs->buf;
-	} else
-		*eom = '\0';
-	if (cs->bufofs > ret + 1) {
-		cs->buflen = cs->bufofs - ret - 1;
-		cs->bufofs = ret + 1;
-	} else
+
+	cs->buflen = cs->buf + cs->bufofs - eom - 1;
+	if (cs->buflen)
+		cs->bufofs = eom - cs->buf + 1;
+	else
 		cs->bufofs = 0;
+	*eom = '\0';
 out:
 	if (ret < 0) {
 		empty_buffer(cs);
@@ -779,12 +716,16 @@ out:
 
 /* Send a single message to a process instance when there will be no response,
  * closing the socket immediately. */
-void _send_proc_data(proc_instance_t *pi, const char *msg, uint32_t len, const char *file,
-		     const char *func, const int line)
+void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line)
 {
 	char *path = pi->us.path;
 	bool ret = false;
 	int sockd;
+
+	if (unlikely(!msg || !strlen(msg))) {
+		LOGERR("Attempted to send null message to %s in send_proc", pi->processname);
+		return;
+	}
 
 	if (unlikely(!path || !strlen(path))) {
 		LOGERR("Attempted to send message %s to null path in send_proc", msg ? msg : "");
@@ -810,7 +751,7 @@ void _send_proc_data(proc_instance_t *pi, const char *msg, uint32_t len, const c
 		LOGWARNING("Failed to open socket %s", path);
 		goto out;
 	}
-	if (unlikely(!send_unix(sockd, msg, len)))
+	if (unlikely(!send_unix_msg(sockd, msg)))
 		LOGWARNING("Failed to send %s to socket %s", msg, path);
 	else
 		ret = true;
@@ -818,18 +759,6 @@ void _send_proc_data(proc_instance_t *pi, const char *msg, uint32_t len, const c
 out:
 	if (unlikely(!ret))
 		LOGERR("Failure in send_proc from %s %s:%d", file, func, line);
-}
-
-/* As per send_proc_data but must be a string */
-void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line)
-{
-	uint32_t len;
-
-	if (unlikely(!msg || !(len = strlen(msg)))) {
-		LOGERR("Attempted to send null message to %s in send_proc", pi->processname);
-		return;
-	}
-	return _send_proc_data(pi, msg, len, file, func, line);
 }
 
 /* Send a single message to a process instance and retrieve the response, then

@@ -156,10 +156,6 @@ typedef struct json_params json_params_t;
 struct smsg {
 	json_t *json_msg;
 	int64_t client_id;
-
-	/* bkey data if any */
-	char *bkey;
-	uint32_t bkeylen;
 };
 
 typedef struct smsg smsg_t;
@@ -329,7 +325,6 @@ struct stratum_instance {
 	int subproxyid; /* Which subproxy */
 
 	bool remote; /* Is this a trusted remote server */
-	bool bkey; /* Does this client accept bkeys */
 };
 
 struct share {
@@ -922,34 +917,31 @@ static void send_node_workinfo(sdata_t *sdata, const workbase_t *wb)
 	ck_rlock(&sdata->instance_lock);
 	if (sdata->node_instances) {
 		json_t *wb_val = json_object();
-		char *bkey = bkey_object();
-		uint32_t bkeylen;
 
 		json_set_int(wb_val, "jobid", wb->id);
-		bkey_add_hex(bkey, "target", wb->target);
+		json_set_string(wb_val, "target", wb->target);
 		json_set_double(wb_val, "diff", wb->diff);
 		json_set_int(wb_val, "version", wb->version);
 		json_set_int(wb_val, "curtime", wb->curtime);
-		bkey_add_hex(bkey, "prevhash", wb->prevhash);
-		bkey_add_hex(bkey, "ntime", wb->ntime);
-		bkey_add_hex(bkey, "bbversion", wb->bbversion);
-		bkey_add_hex(bkey, "nbit", wb->nbit);
+		json_set_string(wb_val, "prevhash", wb->prevhash);
+		json_set_string(wb_val, "ntime", wb->ntime);
+		json_set_string(wb_val, "bbversion", wb->bbversion);
+		json_set_string(wb_val, "nbit", wb->nbit);
 		json_set_int(wb_val, "coinbasevalue", wb->coinbasevalue);
 		json_set_int(wb_val, "height", wb->height);
 		json_set_string(wb_val, "flags", wb->flags);
 		json_set_int(wb_val, "transactions", wb->transactions);
 		if (likely(wb->transactions))
-			bkey_add_hex(bkey, "txn_data", wb->txn_data);
+			json_set_string(wb_val, "txn_data", wb->txn_data);
 		/* We don't need txn_hashes */
 		json_set_int(wb_val, "merkles", wb->merkles);
 		json_object_set_new_nocheck(wb_val, "merklehash", json_deep_copy(wb->merkle_array));
-		bkey_add_hex(bkey, "coinb1", wb->coinb1);
+		json_set_string(wb_val, "coinb1", wb->coinb1);
 		json_set_int(wb_val, "enonce1varlen", wb->enonce1varlen);
 		json_set_int(wb_val, "enonce2varlen", wb->enonce2varlen);
 		json_set_int(wb_val, "coinb1len", wb->coinb1len);
 		json_set_int(wb_val, "coinb2len", wb->coinb2len);
-		bkey_add_hex(bkey, "coinb2", wb->coinb2);
-		bkeylen = bkey_len(bkey);
+		json_set_string(wb_val, "coinb2", wb->coinb2);
 
 		DL_FOREACH(sdata->node_instances, client) {
 			ckmsg_t *client_msg;
@@ -961,15 +953,11 @@ static void send_node_workinfo(sdata_t *sdata, const workbase_t *wb)
 			msg = ckzalloc(sizeof(smsg_t));
 			msg->json_msg = json_msg;
 			msg->client_id = client->id;
-			msg->bkey = ckalloc(bkeylen);
-			memcpy(msg->bkey, bkey, bkeylen);
-			msg->bkeylen = bkeylen;
 			client_msg->data = msg;
 			DL_APPEND(bulk_send, client_msg);
 			messages++;
 		}
 		json_decref(wb_val);
-		free(bkey);
 	}
 	ck_runlock(&sdata->instance_lock);
 
@@ -1497,25 +1485,17 @@ static void send_node_block(sdata_t *sdata, const char *enonce1, const char *non
 	}
 }
 
-static void upstream_blocksubmit(ckpool_t *ckp, const char *hash, const char *data)
+static void upstream_blocksubmit(ckpool_t *ckp, const char *gbt_block)
 {
-	char *buf, *bkey = bkey_object();
-	uint32_t bkeylen, len;
+	char *buf;
 
-	bkey_add_hex(bkey, "hash", hash);
-	bkey_add_hex(bkey, "data", data);
-	bkeylen = bkey_len(bkey);
-	ASPRINTF(&buf, "upstream={\"method\":\"submitblock\"}");
-	len = strlen(buf);
-	buf = realloc(buf, round_up_page(len + 1 + bkeylen));
-	memcpy(buf + len, bkey, bkeylen);
-	free(bkey);
-	send_proc_data(ckp->connector, buf, len + bkeylen);
+	ASPRINTF(&buf, "upstream={\"method\":\"submitblock\",\"submitblock\":\"%s\"}\n",
+		 gbt_block);
+	send_proc(ckp->connector, buf);
 	free(buf);
 }
 
-static void downstream_blocksubmits(ckpool_t *ckp, const char *hash, const char *data,
-				    const stratum_instance_t *source)
+static void downstream_blocksubmits(ckpool_t *ckp, const char *gbt_block, const stratum_instance_t *source)
 {
 	stratum_instance_t *client;
 	sdata_t *sdata = ckp->data;
@@ -1525,14 +1505,10 @@ static void downstream_blocksubmits(ckpool_t *ckp, const char *hash, const char 
 	ck_rlock(&sdata->instance_lock);
 	if (sdata->remote_instances) {
 		json_t *val = json_object();
-		char *bkey = bkey_object();
-		uint32_t bkeylen;
 
-		JSON_CPACK(val, "{ss}", "method", "submitblock");
-		bkey_add_hex(bkey, "hash", hash);
-		bkey_add_hex(bkey, "data", data);
-		bkeylen = bkey_len(bkey);
-
+		JSON_CPACK(val, "{ss,ss}",
+			        "method", "submitblock",
+				"submitblock", gbt_block);
 		DL_FOREACH(sdata->remote_instances, client) {
 			ckmsg_t *client_msg;
 			smsg_t *msg;
@@ -1545,15 +1521,11 @@ static void downstream_blocksubmits(ckpool_t *ckp, const char *hash, const char 
 			msg = ckzalloc(sizeof(smsg_t));
 			msg->json_msg = json_msg;
 			msg->client_id = client->id;
-			msg->bkey = ckalloc(bkeylen);
-			memcpy(msg->bkey, bkey, bkeylen);
-			msg->bkeylen = bkeylen;
 			client_msg->data = msg;
 			DL_APPEND(bulk_send, client_msg);
 			messages++;
 		}
 		json_decref(val);
-		free(bkey);
 	}
 	ck_runlock(&sdata->instance_lock);
 
@@ -1600,9 +1572,9 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 		realloc_strcat(&gbt_block, wb->txn_data);
 	send_generator(ckp, gbt_block, GEN_PRIORITY);
 	if (ckp->remote)
-		upstream_blocksubmit(ckp, blockhash, gbt_block + 12 + 64 + 1);
+		upstream_blocksubmit(ckp, gbt_block);
 	else
-		downstream_blocksubmits(ckp, blockhash, gbt_block + 12 + 64 + 1, NULL);
+		downstream_blocksubmits(ckp, gbt_block, NULL);
 	free(gbt_block);
 }
 
@@ -5943,28 +5915,12 @@ static void add_remote_server(sdata_t *sdata, stratum_instance_t *client)
 	ck_wunlock(&sdata->instance_lock);
 }
 
-static void set_client_bkey(ckpool_t *ckp, stratum_instance_t *client, const int64_t client_id,
-			    const json_t *val, char *buf)
-{
-	json_t *bkey_val = json_object_get(val, "bkey");
-
-	if (bkey_val) {
-		client->bkey = json_is_true(bkey_val);
-		if (client->bkey) {
-			snprintf(buf, 255, "bkeyclient=%"PRId64, client_id);
-			send_proc(ckp->connector, buf);
-		}
-	}
-
-}
-
 /* Enter with client holding ref count */
 static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *client,
-			 const int64_t client_id, const json_t *val, json_t *id_val,
-			 json_t *method_val, json_t *params_val)
+			 const int64_t client_id, json_t *id_val, json_t *method_val,
+			 json_t *params_val)
 {
 	const char *method;
-	char buf[256];
 
 	/* Random broken clients send something not an integer as the id so we
 	 * copy the json item for id_val as is for the response. By far the
@@ -5984,7 +5940,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	}
 
 	if (cmdmatch(method, "mining.subscribe")) {
-		json_t *sval, *result_val;
+		json_t *val, *result_val;
 
 		if (unlikely(client->subscribed)) {
 			LOGNOTICE("Client %"PRId64" %s trying to subscribe twice",
@@ -5997,17 +5953,19 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 			LOGWARNING("parse_subscribe returned NULL result_val");
 			return;
 		}
-		sval = json_object();
-		json_object_set_new_nocheck(sval, "result", result_val);
-		json_object_set_nocheck(sval, "id", id_val);
-		json_object_set_new_nocheck(sval, "error", json_null());
-		stratum_add_send(sdata, sval, client_id, SM_SUBSCRIBERESULT);
+		val = json_object();
+		json_object_set_new_nocheck(val, "result", result_val);
+		json_object_set_nocheck(val, "id", id_val);
+		json_object_set_new_nocheck(val, "error", json_null());
+		stratum_add_send(sdata, val, client_id, SM_SUBSCRIBERESULT);
 		if (likely(client->subscribed))
 			init_client(sdata, client, client_id);
 		return;
 	}
 
 	if (unlikely(cmdmatch(method, "mining.remote"))) {
+		char buf[256];
+
 		/* Add this client as a trusted remote node in the connector and
 		 * drop the client in the stratifier */
 		if (!ckp->trusted[client->server] || ckp->proxy) {
@@ -6015,7 +5973,6 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 				  client_id, client->address, client->server);
 			connector_drop_client(ckp, client_id);
 		} else {
-			set_client_bkey(ckp, client, client_id, val, buf);
 			add_remote_server(sdata, client);
 			snprintf(buf, 255, "remote=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
@@ -6024,6 +5981,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	}
 
 	if (unlikely(cmdmatch(method, "mining.node"))) {
+		char buf[256];
+
 		/* Add this client as a passthrough in the connector and
 		 * add it to the list of mining nodes in the stratifier */
 		if (!ckp->nodeserver[client->server] || ckp->proxy || ckp->btcsolo) {
@@ -6032,7 +5991,6 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 			connector_drop_client(ckp, client_id);
 			drop_client(ckp, sdata, client_id);
 		} else {
-			set_client_bkey(ckp, client, client_id, val, buf);
 			add_mining_node(ckp, sdata, client);
 			snprintf(buf, 255, "passthrough=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
@@ -6041,6 +5999,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	}
 
 	if (unlikely(cmdmatch(method, "mining.passthrough"))) {
+		char buf[256];
+
 		if (ckp->proxy) {
 			LOGNOTICE("Dropping client %"PRId64" %s trying to connect as passthrough on proxy server %d",
 				  client_id, client->address, client->server);
@@ -6051,7 +6011,6 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 			 * is a passthrough and to manage its messages accordingly. No
 			 * data from this client id should ever come back to this
 			 * stratifier after this so drop the client in the stratifier. */
-			set_client_bkey(ckp, client, client_id, val, buf);
 			LOGNOTICE("Adding passthrough client %"PRId64" %s", client_id, client->address);
 			snprintf(buf, 255, "passthrough=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
@@ -6310,23 +6269,18 @@ static void parse_remote_workers(sdata_t *sdata, json_t *val, const char *buf)
 static void parse_remote_blocksubmit(ckpool_t *ckp, json_t *val, const char *buf,
 				     const stratum_instance_t *client)
 {
-	json_t *hash_val, *data_val;
-	const char *hash, *data;
-	char *gbt_block;
+	json_t *submitblock_val;
+	const char *gbt_block;
 
-	hash_val = json_object_get(val, "hash");
-	hash = json_string_value(hash_val);
-	data_val = json_object_get(val, "data");
-	data = json_string_value(data_val);
-	if (unlikely(!hash || !data)) {
-		LOGWARNING("Failed to extract hash and data from remote submitblock msg %s", buf);
+	submitblock_val = json_object_get(val, "submitblock");
+	gbt_block = json_string_value(submitblock_val);
+	if (unlikely(!gbt_block)) {
+		LOGWARNING("Failed to get submitblock data from remote message %s", buf);
 		return;
 	}
-	ASPRINTF(&gbt_block, "submitblock:%s,%s", hash, data);
 	LOGWARNING("Submitting possible downstream block!");
 	send_generator(ckp, gbt_block, GEN_PRIORITY);
-	downstream_blocksubmits(ckp, hash, data, client);
-	free(gbt_block);
+	downstream_blocksubmits(ckp, gbt_block, client);
 }
 
 static void parse_remote_block(sdata_t *sdata, json_t *val, const char *buf)
@@ -6512,7 +6466,7 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 		if (!(++delays % 50))
 			LOGWARNING("%d Second delay waiting for bitcoind at startup", delays / 10);
 	}
-	parse_method(ckp, sdata, client, client_id, val, id_val, method, params);
+	parse_method(ckp, sdata, client, client_id, id_val, method, params);
 }
 
 static void srecv_process(ckpool_t *ckp, char *buf)
@@ -6525,7 +6479,7 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 	json_t *val;
 	int server;
 
-	val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+	val = json_loads(buf, 0, NULL);
 	if (unlikely(!val)) {
 		LOGWARNING("Received unrecognised non-json message: %s", buf);
 		goto out;
@@ -6610,15 +6564,7 @@ static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 	 * connector process to be delivered */
 	json_object_set_new_nocheck(msg->json_msg, "client_id", json_integer(msg->client_id));
 	s = json_dumps(msg->json_msg, JSON_COMPACT);
-	if (unlikely(msg->bkeylen)) {
-		int len = strlen(s);
-
-		s = realloc(s, len + msg->bkeylen);
-		memcpy(s + len, msg->bkey, msg->bkeylen);
-		free(msg->bkey);
-		send_proc_data(ckp->connector, s, len + msg->bkeylen);
-	} else
-		send_proc(ckp->connector, s);
+	send_proc(ckp->connector, s);
 	free(s);
 	free_smsg(msg);
 }

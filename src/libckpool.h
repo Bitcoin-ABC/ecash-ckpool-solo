@@ -318,21 +318,6 @@ struct unixsock {
 
 typedef struct unixsock unixsock_t;
 
-
-#define BKEY_LENOFS 6
-#define BKEY_LENLEN 4
-
-char *bkey_object(void);
-uint32_t bkey_len(const char *bkey);
-void _bkey_add_hex(char **bkey, const char *key, const char *hex, const char *file, const char *func, const int line);
-#define bkey_add_hex(bkey, key, hex) _bkey_add_hex(&(bkey), key, hex, __FILE__, __func__, __LINE__)
-void _bkey_add_bin(char **bkey, const char *key, const char *bin, const int blen, const char *file, const char *func, const int line);
-#define bkey_add_bin(bkey, key, bin) _bkey_add_bin(&(bkey), key, bin, __FILE__, __func__, __LINE__)
-bool _json_append_bkeys(json_t *val, const char *bkey, const uint32_t len, const char *file,
-			const char *func, const int line);
-#define json_append_bkeys(val, bkey, len) _json_append_bkeys(val, bkey, len, __FILE__, __func__, __LINE__)
-
-
 void _json_check(json_t *val, json_error_t *err, const char *file, const char *func, const int line);
 #define json_check(VAL, ERR) _json_check(VAL, ERR,  __FILE__, __func__, __LINE__)
 
@@ -346,7 +331,7 @@ void _json_check(json_t *val, json_error_t *err, const char *file, const char *f
 /* No error checking with these, make sure we know they're valid already! */
 static inline void json_strcpy(char *buf, json_t *val, const char *key)
 {
-	strcpy(buf, json_string_value(json_object_get(val, key)) ? : "");
+	strcpy(buf, json_string_value(json_object_get(val, key)));
 }
 
 static inline void json_dblcpy(double *dbl, json_t *val, const char *key)
@@ -518,21 +503,15 @@ int _open_unix_client(const char *server_path, const char *file, const char *fun
 int wait_close(int sockd, int timeout);
 int wait_read_select(int sockd, float timeout);
 int read_length(int sockd, void *buf, int len);
-char *_recv_unix(int sockd, uint32_t *msglen, int timeout1, int timeout2, const char *file,
-		 const char *func, const int line);
 char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, const char *func, const int line);
 #define RECV_UNIX_TIMEOUT1 30
 #define RECV_UNIX_TIMEOUT2 5
-#define recv_unix(sockd, msglen) _recv_unix(sockd, msglen, UNIX_READ_TIMEOUT, UNIX_READ_TIMEOUT, __FILE__, __func__, __LINE__)
 #define recv_unix_msg(sockd) _recv_unix_msg(sockd, UNIX_READ_TIMEOUT, UNIX_READ_TIMEOUT, __FILE__, __func__, __LINE__)
 #define recv_unix_msg_tmo(sockd, tmo) _recv_unix_msg(sockd, tmo, UNIX_READ_TIMEOUT, __FILE__, __func__, __LINE__)
 #define recv_unix_msg_tmo2(sockd, tmo1, tmo2) _recv_unix_msg(sockd, tmo1, tmo2, __FILE__, __func__, __LINE__)
 int wait_write_select(int sockd, float timeout);
 #define write_length(sockd, buf, len) _write_length(sockd, buf, len, __FILE__, __func__, __LINE__)
 int _write_length(int sockd, const void *buf, int len, const char *file, const char *func, const int line);
-bool _send_unix(int sockd, const char *buf, uint32_t len, int timeout, const char *file,
-		const char *func, const int line);
-#define send_unix(sockd, buf, len) _send_unix(sockd, buf, len, UNIX_WRITE_TIMEOUT, __FILE__, __func__, __LINE__)
 bool _send_unix_msg(int sockd, const char *buf, int timeout, const char *file, const char *func, const int line);
 #define send_unix_msg(sockd, buf) _send_unix_msg(sockd, buf, UNIX_WRITE_TIMEOUT, __FILE__, __func__, __LINE__)
 bool _send_unix_data(int sockd, const struct msghdr *msg, const char *file, const char *func, const int line);

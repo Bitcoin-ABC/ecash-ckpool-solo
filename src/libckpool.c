@@ -795,7 +795,7 @@ int write_socket(int fd, const void *buf, size_t nbyte)
 {
 	int ret;
 
-	ret = wait_write_select(fd, 60);
+	ret = wait_write_select(fd, 5);
 	if (ret < 1) {
 		if (!ret)
 			LOGNOTICE("Select timed out in write_socket");
@@ -997,13 +997,12 @@ int read_length(int sockd, void *buf, int len)
 /* Use a standard message across the unix sockets:
  * 4 byte length of message as little endian encoded uint32_t followed by the
  * string. Return NULL in case of failure. */
-char *_recv_unix(int sockd, uint32_t *msglen, int timeout1, int timeout2, const char *file,
-		 const char *func, const int line)
+char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, const char *func, const int line)
 {
 	char *buf = NULL;
+	uint32_t msglen;
 	int ret, ern;
 
-	*msglen = 0;
 	ret = wait_read_select(sockd, timeout1);
 	if (unlikely(ret < 1)) {
 		ern = errno;
@@ -1011,15 +1010,15 @@ char *_recv_unix(int sockd, uint32_t *msglen, int timeout1, int timeout2, const 
 		goto out;
 	}
 	/* Get message length */
-	ret = read_length(sockd, msglen, 4);
+	ret = read_length(sockd, &msglen, 4);
 	if (unlikely(ret < 4)) {
 		ern = errno;
 		LOGERR("Failed to read 4 byte length in recv_unix_msg (%d?)", ern);
 		goto out;
 	}
-	*msglen = le32toh(*msglen);
-	if (unlikely(*msglen < 1 || *msglen > 0x80000000)) {
-		LOGWARNING("Invalid message length %u sent to recv_unix_msg", *msglen);
+	msglen = le32toh(msglen);
+	if (unlikely(msglen < 1 || msglen > 0x80000000)) {
+		LOGWARNING("Invalid message length %u sent to recv_unix_msg", msglen);
 		goto out;
 	}
 	ret = wait_read_select(sockd, timeout2);
@@ -1028,11 +1027,11 @@ char *_recv_unix(int sockd, uint32_t *msglen, int timeout1, int timeout2, const 
 		LOGERR("Select2 failed in recv_unix_msg (%d)", ern);
 		goto out;
 	}
-	buf = ckzalloc(*msglen + 1);
-	ret = read_length(sockd, buf, *msglen);
-	if (unlikely(ret < (int)*msglen)) {
+	buf = ckzalloc(msglen + 1);
+	ret = read_length(sockd, buf, msglen);
+	if (unlikely(ret < (int)msglen)) {
 		ern = errno;
-		LOGERR("Failed to read %u bytes in recv_unix_msg (%d?)", *msglen, ern);
+		LOGERR("Failed to read %u bytes in recv_unix_msg (%d?)", msglen, ern);
 		dealloc(buf);
 	}
 out:
@@ -1040,13 +1039,6 @@ out:
 	if (unlikely(!buf))
 		LOGERR("Failure in recv_unix_msg from %s %s:%d", file, func, line);
 	return buf;
-}
-
-char *_recv_unix_msg(int sockd, int timeout1, int timeout2, const char *file, const char *func, const int line)
-{
-	uint32_t msglen;
-
-	return _recv_unix(sockd, &msglen, timeout1, timeout2, file, func, line);
 }
 
 /* Emulate a select write wait for high fds that select doesn't support */
@@ -1093,62 +1085,54 @@ int _write_length(int sockd, const void *buf, int len, const char *file, const c
 	return ofs;
 }
 
-bool _send_unix(int sockd, const char *buf, uint32_t len, int timeout, const char *file,
-		const char *func, const int line)
+bool _send_unix_msg(int sockd, const char *buf, int timeout, const char *file, const char *func, const int line)
 {
+	uint32_t msglen, len;
 	bool retval = false;
-	uint32_t msglen;
 	int ret, ern;
 
 	if (unlikely(sockd < 0)) {
 		LOGWARNING("Attempting to send unix message to invalidated sockd %d", sockd);
 		goto out;
 	}
+	if (unlikely(!buf)) {
+		LOGWARNING("Null message sent to send_unix_msg");
+		goto out;
+	}
+	len = strlen(buf);
+	if (unlikely(!len)) {
+		LOGWARNING("Zero length message sent to send_unix_msg");
+		goto out;
+	}
 	msglen = htole32(len);
 	ret = wait_write_select(sockd, timeout);
 	if (unlikely(ret < 1)) {
 		ern = errno;
-		LOGERR("Select1 failed in send_unix (%d)", ern);
+		LOGERR("Select1 failed in send_unix_msg (%d)", ern);
 		goto out;
 	}
 	ret = _write_length(sockd, &msglen, 4, file, func, line);
 	if (unlikely(ret < 4)) {
-		LOGERR("Failed to write 4 byte length in send_unix");
+		LOGERR("Failed to write 4 byte length in send_unix_msg");
 		goto out;
 	}
 	ret = wait_write_select(sockd, timeout);
 	if (unlikely(ret < 1)) {
 		ern = errno;
-		LOGERR("Select2 failed in send_unix (%d)", ern);
+		LOGERR("Select2 failed in send_unix_msg (%d)", ern);
 		goto out;
 	}
 	ret = _write_length(sockd, buf, len, file, func, line);
 	if (unlikely(ret < 0)) {
-		LOGERR("Failed to write %d bytes in send_unix", len);
+		LOGERR("Failed to write %d bytes in send_unix_msg", len);
 		goto out;
 	}
 	retval = true;
 out:
 	shutdown(sockd, SHUT_WR);
 	if (unlikely(!retval))
-		LOGERR("Failure in send_unix from %s %s:%d", file, func, line);
+		LOGERR("Failure in send_unix_msg from %s %s:%d", file, func, line);
 	return retval;
-}
-
-bool _send_unix_msg(int sockd, const char *buf, int timeout, const char *file, const char *func, const int line)
-{
-	uint32_t len;
-
-	if (unlikely(!buf)) {
-		LOGWARNING("Null message sent to send_unix_msg");
-		return NULL;
-	}
-	len = strlen(buf);
-	if (unlikely(!len)) {
-		LOGWARNING("Zero length message sent to send_unix_msg");
-		return NULL;
-	}
-	return _send_unix(sockd, buf, len, timeout, file, func, line);
 }
 
 bool _send_unix_data(int sockd, const struct msghdr *msg, const char *file, const char *func, const int line)
@@ -1264,189 +1248,6 @@ out:
 	newfd = *cm;
 	free(cmptr);
 	return newfd;
-}
-
-
-/* Bkey structure:
- * "bkey\n\0"
- * 32 bit LE encoded bkey length
- * "$keyname\0"
- * 32 bit LE encoded key length
- * binary data for key
- * append further key:len:data combinations
- */
-
-static inline uint32_t *bkey_lenptr(const char *bkey)
-{
-	return (uint32_t *)(bkey + BKEY_LENOFS);
-}
-
-/* Create an empty binary key object */
-char *bkey_object(void)
-{
-	char *bkey = ckalloc(PAGESIZE);
-	uint32_t *lenptr;
-
-	sprintf(bkey, "bkey\n");
-	lenptr = bkey_lenptr(bkey);
-	*lenptr = htole32(BKEY_LENOFS + BKEY_LENLEN);
-	return bkey;
-}
-
-/* Extract bkey length */
-uint32_t bkey_len(const char *bkey)
-{
-	uint32_t *lenptr = bkey_lenptr(bkey);
-	return le32toh(*lenptr);
-}
-
-/* Add binary from hex to a bkey message */
-void _bkey_add_hex(char **bkey, const char *key, const char *hex, const char *file, const char *func, const int line)
-{
-	uint32_t msglen, *lenptr, newlen;
-	int hlen, len;
-
-	if (unlikely(!*bkey || !key || !hex)) {
-		 LOGEMERG("Null sent to bkey_add from %s %s:%d",
-			   file, func, line);
-		 return;
-	}
-	hlen = strlen(hex) / 2;
-	if (unlikely(!hlen)) {
-		 LOGERR("Zero length hex sent to bkey_add from %s %s:%d",
-			 file, func, line);
-		 return;
-	}
-	len = strlen(key);
-	if (unlikely(!len)) {
-		 LOGERR("Zero length key sent to bkey_add from %s %s:%d",
-			 file, func, line);
-		 return;
-	}
-	/* Null terminator */
-	len += 1;
-
-	/* Get current message length */
-	lenptr = bkey_lenptr(*bkey);
-	msglen = le32toh(*lenptr);
-
-	/* Add $key+length+bin */
-	newlen = msglen + len + BKEY_LENLEN + hlen;
-	*bkey = realloc(*bkey, round_up_page(newlen));
-
-	/* Append keyname */
-	LOGDEBUG("Adding key %s @ ofs %u", key, msglen);
-	sprintf(*bkey + msglen, "%s", key);
-	msglen += len;
-
-	/* Append bin length */
-	LOGDEBUG("Adding len %u @ ofs %u", hlen, msglen);
-	lenptr = (uint32_t *)(*bkey + msglen);
-	*lenptr = htole32(hlen);
-	msglen += BKEY_LENLEN;
-
-	/* Append binary data */
-	LOGDEBUG("Adding hex of len %u @ ofs %u %s", hlen, msglen, hex);
-	hex2bin(*bkey + msglen, hex, hlen);
-
-	/* Adjust message length header */
-	lenptr = bkey_lenptr(*bkey);
-	*lenptr = htole32(newlen);
-}
-
-void _bkey_add_bin(char **bkey, const char *key, const char *bin, const int blen, const char *file, const char *func, const int line)
-{
-	uint32_t msglen, *lenptr, newlen;
-	int len;
-
-	if (unlikely(!*bkey || !key || !bin)) {
-		 LOGEMERG("Null sent to bkey_add from %s %s:%d",
-			   file, func, line);
-		 return;
-	}
-	if (unlikely(!blen)) {
-		 LOGERR("Zero length bin sent to bkey_add from %s %s:%d",
-			 file, func, line);
-		 return;
-	}
-	len = strlen(key);
-	if (unlikely(!len)) {
-		 LOGERR("Zero length key sent to bkey_add from %s %s:%d",
-			 file, func, line);
-		 return;
-	}
-	/* Null terminator */
-	len += 1;
-
-	/* Get current message length */
-	lenptr = bkey_lenptr(*bkey);
-	msglen = le32toh(*lenptr);
-
-	/* Add $key+length+bin */
-	newlen = msglen + len + BKEY_LENLEN + blen;
-	*bkey = realloc(*bkey, round_up_page(newlen));
-
-	/* Append keyname */
-	LOGDEBUG("Adding key %s @ ofs %u", key, msglen);
-	sprintf(*bkey + msglen, "%s", key);
-	msglen += len;
-
-	/* Append bin length */
-	LOGDEBUG("Adding len %u @ ofs %u", blen, msglen);
-	lenptr = (uint32_t *)(*bkey + msglen);
-	*lenptr = htole32(blen);
-	msglen += BKEY_LENLEN;
-
-	/* Append binary data */
-	LOGDEBUG("Adding bin of len %u @ ofs %u", blen, msglen);
-	memcpy(*bkey + msglen, bin, blen);
-
-	/* Adjust message length header */
-	lenptr = bkey_lenptr(*bkey);
-	*lenptr = htole32(newlen);
-}
-
-bool _json_append_bkeys(json_t *val, const char *bkey, const uint32_t len, const char *file,
-			const char *func, const int line)
-{
-	uint32_t ofs = BKEY_LENOFS + BKEY_LENLEN;
-	uint32_t msglen;
-
-	msglen = bkey_len(bkey);
-	if (unlikely(!msglen || msglen > 0x80000000)) {
-		LOGDEBUG("Invalid msglen %u sent to json_append_bkey from %s %s:%d",
-			 msglen, file, func, line);
-		return false;
-	}
-	while (ofs < msglen) {
-		uint32_t binlen, *lenptr;
-		const char *key;
-		char *hex;
-
-		key = bkey + ofs;
-		LOGDEBUG("Found key %s @ ofs %u", key, ofs);
-		ofs += strlen(key) + 1;
-		if (unlikely(ofs >= len)) {
-			LOGDEBUG("Unable to seek to bkey offset %u beyond length %d",
-				 ofs, len);
-			return false;
-		}
-		lenptr = (uint32_t *)(bkey + ofs);
-		binlen = le32toh(*lenptr);
-		LOGDEBUG("Found binlen %u @ ofs %u", binlen, ofs);
-		ofs += BKEY_LENLEN;
-		if (unlikely(ofs >= len)) {
-			LOGDEBUG("Unable to seek to bkey offset %u beyond length %d",
-				 ofs, len);
-			return false;
-		}
-		hex = bin2hex(bkey + ofs, binlen);
-		LOGDEBUG("Found hex %s @ ofs %u", hex, ofs);
-		json_set_string(val, key, hex);
-		free(hex);
-		ofs += binlen;
-	}
-	return true;
 }
 
 
