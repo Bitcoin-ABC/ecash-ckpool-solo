@@ -17,12 +17,20 @@ function uset($data, $user, $api, $err)
  $pg .= '<table cellpadding=5 cellspacing=0 border=0>';
  $pg .= '<tr class=dc><td>';
  if ($api === false)
+ {
 	$pg .= "You don't have an API Key setup yet";
+	$draw = false;
+ }
  else
  {
+	addQR();
 	$pg .= 'Your current API Key is:';
 	$pg .= '</td></tr><tr class=dc><td>';
-	$pg .= "<span class=hil>$api</span>";
+	$pg .= "<span class=hil>$api</span></td></tr>";
+	$pg .= '<tr class=dc><td><div id=can0><canvas id=can width=1 height=1>';
+	$pg .= 'A qrcode will show here if your browser supports html5/canvas';
+	$pg .= "</canvas></div>";
+	$draw = true;
  }
  $pg .= '</td></tr><tr class=dc><td>';
  $pg .= 'Click to generate a new API key';
@@ -48,6 +56,25 @@ function uset($data, $user, $api, $err)
 
  $pg .= '</center></td></tr>';
  $pg .= '</table>';
+
+ if ($draw !== false)
+ {
+	$qr = shell_exec("../pool/myqr.sh '$api'");
+	if ($qr !== null and strlen($qr) > 30)
+	{
+		$pg .= "<script type='text/javascript'>\n";
+		$pg .= "${qr}qr(tw,fa,qrx,qry,qrd);</script>\n";
+
+		if (strpos($qr, 'var tw=1,fa=0,qrx=') === false)
+			error_log("QR error for '$user' res='$qr'");
+	}
+	else
+	{
+		if ($qr === null)
+			$qr = 'null';
+		error_log("QR failed for '$user' res='$qr'");
+	}
+ }
 
  return $pg;
 }

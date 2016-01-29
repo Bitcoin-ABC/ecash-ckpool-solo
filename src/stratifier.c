@@ -5429,19 +5429,19 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		goto out;
 	}
 	nonce2 = (char *)json_string_value(json_array_get(params_val, 2));
-	if (unlikely(!nonce2 || !strlen(nonce2))) {
+	if (unlikely(!nonce2 || !strlen(nonce2) || !validhex(nonce2))) {
 		err = SE_NO_NONCE2;
 		*err_val = JSON_ERR(err);
 		goto out;
 	}
 	ntime = json_string_value(json_array_get(params_val, 3));
-	if (unlikely(!ntime || !strlen(ntime))) {
+	if (unlikely(!ntime || !strlen(ntime) || !validhex(ntime))) {
 		err = SE_NO_NTIME;
 		*err_val = JSON_ERR(err);
 		goto out;
 	}
 	nonce = json_string_value(json_array_get(params_val, 4));
-	if (unlikely(!nonce || !strlen(nonce))) {
+	if (unlikely(!nonce || !strlen(nonce) || !validhex(nonce))) {
 		err = SE_NO_NONCE;
 		*err_val = JSON_ERR(err);
 		goto out;

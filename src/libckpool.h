@@ -331,7 +331,7 @@ void _json_check(json_t *val, json_error_t *err, const char *file, const char *f
 /* No error checking with these, make sure we know they're valid already! */
 static inline void json_strcpy(char *buf, json_t *val, const char *key)
 {
-	strcpy(buf, json_string_value(json_object_get(val, key)));
+	strcpy(buf, json_string_value(json_object_get(val, key)) ? : "");
 }
 
 static inline void json_dblcpy(double *dbl, json_t *val, const char *key)
