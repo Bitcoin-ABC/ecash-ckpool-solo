@@ -834,8 +834,9 @@ static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char 
 		time_counter = now_t;
 		suffix_string(stats->dsps1 * nonces, hashrate, 16, 3);
 		ch = status_chars[(counter++) & 0x3];
-		fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers",
-			ch, hashrate, stats->sps1, stats->users, stats->workers);
+		fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers  %"PRId64" shares",
+			ch, hashrate, stats->sps1, stats->users, stats->workers,
+			stats->accounted_diff_shares);
 		fflush(stdout);
 	}
 
