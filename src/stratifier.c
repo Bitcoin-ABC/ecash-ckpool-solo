@@ -6004,7 +6004,6 @@ static void parse_remote_block(sdata_t *sdata, json_t *val, const char *buf)
 	LOGWARNING("%s", msg);
 	stratum_broadcast_message(sdata, msg);
 	free(msg);
-	reset_bestshares(sdata);
 }
 
 static void send_remote_pong(sdata_t *sdata, stratum_instance_t *client)
