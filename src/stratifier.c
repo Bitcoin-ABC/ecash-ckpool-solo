@@ -2767,7 +2767,6 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 	sdata_t *ckp_sdata = ckp->data;
 	stratum_instance_t *client, *tmp;
 	ckmsg_t *bulk_send = NULL;
-	time_t now_t = time(NULL);
 	int messages = 0;
 
 	if (unlikely(!val)) {
@@ -2780,7 +2779,6 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 		return;
 	}
 
-	/* Use this locking as an opportunity to test other clients. */
 	ck_rlock(&ckp_sdata->instance_lock);
 	HASH_ITER(hh, ckp_sdata->stratum_instances, client, tmp) {
 		ckmsg_t *client_msg;
@@ -2789,26 +2787,7 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 		if (sdata != ckp_sdata && client->sdata != sdata)
 			continue;
 
-		/* Look for clients that may have been dropped which the stratifer has
-		* not been informed about and ask the connector of they still exist */
-		if (client->dropped) {
-			connector_test_client(ckp, client->id);
-			continue;
-		}
-
-		if (client->node || client->remote)
-			continue;
-
-		/* Test for clients that haven't authed in over a minute and drop them */
-		if (!client->authorised) {
-			if (now_t > client->start_time + 60) {
-				client->dropped = true;
-				connector_drop_client(ckp, client->id);
-			}
-			continue;
-		}
-
-		if (!client_active(client))
+		if (!client_active(client) || client->node || client->remote)
 			continue;
 
 		/* Only send messages to whitelisted clients */
@@ -7073,10 +7052,26 @@ static void *statsupdate(void *arg)
 		tv_time(&now);
 		timersub(&now, &stats->start_time, &diff);
 
+		/* Use this locking as an opportunity to test clients. */
 		ck_rlock(&sdata->instance_lock);
 		HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
-			if (!client_active(client))
+			/* Look for clients that may have been dropped which the
+			 * stratifier has not been informed about and ask the
+			 * connector if they still exist */
+			if (client->dropped) {
+				connector_test_client(ckp, client->id);
 				continue;
+			}
+
+			/* Test for clients that haven't authed in over a minute
+			 * and drop them lazily */
+			if (!client->authorised) {
+				if (now.tv_sec > client->start_time + 60) {
+					client->dropped = true;
+					connector_drop_client(ckp, client->id);
+				}
+				continue;
+			}
 
 			per_tdiff = tvdiff(&now, &client->last_share);
 			/* Decay times per connected instance */
@@ -7086,6 +7081,8 @@ static void *statsupdate(void *arg)
 				idle_workers++;
 				if (per_tdiff > 600)
 					client->idle = true;
+				/* Test idle clients are still connected */
+				connector_test_client(ckp, client->id);
 				continue;
 			}
 		}
