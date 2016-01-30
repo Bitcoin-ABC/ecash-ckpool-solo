@@ -79,6 +79,8 @@ struct pool_stats {
 	double dsps360;
 	double dsps1440;
 	double dsps10080;
+
+	int64_t best_diff;
 };
 
 typedef struct pool_stats pool_stats_t;
@@ -2917,6 +2919,7 @@ static void reset_bestshares(sdata_t *sdata)
 	sdata->stats.accounted_diff_shares =
 	sdata->stats.accounted_shares =
 	sdata->stats.accounted_rejects = 0;
+	sdata->stats.best_diff = 0;
 
 	ck_rlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
@@ -5379,6 +5382,12 @@ static void check_best_diff(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user
 		user->best_diff = sdiff;
 		best_user = true;
 	}
+	if (best_ever) {
+		mutex_lock(&sdata->stats_lock);
+		if (unlikely(sdiff > sdata->stats.best_diff))
+			sdata->stats.best_diff = sdiff;
+		mutex_unlock(&sdata->stats_lock);
+	}
 	if (likely(!CKP_STANDALONE(ckp) || (!best_user && !best_worker) || !client))
 		return;
 	snprintf(buf, 511, "New best %sshare for %s: %lf", best_ever ? "ever " : "",
@@ -7236,9 +7245,10 @@ static void *statsupdate(void *arg)
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
 
-		JSON_CPACK(val, "{sI,sI,sf,sf,sf,sf}",
+		JSON_CPACK(val, "{sI,sI,sI,sf,sf,sf,sf}",
 				"accepted", stats->accounted_diff_shares,
 				"rejected", stats->accounted_rejects,
+				"bestshare", stats->best_diff,
 				"SPS1m", stats->sps1,
 				"SPS5m", stats->sps5,
 				"SPS15m", stats->sps15,
@@ -7450,6 +7460,7 @@ static void read_poolstats(ckpool_t *ckp)
 	json_get_double(&stats->sps60, val, "SPS1h");
 	json_get_int64(&stats->accounted_diff_shares, val, "accepted");
 	json_get_int64(&stats->accounted_rejects, val, "rejected");
+	json_get_int64(&stats->best_diff, val, "bestshare");
 	json_decref(val);
 
 	LOGINFO("Successfully read pool sps: %s", sps);
