@@ -2807,6 +2807,11 @@ static void reset_bestshares(sdata_t *sdata)
 	user_instance_t *user, *tmpuser;
 	stratum_instance_t *client, *tmp;
 
+	/* Can do this unlocked since it's just zeroing the values */
+	sdata->stats.accounted_diff_shares =
+	sdata->stats.accounted_shares =
+	sdata->stats.accounted_rejects = 0;
+
 	ck_rlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
 		client->best_diff = 0;
@@ -6908,7 +6913,9 @@ static void *statsupdate(void *arg)
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
 
-		JSON_CPACK(val, "{sf,sf,sf,sf}",
+		JSON_CPACK(val, "{sI,sI,sf,sf,sf,sf}",
+				"accepted", stats->accounted_diff_shares,
+				"rejected", stats->accounted_rejects,
 				"SPS1m", stats->sps1,
 				"SPS5m", stats->sps5,
 				"SPS15m", stats->sps15,
@@ -7118,6 +7125,8 @@ static void read_poolstats(ckpool_t *ckp)
 	json_get_double(&stats->sps5, val, "SPS5m");
 	json_get_double(&stats->sps15, val, "SPS15m");
 	json_get_double(&stats->sps60, val, "SPS1h");
+	json_get_int64(&stats->accounted_diff_shares, val, "accepted");
+	json_get_int64(&stats->accounted_rejects, val, "rejected");
 	json_decref(val);
 
 	LOGINFO("Successfully read pool sps: %s", sps);
