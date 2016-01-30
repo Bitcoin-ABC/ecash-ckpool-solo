@@ -3056,22 +3056,22 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 	if (!found) {
 		LOGINFO("Failed to find blockhash %s in block_solve, possibly from downstream",
 			blockhash);
-		return;
+	} else {
+		val = found->data;
+		json_set_string(val, "confirmed", "1");
+		json_set_string(val, "createdate", cdfield);
+		json_set_string(val, "createcode", __func__);
+		json_get_int(&height, val, "height");
+		json_get_double(&diff, val, "diff");
+		ckdbq_add(ckp, ID_BLOCK, val);
+		free(found);
+		if (ckp->remote)
+			upstream_block(ckp, height, workername, diff);
 	}
 
-	val = found->data;
-	json_set_string(val, "confirmed", "1");
-	json_set_string(val, "createdate", cdfield);
-	json_set_string(val, "createcode", __func__);
-	json_get_int(&height, val, "height");
-	json_get_double(&diff, val, "diff");
-	ckdbq_add(ckp, ID_BLOCK, val);
-	free(found);
-
-	if (unlikely(!workername)) {
-		/* This should be impossible! */
-		ASPRINTF(&msg, "Block %d solved by %s!", height, ckp->name);
-		LOGWARNING("Solved and confirmed block %d", height);
+	if (!workername) {
+		ASPRINTF(&msg, "Block solved by %s!", ckp->name);
+		LOGWARNING("Solved and confirmed block!");
 	} else {
 		json_t *user_val, *worker_val;
 		worker_instance_t *worker;
@@ -3099,8 +3099,6 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 	}
 	stratum_broadcast_message(sdata, msg);
 	free(msg);
-	if (ckp->remote)
-		upstream_block(ckp, height, workername, diff);
 
 	free(workername);
 
