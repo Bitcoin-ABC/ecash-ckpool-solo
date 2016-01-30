@@ -2996,6 +2996,13 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 		LOGWARNING("Worker %s:%s", workername, s);
 		dealloc(s);
 	}
+	if (likely(sdata->current_workbase)) {
+		double bdiff, sdiff = sdata->stats.accounted_diff_shares;
+
+		bdiff = sdiff / sdata->current_workbase->network_diff * 100;
+		LOGWARNING("Block solved after %.0lf shares at %.1f%% diff",
+			   sdiff, bdiff);
+	}
 	stratum_broadcast_message(sdata, msg);
 	free(msg);
 
