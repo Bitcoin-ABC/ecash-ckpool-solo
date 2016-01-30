@@ -647,7 +647,7 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 	// Generation value
 	g64 = wb->coinbasevalue;
 	if (ckp->donvalid) {
-		d64 = g64 / 200; // 0.5% donation
+		d64 = g64 / 100; // 1% donation
 		g64 -= d64; // To guarantee integers add up to the original coinbasevalue
 		wb->coinb2bin[wb->coinb2len++] = 2; // 2 transactions
 	} else
