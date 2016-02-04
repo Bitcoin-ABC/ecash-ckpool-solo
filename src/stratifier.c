@@ -4955,6 +4955,7 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 			LOGNOTICE("Authorised client %"PRId64" worker %s as user %s",
 				  client->id, buf, user->username);
 		}
+		user->failed_authtime = 0;
 		user->auth_backoff = DEFAULT_AUTH_BACKOFF; /* Reset auth backoff time */
 		user->throttled = false;
 	} else {
