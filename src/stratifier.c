@@ -4643,20 +4643,20 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	__inc_worker(sdata,user, worker);
 	ck_wunlock(&sdata->instance_lock);
 
-	if (new_user && !ckp->proxy) {
+	if (!ckp->proxy && (new_user || !user->btcaddress) && (len > 26 && len < 35)) {
 		/* Is this a btc address based username? */
-		if (len > 26 && len < 35) {
-			if (test_address(ckp, username)) {
-				user->btcaddress = true;
-				if (script_address(username)) {
-					user->txnlen = 23;
-					address_to_scripttxn(user->txnbin, username);
-				} else {
-					user->txnlen = 25;
-					address_to_pubkeytxn(user->txnbin, username);
-				}
+		if (test_address(ckp, username)) {
+			user->btcaddress = true;
+			if (script_address(username)) {
+				user->txnlen = 23;
+				address_to_scripttxn(user->txnbin, username);
+			} else {
+				user->txnlen = 25;
+				address_to_pubkeytxn(user->txnbin, username);
 			}
 		}
+	}
+	if (new_user) {
 		LOGNOTICE("Added new user %s%s", username, user->btcaddress ?
 			  " as address based registration" : "");
 	}
@@ -6186,20 +6186,20 @@ static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workerna
 
 	user = get_create_user(ckp, sdata, username, &new_user);
 
-	if (new_user && !ckp->proxy) {
+	if (!ckp->proxy && (new_user || !user->btcaddress) && (len > 26 && len < 35)) {
 		/* Is this a btc address based username? */
-		if (len > 26 && len < 35) {
-			if (test_address(ckp, username)) {
-				user->btcaddress = true;
-				if (script_address(username)) {
-					user->txnlen = 23;
-					address_to_scripttxn(user->txnbin, username);
-				} else {
-					user->txnlen = 25;
-					address_to_pubkeytxn(user->txnbin, username);
-				}
+		if (test_address(ckp, username)) {
+			user->btcaddress = true;
+			if (script_address(username)) {
+				user->txnlen = 23;
+				address_to_scripttxn(user->txnbin, username);
+			} else {
+				user->txnlen = 25;
+				address_to_pubkeytxn(user->txnbin, username);
 			}
 		}
+	}
+	if (new_user) {
 		LOGNOTICE("Added new remote user %s%s", username, user->btcaddress ?
 			  " as address based registration" : "");
 	}
