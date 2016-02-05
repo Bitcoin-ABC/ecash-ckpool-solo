@@ -281,6 +281,7 @@ enum stratum_msgtype {
 	SM_SUGGESTDIFF,
 	SM_BLOCK,
 	SM_PONG,
+	SM_TRANSACTIONS,
 	SM_NONE
 };
 
@@ -303,6 +304,7 @@ static const char __maybe_unused *stratum_msgs[] = {
 	"suggestdiff",
 	"block",
 	"pong",
+	"transactions",
 	""
 };
 

@@ -21,18 +21,19 @@ function douserinfo($data, $user)
 
  $pg = '<h1>Block Acclaim</h1>';
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
- $pg .= "<tr class=title>";
- $pg .= "<td class=dl>User</td>";
- $pg .= "<td class=dr>Blocks</td>";
+ $pg .= '<thead><tr class=title>';
+ $pg .= '<td class=dl>User</td>';
+ $pg .= '<td class=dr>Blocks</td>';
  if ($sall)
  {
-	$pg .= "<td class=dr>Diff</td>";
-	$pg .= "<td class=dr>Avg</td>";
+	$pg .= '<td class=dr>Diff</td>';
+	$pg .= '<td class=dr>Avg</td>';
  }
- $pg .= "</tr>\n";
+ $pg .= "</thead></tr>\n";
 
  if ($ans['STATUS'] == 'ok')
  {
+	$pg .= '<tbody>';
 	$all = array();
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
@@ -73,6 +74,7 @@ function douserinfo($data, $user)
 		}
 		$pg .= "</tr>\n";
 	}
+	$pg .= '</tbody>';
  }
  $pg .= "</table>\n";
 

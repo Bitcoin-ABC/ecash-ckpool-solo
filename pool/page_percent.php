@@ -2,7 +2,7 @@
 #
 function pertitle($data, $user)
 {
- $pg  = '<tr class=title>';
+ $pg  = '<thead><tr class=title>';
  $pg .= '<td class=dl>Address</td>';
  $pg .= '<td class=dl>ID</td>';
  $pg .= '<td class=dr>Shares</td>';
@@ -12,7 +12,7 @@ function pertitle($data, $user)
  $pg .= '<td class=dr>Hash Rate</td>';
  $pg .= '<td class=dr>Ratio</td>';
  $pg .= '<td class=dr>Addr %</td>';
- $pg .= "</tr>\n";
+ $pg .= "</tr></thead>\n";
  return $pg;
 }
 #
@@ -30,6 +30,7 @@ function peruser($data, $user, &$offset, &$totshare, &$totdiff,
  $pg = '';
  if ($ans['STATUS'] == 'ok')
  {
+	$pg .= '<tbody>';
 	if (isset($ans['blockacc']))
 		$blockacc = $ans['blockacc'];
 	if (isset($ans['blockreward']))
@@ -103,6 +104,7 @@ function peruser($data, $user, &$offset, &$totshare, &$totdiff,
 
 		$offset++;
 	}
+	$pg .= '</tbody>';
  }
  return $pg;
 }
@@ -115,7 +117,7 @@ function pertotal($offset, $totshare, $totdiff, $totinvalid, $totrate, $blockacc
 	$row = 'even';
  else
 	$row = 'odd';
- $pg .= "<tr class=$row><td class=dl>Total:</td>";
+ $pg .= "<tfoot><tr class=$row><td class=dl>Total:</td>";
  $pg .= "<td class=dl>&nbsp;</td>";
  $shareacc = number_format($totshare, 0);
  $pg .= "<td class=dr>$shareacc</td>";
@@ -133,7 +135,7 @@ function pertotal($offset, $totshare, $totdiff, $totinvalid, $totrate, $blockacc
 	$blkpct = number_format(100.0 * $totdiff / $blockacc, 3) . '%';
  $pg .= "<td class=dr>$blkpct</td>";
  $pg .= "<td class=dr>$totrate</td>";
- $pg .= "</td><td colspan=2 class=dl></td></tr>\n";
+ $pg .= "</td><td colspan=2 class=dl></td></tr></tfoot>\n";
  return $pg;
 }
 #
@@ -156,14 +158,6 @@ function dopercent($data, $user)
 			$totrate, $blockacc, $blockreward, true);
  $pg .= pertotal($offset, $totshare, $totdiff, $totinvalid, $totrate,
 			$blockacc, $blockreward);
-
- if ($blockacc > 0 && $blockreward > 0)
- {
-	$btc = btcfmt($totdiff / $blockacc * $blockreward);
-	$pg .= '<tr><td colspan=9 class=dc>';
-	$pg .= "<br>Payout est if block found at 100%: ~$btc BTC";
-	$pg .= '</td></tr>';
- }
 
  $pg .= "</table>\n";
 

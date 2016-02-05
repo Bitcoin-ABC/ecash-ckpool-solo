@@ -9,13 +9,13 @@ function addrmgtuser($data, $user, $err)
 
  $pg .= makeForm('addrmgt');
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
- $pg .= '<tr class=title>';
+ $pg .= '<thead><tr class=title>';
  $pg .= '<td class=dc>#</td>';
  $pg .= '<td class=dl>Address</td>';
  $pg .= '<td class=dl>ID</td>';
  $pg .= '<td class=dr>Ratio</td>';
  $pg .= '<td class=dr>%</td>';
- $pg .= '</tr>';
+ $pg .= '</tr></thead>';
 
  # new row template for '+'
  $pg .= '<tr class=hid id=bs>';
@@ -40,6 +40,7 @@ function addrmgtuser($data, $user, $err)
  $count = 0;
  if ($ans['STATUS'] == 'ok')
  {
+	$pg .= '<tbody>';
 	if (isset($ans['limit']))
 		$limit = $ans['limit'];
 	else
@@ -84,6 +85,7 @@ function addrmgtuser($data, $user, $err)
 		$pg .= "</td><td colspan=4 class=dl><font size=-1>limit $limit</font></td></tr>";
 	}
 
+	$pg .= '</tbody><tfoot>';
 	if ((($offset++) % 2) == 0)
 		$row = 'even';
 	else
@@ -108,7 +110,7 @@ function addrmgtuser($data, $user, $err)
 	$pg .= '<tr><td colspan=5 class=dc><font size=-1>';
 	$pg .= "<span class=st1>*</span>Leave blank if you haven't enabled it<br>";
 	$pg .= 'You must enter your password to save changes<br>';
-	$pg .= 'A ratio of 0, will remove the address from the payouts</td></tr>';
+	$pg .= 'A ratio of 0, will remove the address from the payouts</td></tr></tfoot>';
  }
  $pg .= "</table><input type=hidden name=rows value=$count id=rows></form>\n";
 

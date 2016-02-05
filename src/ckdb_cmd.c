@@ -1371,6 +1371,12 @@ redo:
 					desc = "Last 50";
 				} else if (seq == tot - 99) {
 					desc = "Last 100";
+				} else if (seq == tot - 249) {
+					desc = "Last 250";
+				} else if (seq == tot - 499) {
+					desc = "Last 500";
+				} else if (seq == tot - 999) {
+					desc = "Last 1000";
 				}
 				if (desc) {
 					snprintf(tmp, sizeof(tmp),

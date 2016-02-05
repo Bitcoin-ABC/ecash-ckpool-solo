@@ -27,7 +27,7 @@ function dockp($data, $user)
 
  $pg .= 'TotalRAM: '.stnum($ans['totalram']).'<br>';
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
- $pg .= '<tr class=title>';
+ $pg .= '<thead><tr class=title>';
  $pg .= '<td class=dl>Name</td>';
  $pg .= '<td class=dr>Initial</td>';
  $pg .= '<td class=dr>Allocated</td>';
@@ -35,9 +35,10 @@ function dockp($data, $user)
  $pg .= '<td class=dr>RAM</td>';
  $pg .= '<td class=dr>RAM2</td>';
  $pg .= '<td class=dr>Cull</td>';
- $pg .= "</tr>\n";
+ $pg .= "</tr></thead>\n";
  if ($ans['STATUS'] == 'ok')
  {
+	$pg .= '<tbody>';
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
 	{
@@ -56,6 +57,7 @@ function dockp($data, $user)
 		$pg .= '<td class=dr>'.stnum($ans['cull:'.$i]).'</td>';
 		$pg .= "</tr>\n";
 	}
+	$pg .= '</tbody>';
  }
  $pg .= "</table>\n";
 

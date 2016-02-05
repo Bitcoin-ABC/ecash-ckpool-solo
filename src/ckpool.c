@@ -20,7 +20,6 @@
 #include <getopt.h>
 #include <grp.h>
 #include <jansson.h>
-#include <zlib.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -91,7 +91,7 @@ function doblocks($data, $user)
 	{
 		$pg .= '<h1>Block Statistics</h1>';
 		$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
-		$pg .= "<tr class=title>";
+		$pg .= "<thead><tr class=title>";
 		$pg .= "<td class=dl>Description</td>";
 		$pg .= "<td class=dr>Time</td>";
 		$pg .= "<td class=dr>MeanTx%</td>";
@@ -99,7 +99,7 @@ function doblocks($data, $user)
 		$pg .= "<td class=dr>Mean%</td>";
 		$pg .= "<td class=dr>CDF[Erl]</td>";
 		$pg .= "<td class=dr>Luck%</td>";
-		$pg .= "</tr>\n";
+		$pg .= "</tr></thead><tbody>\n";
 
 		$since = $data['info']['lastblock'];
 
@@ -134,7 +134,7 @@ function doblocks($data, $user)
 			$pg .= "<td class=dr>$luck%</td>";
 			$pg .= "</tr>\n";
 		}
-		$pg .= "</table>\n";
+		$pg .= "</tbody></table>\n";
 	}
 
 	if ($ans['STATUS'] == 'ok')
@@ -170,7 +170,7 @@ function doblocks($data, $user)
 	$pg .= 'is bad luck. Higher Diff% and brighter red is worse luck.<br><br>';
 
 	$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
-	$pg .= "<tr class=title>";
+	$pg .= "<thead><tr class=title>";
 	$pg .= "<td class=dr>#</td>";
 	$pg .= "<td class=dl>Height</td>";
 	if ($user !== null)
@@ -182,7 +182,7 @@ function doblocks($data, $user)
 	$pg .= "<td class=dr>Diff%</td>";
 	$pg .= "<td class=dr>CDF</td>";
 	$pg .= "<td class=dr>B</td>";
-	$pg .= "</tr>\n";
+	$pg .= "</tr></thead>\n";
  }
  $blktot = 0;
  $nettot = 0;
@@ -192,6 +192,7 @@ function doblocks($data, $user)
  $csv = "Sequence,Height,Status,Timestamp,DiffAcc,NetDiff,Hash\n";
  if ($ans['STATUS'] == 'ok')
  {
+	$pg .= '<tbody>';
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
 	{
@@ -319,6 +320,7 @@ function doblocks($data, $user)
 		 $csv .= $ans['blockhash:'.$i]."\n";
 		}
 	}
+	$pg .= '</tbody>';
  }
  if ($wantcsv === true)
  {
@@ -327,14 +329,14 @@ function doblocks($data, $user)
  }
  if ($orph === true)
  {
-	$pg .= '<tr><td colspan=';
+	$pg .= '<tfoot><tr><td colspan=';
 	if ($user === null)
 		$pg .= '7';
 	else
 		$pg .= '8';
 	$pg .= ' class=dc><font size=-1><span class=st1>*</span>';
 	$pg .= 'Orphans/Rejects count as shares but not as a block in calculations';
-	$pg .= '</font></td></tr>';
+	$pg .= '</font></td></tr></tfoot>';
  }
  $pg .= "</table>\n";
 

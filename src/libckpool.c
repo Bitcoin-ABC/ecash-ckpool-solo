@@ -399,6 +399,15 @@ void _cksem_wait(sem_t *sem, const char *file, const char *func, const int line)
 	}
 }
 
+int _cksem_trywait(sem_t *sem, const char *file, const char *func, const int line)
+{
+	int ret = sem_trywait(sem);
+
+	if (unlikely(ret && errno != EAGAIN && errno != EINTR))
+		quitfrom(1, file, func, line, "Failed to sem_trywait errno=%d sem=0x%p", errno, sem);
+	return ret;
+}
+
 int _cksem_mswait(sem_t *sem, int ms, const char *file, const char *func, const int line)
 {
 	ts_t abs_timeout, ts_now;
@@ -966,7 +975,7 @@ int wait_read_select(int sockd, float timeout)
 	int epfd, ret;
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
-	event.events = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
+	event.events = EPOLLIN | EPOLLRDHUP;
 	epoll_ctl(epfd, EPOLL_CTL_ADD, sockd, &event);
 	timeout *= 1000;
 	ret = epoll_wait(epfd, &event, 1, timeout);
@@ -1048,7 +1057,7 @@ int wait_write_select(int sockd, float timeout)
 	int epfd, ret;
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
-	event.events = EPOLLOUT | EPOLLRDHUP | EPOLLONESHOT;
+	event.events = EPOLLOUT | EPOLLRDHUP ;
 	epoll_ctl(epfd, EPOLL_CTL_ADD, sockd, &event);
 	timeout *= 1000;
 	ret = epoll_wait(epfd, &event, 1, timeout);

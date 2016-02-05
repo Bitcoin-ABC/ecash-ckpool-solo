@@ -15,7 +15,7 @@ function worktitle($data, $user)
 {
  addSort();
  $r = "input type=radio name=srt onclick=\"sott('worksrt',this);\"";
- $pg  = '<tr class=title>';
+ $pg  = '<thead><tr class=title>';
  $pg .= "<td class=dl>Worker <span class=nb>Name:<$r id=srtwrk data-sf=s0></span></td>";
  $pg .= '<td class=dr>Work Diff</td>';
  $pg .= "<td class=dr><span class=nb><$r id=srtlst data-sf=n2>:Last</span> Share</td>";
@@ -30,7 +30,7 @@ function worktitle($data, $user)
  $pg .= "<td class=hid data-hid=dr><span class=nb><$r id=srtreject data-sf=r11>:Rej</span></td>";
  $pg .= '<td class=dr>Block&nbsp;%</td>';
  $pg .= "<td class=dr><span class=nb><$r id=srtrate data-sf=r13>:Hash</span> Rate</td>";
- $pg .= "</tr>\n";
+ $pg .= "</tr></thead>\n";
  return $pg;
 }
 #
@@ -49,6 +49,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
  $pg = '';
  if ($ans['STATUS'] == 'ok')
  {
+	$pg .= '<tbody>';
 	if (isset($ans['blockacc']))
 		$blockacc = $ans['blockacc'];
 	if (isset($ans['blockreward']))
@@ -202,6 +203,7 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 
 		$offset++;
 	}
+	$pg .= '</tbody>';
  }
  return $pg;
 }
@@ -221,7 +223,7 @@ function worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
 	$row = 'even';
  else
 	$row = 'odd';
- $pg .= "<tr class=$row><td class=dl colspan=3>Total: $offset$dspinst</td>";
+ $pg .= "<tfoot><tr class=$row><td class=dl colspan=3>Total: $offset$dspinst</td>";
  $shareacc = number_format($totshare, 0);
  $pg .= "<td class=dr>$shareacc</td>";
  $diffacc = number_format($totdiff, 0);
@@ -239,7 +241,7 @@ function worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
 	$blkpct = number_format(100.0 * $totdiff / $blockacc, 3) . '%';
  $pg .= "<td class=hid colspan=4 data-hid=dr>&nbsp;</td>";
  $pg .= "<td class=dr>$blkpct</td>";
- $pg .= "<td class=dr>$totrate</td></tr>\n";
+ $pg .= "<td class=dr>$totrate</td></tr></tfoot>\n";
  return $pg;
 }
 #
@@ -265,14 +267,6 @@ function doworker($data, $user)
 			false, true, true, $title, $instances);
  $pg .= worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
 			$totrate, $blockacc, $blockreward, $instances);
-
- if (false && $blockacc > 0 && $blockreward > 0)
- {
-	$btc = btcfmt($totdiff / $blockacc * $blockreward);
-	$pg .= '<tr><td colspan=8 class=dc>';
-	$pg .= "<br>Payout est if block found at 100%: ~$btc BTC";
-	$pg .= '</td></tr>';
- }
 
  $pg .= "</table>\n";
  $pg .= "<script type='text/javascript'>\n";

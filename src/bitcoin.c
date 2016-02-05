@@ -79,99 +79,6 @@ out:
 	return ret;
 }
 
-/* Distill down a set of transactions into an efficient tree arrangement for
- * stratum messages and fast work assembly. */
-static bool gbt_merkle_bins(gbtbase_t *gbt, json_t *transaction_arr)
-{
-	int i, j, binleft, binlen;
-	json_t *arr_val;
-	uchar *hashbin;
-
-	dealloc(gbt->txn_data);
-	dealloc(gbt->txn_hashes);
-	gbt->transactions = 0;
-	gbt->merkles = 0;
-	gbt->transactions = json_array_size(transaction_arr);
-	binlen = gbt->transactions * 32 + 32;
-	hashbin = alloca(binlen + 32);
-	memset(hashbin, 0, 32);
-	binleft = binlen / 32;
-	if (gbt->transactions) {
-		int len = 1, ofs = 0;
-		const char *txn;
-
-		for (i = 0; i < gbt->transactions; i++) {
-			arr_val = json_array_get(transaction_arr, i);
-			txn = json_string_value(json_object_get(arr_val, "data"));
-			if (!txn) {
-				LOGWARNING("json_string_value fail - cannot find transaction data");
-				return false;
-			}
-			len += strlen(txn);
-		}
-
-		gbt->txn_data = ckzalloc(len + 1);
-		gbt->txn_hashes = ckzalloc(gbt->transactions * 65 + 1);
-		memset(gbt->txn_hashes, 0x20, gbt->transactions * 65); // Spaces
-
-		for (i = 0; i < gbt->transactions; i++) {
-			char binswap[32];
-			const char *hash;
-
-			arr_val = json_array_get(transaction_arr, i);
-			hash = json_string_value(json_object_get(arr_val, "hash"));
-			txn = json_string_value(json_object_get(arr_val, "data"));
-			len = strlen(txn);
-			memcpy(gbt->txn_data + ofs, txn, len);
-			ofs += len;
-#if 0
-			/* In case we ever want to be a gbt poolproxy */
-			if (!hash) {
-				char *txn_bin;
-				int txn_len;
-
-				txn_len = len / 2;
-				txn_bin = ckalloc(txn_len);
-				hex2bin(txn_bin, txn, txn_len);
-				/* This is needed for pooled mining since only
-				 * transaction data and not hashes are sent */
-				gen_hash(txn_bin, hashbin + 32 + 32 * i, txn_len);
-				continue;
-			}
-#endif
-			if (!hex2bin(binswap, hash, 32)) {
-				LOGERR("Failed to hex2bin hash in gbt_merkle_bins");
-				return false;
-			}
-			memcpy(gbt->txn_hashes + i * 65, hash, 64);
-			bswap_256(hashbin + 32 + 32 * i, binswap);
-		}
-	}
-	if (binleft > 1) {
-		while (42) {
-			uchar merklebin[32];
-
-			if (binleft == 1)
-				break;
-			memcpy(merklebin, hashbin + 32, 32);
-			__bin2hex(&gbt->merklehash[gbt->merkles][0], merklebin, 32);
-			LOGDEBUG("MH%d %s",gbt->merkles, &gbt->merklehash[gbt->merkles][0]);
-			gbt->merkles++;
-			if (binleft % 2) {
-				memcpy(hashbin + binlen, hashbin + binlen - 32, 32);
-				binlen += 32;
-				binleft++;
-			}
-			for (i = 32, j = 64; j < binlen; i += 32, j += 64)
-				gen_hash(hashbin + j, hashbin + i, 64);
-			binleft /= 2;
-			binlen = binleft * 32;
-		}
-	}
-	LOGINFO("Stored %d transactions", gbt->transactions);
-	return true;
-}
-
 static const char *gbt_req = "{\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"]}]}\n";
 
 /* Request getblocktemplate from bitcoind already connected with a connsock_t
@@ -179,7 +86,7 @@ static const char *gbt_req = "{\"method\": \"getblocktemplate\", \"params\": [{\
  * required to assemble a mining template, storing it in a gbtbase_t structure */
 bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 {
-	json_t *transaction_arr, *coinbase_aux, *res_val, *val, *array;
+	json_t *txn_array, *coinbase_aux, *res_val, *val;
 	const char *previousblockhash;
 	char hash_swap[32], tmp[32];
 	uint64_t coinbasevalue;
@@ -189,7 +96,6 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 	int version;
 	int curtime;
 	int height;
-	int i;
 	bool ret = false;
 
 	val = json_rpc_call(cs, gbt_req);
@@ -205,7 +111,7 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 
 	previousblockhash = json_string_value(json_object_get(res_val, "previousblockhash"));
 	target = json_string_value(json_object_get(res_val, "target"));
-	transaction_arr = json_object_get(res_val, "transactions");
+	txn_array = json_object_get(res_val, "transactions");
 	version = json_integer_value(json_object_get(res_val, "version"));
 	curtime = json_integer_value(json_object_get(res_val, "curtime"));
 	bits = json_string_value(json_object_get(res_val, "bits"));
@@ -258,19 +164,7 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 	gbt->flags = strdup(flags);
 	json_object_set_new_nocheck(gbt->json, "flags", json_string_nocheck(gbt->flags));
 
-	gbt_merkle_bins(gbt, transaction_arr);
-	json_object_set_new_nocheck(gbt->json, "transactions", json_integer(gbt->transactions));
-	if (gbt->transactions) {
-		json_object_set_new_nocheck(gbt->json, "txn_data", json_string_nocheck(gbt->txn_data));
-		json_object_set_new_nocheck(gbt->json, "txn_hashes", json_string_nocheck(gbt->txn_hashes));
-	}
-	json_object_set_new_nocheck(gbt->json, "merkles", json_integer(gbt->merkles));
-	if (gbt->merkles) {
-		array = json_array();
-		for (i = 0; i < gbt->merkles; i++)
-			json_array_append_new(array, json_string_nocheck(&gbt->merklehash[i][0]));
-		json_object_set_new_nocheck(gbt->json, "merklehash", array);
-	}
+	json_object_set_new_nocheck(gbt->json, "transactions", json_deep_copy(txn_array));
 	ret = true;
 
 out:

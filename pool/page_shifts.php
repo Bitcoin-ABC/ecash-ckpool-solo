@@ -6,19 +6,19 @@ function doshifts($data, $user)
 
  $pg = "Click <a href='#payoutmark'>here</a> to jump to the start of the last payout<br><br>";
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
- $pg .= "<tr class=title>";
- $pg .= "<td class=dl>Shift</td>";
- $pg .= "<td class=dl>Start UTC</td>";
- $pg .= "<td class=dr>Length</td>";
- $pg .= "<td class=dr>Your Diff</td>";
- $pg .= "<td class=dr>Inv Diff</td>";
- $pg .= "<td class=dr>Avg Hs</td>";
- $pg .= "<td class=dr>Shares</td>";
- $pg .= "<td class=dr>Avg Share</td>";
- $pg .= "<td class=dr>Rewards</td>";
- $pg .= "<td class=dr>Rewarded<span class=st1>*</span></td>";
- $pg .= "<td class=dr>PPS%</td>";
- $pg .= "</tr>\n";
+ $pg .= '<thead><tr class=title>';
+ $pg .= '<td class=dl>Shift</td>';
+ $pg .= '<td class=dl>Start UTC</td>';
+ $pg .= '<td class=dr>Length</td>';
+ $pg .= '<td class=dr>Your Diff</td>';
+ $pg .= '<td class=dr>Inv Diff</td>';
+ $pg .= '<td class=dr>Avg Hs</td>';
+ $pg .= '<td class=dr>Shares</td>';
+ $pg .= '<td class=dr>Avg Share</td>';
+ $pg .= '<td class=dr>Rewards</td>';
+ $pg .= '<td class=dr>Rewarded<span class=st1>*</span></td>';
+ $pg .= '<td class=dr>PPS%</td>';
+ $pg .= "</tr></thead>\n";
 
  if (($ans['STATUS'] != 'ok') || !isset($ans['prefix_all']))
 	$pg = '<h1>Shifts</h1>'.$pg;
@@ -27,7 +27,7 @@ function doshifts($data, $user)
 	$pre = $ans['prefix_all'];
 
 	$count = $ans['rows'];
-	$pg = '<h1>Last '.($count+1).' Shifts</h1>'.$pg;
+	$pg = '<h1>Last '.($count+1).' Shifts</h1>'.$pg.'<tbody>';
 	for ($i = 0; $i < $count; $i++)
 	{
 		$u = '';
@@ -93,6 +93,7 @@ function doshifts($data, $user)
 		$pg .= "<td class=dr>$pgot</td>";
 		$pg .= "</tr>\n";
 	}
+	$pg .= '</tbody>';
  }
  $pg .= "</table>\n";
  $pg .= "<span class=st1>*</span> The Rewarded value unit is satoshis per 1diff share<br>";

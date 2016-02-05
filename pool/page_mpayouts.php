@@ -12,20 +12,21 @@ function dompayouts($data, $user)
  $pg .= "Payments</a> page for the payments you've been sent.<br><br>";
 
  $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
- $pg .= "<tr class=title>";
- $pg .= "<td class=dr>Block</td>";
- $pg .= "<td class=dr>Block UTC</td>";
- $pg .= "<td class=dr>Miner Reward</td>";
- $pg .= "<td class=dr>N Diff</td>";
- $pg .= "<td class=dr>N Range</td>";
- $pg .= "<td class=dr>Pool N Avg</td>";
- $pg .= "<td class=dr>Your %</td>";
- $pg .= "<td class=dr>Your N Diff</td>";
- $pg .= "<td class=dr>Your N Avg</td>";
- $pg .= "<td class=dr>Your BTC</td>";
- $pg .= "</tr>\n";
+ $pg .= '<thead><tr class=title>';
+ $pg .= '<td class=dr>Block</td>';
+ $pg .= '<td class=dr>Block UTC</td>';
+ $pg .= '<td class=dr>Miner Reward</td>';
+ $pg .= '<td class=dr>N Diff</td>';
+ $pg .= '<td class=dr>N Range</td>';
+ $pg .= '<td class=dr>Pool N Avg</td>';
+ $pg .= '<td class=dr>Your %</td>';
+ $pg .= '<td class=dr>Your N Diff</td>';
+ $pg .= '<td class=dr>Your N Avg</td>';
+ $pg .= '<td class=dr>Your BTC</td>';
+ $pg .= "</tr></thead>\n";
  if ($ans['STATUS'] == 'ok')
  {
+	$pg .= '<tbody>';
 	$totamt = 0;
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
@@ -56,6 +57,7 @@ function dompayouts($data, $user)
 		$pg .= '<td class=dr>'.btcfmt($amount).'</td>';
 		$pg .= "</tr>\n";
 	}
+	$pg .= '</tbody>';
 	if ($count > 1)
 	{
 		if (($i % 2) == 0)
@@ -63,11 +65,11 @@ function dompayouts($data, $user)
 		else
 			$row = 'odd';
 
-		$pg .= "<tr class=$row>";
+		$pg .= "<tfoot><tr class=$row>";
 		$pg .= '<td class=dr>Total:</td>';
 		$pg .= '<td class=dl colspan=8></td>';
 		$pg .= '<td class=dr>'.btcfmt($totamt).'</td>';
-		$pg .= "</tr>\n";
+		$pg .= "</tr></tfoot>\n";
 	}
  }
  $pg .= "</table>\n";

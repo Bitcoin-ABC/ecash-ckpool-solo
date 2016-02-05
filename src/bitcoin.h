@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2016 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -22,7 +22,7 @@ struct gbtbase {
 	uint64_t coinbasevalue;
 	int height;
 	char *flags;
-	int transactions;
+	int txns;
 	char *txn_data;
 	char *txn_hashes;
 	int merkles;

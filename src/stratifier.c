@@ -108,7 +108,7 @@ struct workbase {
 	uint64_t coinbasevalue;
 	int height;
 	char *flags;
-	int transactions;
+	int txns;
 	char *txn_data;
 	char *txn_hashes;
 	int merkles;
@@ -393,6 +393,16 @@ struct session {
 	char address[INET6_ADDRSTRLEN];
 };
 
+typedef struct txntable txntable_t;
+
+struct txntable {
+	UT_hash_handle hh;
+	int id;
+	char hash[68];
+	char *data;
+	int refcount;
+};
+
 #define ID_AUTH 0
 #define ID_WORKINFO 1
 #define ID_AGEWORKINFO 2
@@ -465,6 +475,10 @@ struct stratifier_data {
 	workbase_t *workbases;
 	workbase_t *current_workbase;
 	int workbases_generated;
+	txntable_t *txns;
+
+	/* Is this a node and unable to rebuild workinfos due to lack of txns */
+	bool wbincomplete;
 
 	/* Semaphore to serialise calls to add_base */
 	sem_t update_sem;
@@ -925,53 +939,53 @@ static void send_node_workinfo(sdata_t *sdata, const workbase_t *wb)
 	stratum_instance_t *client;
 	ckmsg_t *bulk_send = NULL;
 	int messages = 0;
+	json_t *wb_val;
+
+	wb_val = json_object();
 
 	ck_rlock(&sdata->instance_lock);
-	if (sdata->node_instances) {
-		json_t *wb_val = json_object();
+	json_set_int(wb_val, "jobid", wb->id);
+	json_set_string(wb_val, "target", wb->target);
+	json_set_double(wb_val, "diff", wb->diff);
+	json_set_int(wb_val, "version", wb->version);
+	json_set_int(wb_val, "curtime", wb->curtime);
+	json_set_string(wb_val, "prevhash", wb->prevhash);
+	json_set_string(wb_val, "ntime", wb->ntime);
+	json_set_string(wb_val, "bbversion", wb->bbversion);
+	json_set_string(wb_val, "nbit", wb->nbit);
+	json_set_int(wb_val, "coinbasevalue", wb->coinbasevalue);
+	json_set_int(wb_val, "height", wb->height);
+	json_set_string(wb_val, "flags", wb->flags);
+	 /* Set to zero to be backwards compat with older node code */
+	json_set_int(wb_val, "transactions", 0);
+	json_set_int(wb_val, "txns", wb->txns);
+	json_set_string(wb_val, "txn_hashes", wb->txn_hashes);
+	json_set_int(wb_val, "merkles", wb->merkles);
+	json_object_set_new_nocheck(wb_val, "merklehash", json_deep_copy(wb->merkle_array));
+	json_set_string(wb_val, "coinb1", wb->coinb1);
+	json_set_int(wb_val, "enonce1varlen", wb->enonce1varlen);
+	json_set_int(wb_val, "enonce2varlen", wb->enonce2varlen);
+	json_set_int(wb_val, "coinb1len", wb->coinb1len);
+	json_set_int(wb_val, "coinb2len", wb->coinb2len);
+	json_set_string(wb_val, "coinb2", wb->coinb2);
 
-		json_set_int(wb_val, "jobid", wb->id);
-		json_set_string(wb_val, "target", wb->target);
-		json_set_double(wb_val, "diff", wb->diff);
-		json_set_int(wb_val, "version", wb->version);
-		json_set_int(wb_val, "curtime", wb->curtime);
-		json_set_string(wb_val, "prevhash", wb->prevhash);
-		json_set_string(wb_val, "ntime", wb->ntime);
-		json_set_string(wb_val, "bbversion", wb->bbversion);
-		json_set_string(wb_val, "nbit", wb->nbit);
-		json_set_int(wb_val, "coinbasevalue", wb->coinbasevalue);
-		json_set_int(wb_val, "height", wb->height);
-		json_set_string(wb_val, "flags", wb->flags);
-		json_set_int(wb_val, "transactions", wb->transactions);
-		if (likely(wb->transactions))
-			json_set_string(wb_val, "txn_data", wb->txn_data);
-		/* We don't need txn_hashes */
-		json_set_int(wb_val, "merkles", wb->merkles);
-		json_object_set_new_nocheck(wb_val, "merklehash", json_deep_copy(wb->merkle_array));
-		json_set_string(wb_val, "coinb1", wb->coinb1);
-		json_set_int(wb_val, "enonce1varlen", wb->enonce1varlen);
-		json_set_int(wb_val, "enonce2varlen", wb->enonce2varlen);
-		json_set_int(wb_val, "coinb1len", wb->coinb1len);
-		json_set_int(wb_val, "coinb2len", wb->coinb2len);
-		json_set_string(wb_val, "coinb2", wb->coinb2);
+	DL_FOREACH(sdata->node_instances, client) {
+		ckmsg_t *client_msg;
+		smsg_t *msg;
+		json_t *json_msg = json_deep_copy(wb_val);
 
-		DL_FOREACH(sdata->node_instances, client) {
-			ckmsg_t *client_msg;
-			smsg_t *msg;
-			json_t *json_msg = json_deep_copy(wb_val);
-
-			json_set_string(json_msg, "node.method", stratum_msgs[SM_WORKINFO]);
-			client_msg = ckalloc(sizeof(ckmsg_t));
-			msg = ckzalloc(sizeof(smsg_t));
-			msg->json_msg = json_msg;
-			msg->client_id = client->id;
-			client_msg->data = msg;
-			DL_APPEND(bulk_send, client_msg);
-			messages++;
-		}
-		json_decref(wb_val);
+		json_set_string(json_msg, "node.method", stratum_msgs[SM_WORKINFO]);
+		client_msg = ckalloc(sizeof(ckmsg_t));
+		msg = ckzalloc(sizeof(smsg_t));
+		msg->json_msg = json_msg;
+		msg->client_id = client->id;
+		client_msg->data = msg;
+		DL_APPEND(bulk_send, client_msg);
+		messages++;
 	}
 	ck_runlock(&sdata->instance_lock);
+
+	json_decref(wb_val);
 
 	/* We send workinfo postponed till after the stratum updates are sent
 	 * out to minimise any lag seen by clients getting updates. It means
@@ -1219,6 +1233,195 @@ struct update_req {
 
 static void broadcast_ping(sdata_t *sdata);
 
+/* Build a hashlist of all transactions, allowing us to compare with the list of
+ * existing transactions to determine which need to be propagated */
+static void add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char *hash,
+		    const char *data)
+{
+	bool found = false;
+	txntable_t *txn;
+
+	/* Look for transactions we already know about and increment their
+	 * refcount if we're still using them. */
+	ck_rlock(&sdata->workbase_lock);
+	HASH_FIND_STR(sdata->txns, hash, txn);
+	if (txn) {
+		if (ckp->node)
+			txn->refcount = 100;
+		else
+			txn->refcount = 20;
+		found = true;
+	}
+	ck_runlock(&sdata->workbase_lock);
+
+	if (found)
+		return;
+
+	txn = ckzalloc(sizeof(txntable_t));
+	memcpy(txn->hash, hash, 65);
+	txn->data = strdup(data);
+	if (ckp->node)
+		txn->refcount = 100;
+	else
+		txn->refcount = 20;
+	HASH_ADD_STR(*txns, hash, txn);
+}
+
+static void send_node_transactions(sdata_t *sdata, const json_t *txn_val)
+{
+	stratum_instance_t *client;
+	ckmsg_t *bulk_send = NULL;
+	int messages = 0;
+
+	ck_rlock(&sdata->instance_lock);
+	DL_FOREACH(sdata->node_instances, client) {
+		ckmsg_t *client_msg;
+		smsg_t *msg;
+		json_t *json_msg = json_deep_copy(txn_val);
+
+		json_set_string(json_msg, "node.method", stratum_msgs[SM_TRANSACTIONS]);
+		client_msg = ckalloc(sizeof(ckmsg_t));
+		msg = ckzalloc(sizeof(smsg_t));
+		msg->json_msg = json_msg;
+		msg->client_id = client->id;
+		client_msg->data = msg;
+		DL_APPEND(bulk_send, client_msg);
+		messages++;
+	}
+	ck_runlock(&sdata->instance_lock);
+
+	if (bulk_send) {
+		LOGINFO("Sending transactions to mining nodes");
+		ssend_bulk_append(sdata, bulk_send, messages);
+	}
+}
+
+/* Distill down a set of transactions into an efficient tree arrangement for
+ * stratum messages and fast work assembly. */
+static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *txn_array)
+{
+	int i, j, binleft, binlen, added = 0, purged = 0;
+	txntable_t *txns = NULL, *tmp, *tmpa;
+	json_t *arr_val, *val;
+	uchar *hashbin;
+
+	wb->txns = json_array_size(txn_array);
+	wb->merkles = 0;
+	binlen = wb->txns * 32 + 32;
+	hashbin = alloca(binlen + 32);
+	memset(hashbin, 0, 32);
+	binleft = binlen / 32;
+	if (wb->txns) {
+		int len = 1, ofs = 0;
+		const char *txn;
+
+		for (i = 0; i < wb->txns; i++) {
+			arr_val = json_array_get(txn_array, i);
+			txn = json_string_value(json_object_get(arr_val, "data"));
+			if (!txn) {
+				LOGWARNING("json_string_value fail - cannot find transaction data");
+				return;
+			}
+			len += strlen(txn);
+		}
+
+		wb->txn_data = ckzalloc(len + 1);
+		wb->txn_hashes = ckzalloc(wb->txns * 65 + 1);
+		memset(wb->txn_hashes, 0x20, wb->txns * 65); // Spaces
+
+		for (i = 0; i < wb->txns; i++) {
+			char binswap[32];
+			const char *hash;
+
+			arr_val = json_array_get(txn_array, i);
+			hash = json_string_value(json_object_get(arr_val, "hash"));
+			txn = json_string_value(json_object_get(arr_val, "data"));
+			add_txn(ckp, sdata, &txns, hash, txn);
+			len = strlen(txn);
+			memcpy(wb->txn_data + ofs, txn, len);
+			ofs += len;
+#if 0
+			/* In case we ever want to be a gbt poolproxy */
+			if (!hash) {
+				char *txn_bin;
+				int txn_len;
+
+				txn_len = len / 2;
+				txn_bin = ckalloc(txn_len);
+				hex2bin(txn_bin, txn, txn_len);
+				/* This is needed for pooled mining since only
+				 * transaction data and not hashes are sent */
+				gen_hash(txn_bin, hashbin + 32 + 32 * i, txn_len);
+				continue;
+			}
+#endif
+			if (!hex2bin(binswap, hash, 32)) {
+				LOGERR("Failed to hex2bin hash in gbt_merkle_bins");
+				return;
+			}
+			memcpy(wb->txn_hashes + i * 65, hash, 64);
+			bswap_256(hashbin + 32 + 32 * i, binswap);
+		}
+	} else
+		wb->txn_hashes = ckzalloc(1);
+	wb->merkle_array = json_array();
+	if (binleft > 1) {
+		while (42) {
+			if (binleft == 1)
+				break;
+			memcpy(&wb->merklebin[wb->merkles][0], hashbin + 32, 32);
+			__bin2hex(&wb->merklehash[wb->merkles][0], &wb->merklebin[wb->merkles][0], 32);
+			json_array_append_new(wb->merkle_array, json_string(&wb->merklehash[wb->merkles][0]));
+			LOGDEBUG("MerkleHash %d %s",wb->merkles, &wb->merklehash[wb->merkles][0]);
+			wb->merkles++;
+			if (binleft % 2) {
+				memcpy(hashbin + binlen, hashbin + binlen - 32, 32);
+				binlen += 32;
+				binleft++;
+			}
+			for (i = 32, j = 64; j < binlen; i += 32, j += 64)
+				gen_hash(hashbin + j, hashbin + i, 64);
+			binleft /= 2;
+			binlen = binleft * 32;
+		}
+	}
+	LOGNOTICE("Stored %d transactions", wb->txns);
+
+	txn_array = json_array();
+
+	/* Find which transactions have their refcount decremented to zero
+	 * and remove them. */
+	ck_wlock(&sdata->workbase_lock);
+	HASH_ITER(hh, sdata->txns, tmp, tmpa) {
+		if (tmp->refcount-- > 0)
+			continue;
+		HASH_DEL(sdata->txns, tmp);
+		dealloc(tmp->data);
+		dealloc(tmp);
+		purged++;
+	}
+	/* Add the new transactions to the transaction table */
+	HASH_ITER(hh, txns, tmp, tmpa) {
+		json_t *txn_val;
+
+		/* Propagate transaction here */
+		JSON_CPACK(txn_val, "{ss,ss}", "hash", tmp->hash, "data", tmp->data);
+		json_array_append_new(txn_array, txn_val);
+		/* Move to the sdata transaction table */
+		HASH_DEL(txns, tmp);
+		HASH_ADD_STR(sdata->txns, hash, tmp);
+		added++;
+	}
+	ck_wunlock(&sdata->workbase_lock);
+
+	JSON_CPACK(val, "{so}", "transaction", txn_array);
+	send_node_transactions(sdata, val);
+	json_decref(val);
+
+	if (added || purged)
+		LOGINFO("Stratifier added %d transactions and purged %d", added, purged);
+}
+
 /* This function assumes it will only receive a valid json gbt base template
  * since checking should have been done earlier, and creates the base template
  * for generating work templates. */
@@ -1228,18 +1431,26 @@ static void *do_update(void *arg)
 	int prio = ur->prio, retries = 0;
 	ckpool_t *ckp = ur->ckp;
 	sdata_t *sdata = ckp->data;
+	json_t *val, *txn_array;
 	bool new_block = false;
 	bool ret = false;
 	workbase_t *wb;
 	time_t now_t;
-	json_t *val;
 	char *buf;
 
 	pthread_detach(pthread_self());
 	rename_proc("updater");
 
 	/* Serialise access to getbase to avoid out of order new block notifies */
-	cksem_wait(&sdata->update_sem);
+	if (prio < GEN_PRIORITY) {
+		/* Don't queue another routine update if one is already in
+		 * progress. */
+		if (cksem_trywait(&sdata->update_sem)) {
+			LOGINFO("Skipped lowprio update base");
+			goto out_free;
+		}
+	} else
+		cksem_wait(&sdata->update_sem);
 retry:
 	buf = send_recv_generator(ckp, "getbase", prio);
 	if (unlikely(!buf)) {
@@ -1273,25 +1484,8 @@ retry:
 	json_uint64cpy(&wb->coinbasevalue, val, "coinbasevalue");
 	json_intcpy(&wb->height, val, "height");
 	json_strdup(&wb->flags, val, "flags");
-	json_intcpy(&wb->transactions, val, "transactions");
-	if (wb->transactions) {
-		json_strdup(&wb->txn_data, val, "txn_data");
-		json_strdup(&wb->txn_hashes, val, "txn_hashes");
-	} else
-		wb->txn_hashes = ckzalloc(1);
-	json_intcpy(&wb->merkles, val, "merkles");
-	wb->merkle_array = json_array();
-	if (wb->merkles) {
-		json_t *arr;
-		int i;
-
-		arr = json_object_get(val, "merklehash");
-		for (i = 0; i < wb->merkles; i++) {
-			strcpy(&wb->merklehash[i][0], json_string_value(json_array_get(arr, i)));
-			hex2bin(&wb->merklebin[i][0], &wb->merklehash[i][0], 32);
-			json_array_append_new(wb->merkle_array, json_string(&wb->merklehash[i][0]));
-		}
-	}
+	txn_array = json_object_get(val, "transactions");
+	wb_merkle_bins(ckp, sdata, wb, txn_array);
 	json_decref(val);
 	generate_coinbase(ckp, wb);
 
@@ -1321,9 +1515,61 @@ out:
 		broadcast_ping(sdata);
 	}
 	dealloc(buf);
+out_free:
 	free(ur->pth);
 	free(ur);
 	return NULL;
+}
+
+static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *txnhashes)
+{
+	const char *hashes = json_string_value(txnhashes);
+	json_t *txn_array;
+	txntable_t *txn;
+	bool ret = true;
+	int i, len;
+
+	if (likely(hashes))
+		len = strlen(hashes);
+	else
+		len = 0;
+	if (!hashes || !len)
+		return ret;
+
+	if (unlikely(len < wb->txns * 65)) {
+		LOGERR("Truncated transactions in rebuild_txns only %d long", len);
+		return false;
+	}
+	txn_array = json_array();
+
+	ck_rlock(&sdata->workbase_lock);
+	for (i = 0; i < wb->txns; i++) {
+		json_t *txn_val;
+		char hash[68];
+
+		memcpy(hash, hashes + i * 65, 64);
+		hash[64] = '\0';
+		HASH_FIND_STR(sdata->txns, hash, txn);
+		if (unlikely(!txn)) {
+			LOGNOTICE("Failed to find txn in rebuild_txns");
+			ret = false;
+			goto out_unlock;
+		}
+		txn->refcount = 100;
+		JSON_CPACK(txn_val, "{ss,ss}",
+			   "hash", hash, "data", txn->data);
+		json_array_append_new(txn_array, txn_val);
+	}
+out_unlock:
+	ck_runlock(&sdata->workbase_lock);
+
+	if (ret) {
+		LOGINFO("Rebuilt txns into workbase with %d transactions", (int)i);
+		wb_merkle_bins(ckp, sdata, wb, txn_array);
+	}
+	json_decref(txn_array);
+
+	return ret;
 }
 
 static void add_node_base(ckpool_t *ckp, json_t *val)
@@ -1331,8 +1577,8 @@ static void add_node_base(ckpool_t *ckp, json_t *val)
 	workbase_t *wb = ckzalloc(sizeof(workbase_t));
 	sdata_t *sdata = ckp->data;
 	bool new_block = false;
+	json_t *txnhashes;
 	char header[228];
-	int i;
 
 	wb->ckp = ckp;
 	json_int64cpy(&wb->id, val, "jobid");
@@ -1348,14 +1594,33 @@ static void add_node_base(ckpool_t *ckp, json_t *val)
 	json_uint64cpy(&wb->coinbasevalue, val, "coinbasevalue");
 	json_intcpy(&wb->height, val, "height");
 	json_strdup(&wb->flags, val, "flags");
-	json_intcpy(&wb->transactions, val, "transactions");
-	if (wb->transactions)
+	/* First see if the server uses the old communication format */
+	json_intcpy(&wb->txns, val, "transactions");
+	if (wb->txns) {
+		int i;
+
 		json_strdup(&wb->txn_data, val, "txn_data");
-	json_intcpy(&wb->merkles, val, "merkles");
-	wb->merkle_array = json_object_dup(val, "merklehash");
-	for (i = 0; i < wb->merkles; i++) {
-		strcpy(&wb->merklehash[i][0], json_string_value(json_array_get(wb->merkle_array, i)));
-		hex2bin(&wb->merklebin[i][0], &wb->merklehash[i][0], 32);
+		json_intcpy(&wb->merkles, val, "merkles");
+		wb->merkle_array = json_object_dup(val, "merklehash");
+		for (i = 0; i < wb->merkles; i++) {
+			strcpy(&wb->merklehash[i][0], json_string_value(json_array_get(wb->merkle_array, i)));
+			hex2bin(&wb->merklebin[i][0], &wb->merklehash[i][0], 32);
+		}
+	} else {
+		json_intcpy(&wb->txns, val, "txns");
+		txnhashes = json_object_get(val, "txn_hashes");
+		if (!rebuild_txns(ckp, sdata, wb, txnhashes)) {
+			if (!sdata->wbincomplete) {
+				sdata->wbincomplete = true;
+				LOGWARNING("Unable to rebuild transactions to create workinfo, ignore displayed hashrate");
+			}
+			free(wb);
+			return;
+		}
+		if (sdata->wbincomplete) {
+			LOGWARNING("Successfully resumed rebuilding transactions into workinfo");
+			sdata->wbincomplete = false;
+		}
 	}
 	json_strdup(&wb->coinb1, val, "coinb1");
 	json_intcpy(&wb->coinb1len, val, "coinb1len");
@@ -1551,7 +1816,7 @@ static void
 process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const int cblen,
 	      const uchar *data, const uchar *hash, uchar *swap32, char *blockhash)
 {
-	int transactions = wb->transactions + 1;
+	int txns = wb->txns + 1;
 	char *gbt_block, varint[12];
 	char hexcoinbase[1024];
 
@@ -1562,17 +1827,17 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 	/* Message format: "submitblock:hash,data" */
 	sprintf(gbt_block, "submitblock:%s,", blockhash);
 	__bin2hex(gbt_block + 12 + 64 + 1, data, 80);
-	if (transactions < 0xfd) {
-		uint8_t val8 = transactions;
+	if (txns < 0xfd) {
+		uint8_t val8 = txns;
 
 		__bin2hex(varint, (const unsigned char *)&val8, 1);
-	} else if (transactions <= 0xffff) {
-		uint16_t val16 = htole16(transactions);
+	} else if (txns <= 0xffff) {
+		uint16_t val16 = htole16(txns);
 
 		strcat(gbt_block, "fd");
 		__bin2hex(varint, (const unsigned char *)&val16, 2);
 	} else {
-		uint32_t val32 = htole32(transactions);
+		uint32_t val32 = htole32(txns);
 
 		strcat(gbt_block, "fe");
 		__bin2hex(varint, (const unsigned char *)&val32, 4);
@@ -1580,7 +1845,7 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 	strcat(gbt_block, varint);
 	__bin2hex(hexcoinbase, coinbase, cblen);
 	strcat(gbt_block, hexcoinbase);
-	if (wb->transactions)
+	if (wb->txns)
 		realloc_strcat(&gbt_block, wb->txn_data);
 	send_generator(ckp, gbt_block, GEN_PRIORITY);
 	if (ckp->remote)
@@ -5618,7 +5883,7 @@ out_unlock:
 	}
 	ckdbq_add(ckp, ID_SHARES, val);
 out:
-	if ((!result && !submit) || !share) {
+	if (!sdata->wbincomplete && ((!result && !submit) || !share)) {
 		/* Is this the first in a run of invalids? */
 		if (client->first_invalid < client->last_share.tv_sec || !client->first_invalid)
 			client->first_invalid = now_t;
@@ -5883,7 +6148,33 @@ static void init_client(sdata_t *sdata, const stratum_instance_t *client, const 
 		stratum_send_update(sdata, client_id, true);
 }
 
-static void *set_node_latency(void *arg)
+/* When a node first connects it has no transactions so we have to send all
+ * current ones to it. */
+static void send_node_all_txns(sdata_t *sdata, const stratum_instance_t *client)
+{
+	json_t *txn_array, *val, *txn_val;
+	txntable_t *txn, *tmp;
+	smsg_t *msg;
+
+	txn_array = json_array();
+
+	ck_rlock(&sdata->workbase_lock);
+	HASH_ITER(hh, sdata->txns, txn, tmp) {
+		JSON_CPACK(txn_val, "{ss,ss}", "hash", txn->hash, "data", txn->data);
+		json_array_append_new(txn_array, txn_val);
+	}
+	ck_runlock(&sdata->workbase_lock);
+
+	JSON_CPACK(val, "{ss,so}", "node.method", stratum_msgs[SM_TRANSACTIONS],
+		   "transaction", txn_array);
+	msg = ckzalloc(sizeof(smsg_t));
+	msg->json_msg = val;
+	msg->client_id = client->id;
+	ckmsgq_add(sdata->ssends, msg);
+	LOGNOTICE("Sending new node client %"PRId64" all transactions", client->id);
+}
+
+static void *setup_node(void *arg)
 {
 	stratum_instance_t *client = (stratum_instance_t *)arg;
 
@@ -5892,6 +6183,7 @@ static void *set_node_latency(void *arg)
 	client->latency = round_trip(client->address) / 2;
 	LOGNOTICE("Node client %"PRId64" %s latency set to %dms", client->id,
 		  client->address, client->latency);
+	send_node_all_txns(client->sdata, client);
 	dec_instance_ref(client->sdata, client);
 	return NULL;
 }
@@ -5913,7 +6205,7 @@ static void add_mining_node(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *c
 	LOGWARNING("Added client %"PRId64" %s as mining node on server %d:%s", client->id,
 		   client->address, client->server, ckp->serverurl[client->server]);
 
-	create_pthread(&pth, set_node_latency, client);
+	create_pthread(&pth, setup_node, client);
 }
 
 static void add_remote_server(sdata_t *sdata, stratum_instance_t *client)
@@ -6000,9 +6292,9 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 			connector_drop_client(ckp, client_id);
 			drop_client(ckp, sdata, client_id);
 		} else {
-			add_mining_node(ckp, sdata, client);
 			snprintf(buf, 255, "passthrough=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
+			add_mining_node(ckp, sdata, client);
 		}
 		return;
 	}
@@ -6138,22 +6430,24 @@ static void parse_authorise_result(ckpool_t *ckp, sdata_t *sdata, stratum_instan
 
 static int node_msg_type(json_t *val)
 {
+	const char *method;
 	int i, ret = -1;
-	char *method;
 
 	if (!val)
 		goto out;
-	if (!json_get_string(&method, val, "node.method"))
-		goto out;
-	for (i = 0; i < SM_NONE; i++) {
-		if (!strcmp(method, stratum_msgs[i])) {
-			ret = i;
-			break;
+	method = json_string_value(json_object_get(val, "node.method"));
+	if (method) {
+		for (i = 0; i < SM_NONE; i++) {
+			if (!strcmp(method, stratum_msgs[i])) {
+				ret = i;
+				break;
+			}
 		}
-	}
-	json_object_del(val, "node.method");
-out:
-	if (ret < 0 && json_get_string(&method, val, "method")) {
+		json_object_del(val, "node.method");
+	} else
+		method = json_string_value(json_object_get(val, "method"));
+
+	if (ret < 0 && method) {
 		if (!safecmp(method, "mining.submit"))
 			ret = SM_SHARE;
 		else if (!safecmp(method, "mining.notify"))
@@ -6166,7 +6460,10 @@ out:
 			ret = SM_TXNS;
 		else if (cmdmatch(method, "mining.suggest_difficulty"))
 			ret = SM_SUGGESTDIFF;
+		else
+			ret = SM_NONE;
 	}
+out:
 	return ret;
 }
 
@@ -6355,6 +6652,50 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const 
 		LOGWARNING("unrecognised trusted message %s", buf);
 }
 
+static void add_node_txns(sdata_t *sdata, const json_t *val)
+{
+	json_t *txn_array, *txn_val, *data_val, *hash_val;
+	txntable_t *txn;
+	int i, arr_size;
+	int added = 0;
+
+	txn_array = json_object_get(val, "transaction");
+	arr_size = json_array_size(txn_array);
+
+	ck_wlock(&sdata->workbase_lock);
+	for (i = 0; i < arr_size; i++) {
+		const char *hash, *data;
+
+		txn_val = json_array_get(txn_array, i);
+		data_val = json_object_get(txn_val, "data");
+		hash_val = json_object_get(txn_val, "hash");
+		data = json_string_value(data_val);
+		hash = json_string_value(hash_val);
+		if (unlikely(!data || !hash)) {
+			LOGERR("Failed to get hash/data in add_node_txns");
+			continue;
+		}
+		HASH_FIND_STR(sdata->txns, hash, txn);
+		if (txn) {
+			txn->refcount = 100;
+			continue;
+		}
+		txn = ckzalloc(sizeof(txntable_t));
+		memcpy(txn->hash, hash, 65);
+		txn->data = strdup(data);
+		/* Set the refcount for node transactions greater than the
+		 * upstream pool to ensure we never age them faster than the
+		 * pool does. */
+		txn->refcount = 100;
+		HASH_ADD_STR(sdata->txns, hash, txn);
+		added++;
+	}
+	ck_wunlock(&sdata->workbase_lock);
+
+	if (added)
+		LOGINFO("Stratifier added %d node transactions", added);
+}
+
 /* Entered with client holding ref count */
 static void node_client_msg(ckpool_t *ckp, json_t *val, const char *buf, stratum_instance_t *client)
 {
@@ -6396,6 +6737,10 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, const char *buf, stratum
 		case SM_AUTHRESULT:
 			parse_authorise_result(ckp, sdata, client, res_val);
 			break;
+		case SM_NONE:
+			LOGNOTICE("Unrecognised method from client %"PRId64" :%s",
+				  client->id, buf);
+			break;
 		default:
 			break;
 	}
@@ -6411,6 +6756,9 @@ static void parse_node_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const cha
 	}
 	LOGDEBUG("Got node method %d:%s", msg_type, stratum_msgs[msg_type]);
 	switch (msg_type) {
+		case SM_TRANSACTIONS:
+			add_node_txns(sdata, val);
+			break;
 		case SM_WORKINFO:
 			add_node_base(ckp, val);
 			break;
@@ -6806,7 +7154,7 @@ static int transactions_by_jobid(sdata_t *sdata, const int64_t id)
 	ck_rlock(&sdata->workbase_lock);
 	HASH_FIND_I64(sdata->workbases, &id, wb);
 	if (wb)
-		ret = wb->transactions;
+		ret = wb->txns;
 	ck_runlock(&sdata->workbase_lock);
 
 	return ret;
