@@ -479,6 +479,10 @@ retry:
 		msg = send_recv_proc(ckp->connector, "stats");
 		send_unix_msg(sockd, msg);
 		dealloc(msg);
+	} else if (cmdmatch(buf, "ckdbflush")) {
+		LOGWARNING("Received ckdb flush message");
+		send_procmsg(ckp->stratifier, buf);
+		send_unix_msg(sockd, "flushing");
 	} else {
 		LOGINFO("Listener received unhandled message: %s", buf);
 		send_unix_msg(sockd, "unknown");

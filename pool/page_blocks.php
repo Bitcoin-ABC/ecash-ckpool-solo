@@ -194,6 +194,19 @@ function doblocks($data, $user)
  {
 	$pg .= '<tbody>';
 	$count = $ans['rows'];
+	$colpct = 0;
+	for ($i = $count - 1; $i >= 0; $i--)
+	{
+		$conf = $ans['confirmed:'.$i];
+		$diffratio = $ans['diffratio:'.$i];
+		if ($diffratio > 0)
+		{
+			$colpct += 100.0 * $diffratio;
+			$ans['colpct:'.$i] = $colpct;
+			if ($conf != 'O' and $conf != 'R')
+				$colpct = 0;
+		}
+	}
 	for ($i = 0; $i < $count; $i++)
 	{
 		if (($i % 2) == 0)
@@ -277,9 +290,18 @@ function doblocks($data, $user)
 		if ($diffratio > 0)
 		{
 			$pct = 100.0 * $diffratio;
-			list($fg, $bg) = pctcolour($pct);
-			$bpct = "<font color=$fg>$approx".number_format($pct, 3).'%</font>';
-			$bg = " bgcolor=$bg";
+			$colpct = $ans['colpct:'.$i];
+			if ($conf != 'O' and $conf != 'R')
+			{
+				list($fg, $bg) = pctcolour($colpct);
+				$bpct = "<font color=$fg>$approx".number_format($pct, 3).'%</font>';
+				$bg = " bgcolor=$bg";
+			}
+			else
+			{
+				$bpct = "$approx".number_format($pct, 3).'%';
+				$bg = '';
+			}
 			$blktot += $diffacc;
 			if ($conf != 'O' and $conf != 'R')
 				$nettot += $netdiff;

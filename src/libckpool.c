@@ -971,7 +971,7 @@ int wait_close(int sockd, int timeout)
 /* Emulate a select read wait for high fds that select doesn't support. */
 int wait_read_select(int sockd, float timeout)
 {
-	struct epoll_event event;
+	struct epoll_event event = {0, {NULL}};
 	int epfd, ret;
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
@@ -1053,7 +1053,7 @@ out:
 /* Emulate a select write wait for high fds that select doesn't support */
 int wait_write_select(int sockd, float timeout)
 {
-	struct epoll_event event;
+	struct epoll_event event = {0, {NULL}};
 	int epfd, ret;
 
 	epfd = epoll_create1(EPOLL_CLOEXEC);
