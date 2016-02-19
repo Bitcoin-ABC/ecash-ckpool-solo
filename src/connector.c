@@ -578,7 +578,7 @@ static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
 	client = ref_client_by_id(cdata, id);
 	if (unlikely(!client)) {
 		LOGNOTICE("Failed to find client by id %"PRId64" in receiver!", id);
-		return;
+		goto outnoclient;
 	}
 	if (unlikely(client->invalid))
 		goto out;
@@ -622,6 +622,8 @@ static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
 	}
 out:
 	dec_instance_ref(cdata, client);
+outnoclient:
+	free(event);
 }
 
 /* Waits on fds ready to read on from the list stored in conn_instance and
@@ -629,7 +631,7 @@ out:
 static void *receiver(void *arg)
 {
 	cdata_t *cdata = (cdata_t *)arg;
-	struct epoll_event event;
+	struct epoll_event *event = ckzalloc(sizeof(struct epoll_event));
 	uint64_t serverfds, i;
 	int ret, epfd;
 
@@ -644,9 +646,9 @@ static void *receiver(void *arg)
 	/* Add all the serverfds to the epoll */
 	for (i = 0; i < serverfds; i++) {
 		/* The small values will be less than the first client ids */
-		event.data.u64 = i;
-		event.events = EPOLLIN | EPOLLRDHUP;
-		ret = epoll_ctl(epfd, EPOLL_CTL_ADD, cdata->serverfd[i], &event);
+		event->data.u64 = i;
+		event->events = EPOLLIN | EPOLLRDHUP;
+		ret = epoll_ctl(epfd, EPOLL_CTL_ADD, cdata->serverfd[i], event);
 		if (ret < 0) {
 			LOGEMERG("FATAL: Failed to add epfd %d to epoll_ctl", epfd);
 			goto out;
@@ -661,7 +663,7 @@ static void *receiver(void *arg)
 
 		while (unlikely(!cdata->accept))
 			cksleep_ms(10);
-		ret = epoll_wait(epfd, &event, 1, 1000);
+		ret = epoll_wait(epfd, event, 1, 1000);
 		if (unlikely(ret < 1)) {
 			if (unlikely(ret == -1)) {
 				LOGEMERG("FATAL: Failed to epoll_wait in receiver");
@@ -670,7 +672,7 @@ static void *receiver(void *arg)
 			/* Nothing to service, still very unlikely */
 			continue;
 		}
-		edu64 = event.data.u64;
+		edu64 = event->data.u64;
 		if (edu64 < serverfds) {
 			ret = accept_client(cdata, epfd, edu64);
 			if (unlikely(ret < 0)) {
@@ -679,7 +681,10 @@ static void *receiver(void *arg)
 			}
 			continue;
 		}
-		ckmsgq_add(cdata->cevents, &event);
+		/* Event structure is handed off to client_event_processor
+		 * here to be freed so we need to allocate a new one */
+		ckmsgq_add(cdata->cevents, event);
+		event = ckzalloc(sizeof(struct epoll_event));
 	}
 out:
 	/* We shouldn't get here unless there's an error */
