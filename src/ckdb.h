@@ -51,7 +51,7 @@
 
 #define DB_VLOCK "1"
 #define DB_VERSION "1.0.4"
-#define CKDB_VERSION DB_VERSION"-1.923"
+#define CKDB_VERSION DB_VERSION"-1.959"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -65,10 +65,14 @@
 
 // So they can fit into a 1 byte flag field
 #define TRUE_STR "Y"
+#define TRUE2_STR "T"
 #define FALSE_STR "N"
+#define FALSE2_STR "F"
 
 #define TRUE_CHR 'Y'
+#define TRUE2_CHR 'T'
 #define FALSE_CHR 'N'
+#define FALSE2_CHR 'F'
 
 /* Set by cmd_setopts() and used by whatever code needs it
  * It's loaded during startup but set to SWITCH_STATE_ALL if it's missing,
@@ -353,6 +357,11 @@ extern cklock_t last_lock;
 #define STR_SHAREERRORS "shareerror"
 #define STR_AGEWORKINFO "ageworkinfo"
 
+// Fixed size required - increase if you need larger
+#define MAX_ALERT_CMD 255
+// Access using event_limits_free lock
+extern char *ckdb_alert_cmd;
+
 extern char *btc_server;
 extern char *btc_auth;
 extern int btc_timeout;
@@ -627,6 +636,8 @@ enum cmd_values {
 	CMD_UNSET,
 	CMD_DUPSEQ, // Ignore, we've already got it
 	CMD_REPLY, // Means something was wrong - send back reply
+	CMD_ALERTEVENT, // Means reply with the buf passed
+	CMD_ALERTOVENT, // Means reply with the buf passed
 	CMD_TERMINATE,
 	CMD_PING,
 	CMD_VERSION,
@@ -673,6 +684,7 @@ enum cmd_values {
 	CMD_BTCSET,
 	CMD_QUERY,
 	CMD_LOCKS,
+	CMD_EVENTS,
 	CMD_END
 };
 
@@ -804,6 +816,16 @@ enum cmd_values {
 		_row->expirydate.tv_usec = default_expiry.tv_usec; \
 	} while (0)
 
+#define HISTORYDATEDEFAULT(_row, _cd) do { \
+		_row->createdate.tv_sec = (_cd)->tv_sec; \
+		_row->createdate.tv_usec = (_cd)->tv_usec; \
+		STRNCPY(_row->createby, by_default); \
+		STRNCPY(_row->createcode, (char *)__func__); \
+		STRNCPY(_row->createinet, inet_default); \
+		_row->expirydate.tv_sec = default_expiry.tv_sec; \
+		_row->expirydate.tv_usec = default_expiry.tv_usec; \
+	} while (0)
+
 /* Override _row defaults if transfer fields are present
  * We don't care about the reply so it can be small */
 #define HISTORYDATETRANSFER(_root, _row) do { \
@@ -815,17 +837,17 @@ enum cmd_values {
 			__item = optional_name(_root, BYTRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
-				STRNCPY(_row->createby, __transfer->mvalue); \
+				STRNCPY((_row)->createby, __transfer->mvalue); \
 			} \
 			__item = optional_name(_root, CODETRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
-				STRNCPY(_row->createcode, __transfer->mvalue); \
+				STRNCPY((_row)->createcode, __transfer->mvalue); \
 			} \
 			__item = optional_name(_root, INETTRF, 1, NULL, __reply, __siz); \
 			if (__item) { \
 				DATA_TRANSFER(__transfer, __item); \
-				STRNCPY(_row->createinet, __transfer->mvalue); \
+				STRNCPY((_row)->createinet, __transfer->mvalue); \
 			} \
 		} \
 	} while (0)
@@ -1586,6 +1608,12 @@ extern K_TREE *optioncontrol_root;
 extern K_LIST *optioncontrol_free;
 extern K_STORE *optioncontrol_store;
 
+typedef struct oc_trigger {
+	char *match;
+	bool exact;
+	void (*func)(OPTIONCONTROL *, const char *);
+} OC_TRIGGER;
+
 // TODO: discarding workinfo,shares
 // WORKINFO workinfo.id.json={...}
 typedef struct workinfo {
@@ -1935,25 +1963,190 @@ extern K_LIST *process_pplns_free;
  * UserAtts can also at the user level */
 #define SHIFTS_SETTING_NAME "ShiftsPageSize"
 
-/*
-// EVENTLOG
-typedef struct eventlog {
-	int64_t eventlogid;
-	char poolinstance[TXT_BIG+1];
-	char eventlogcode[TXT_SML+1];
-	char *eventlogdescription;
+// IPS
+typedef struct ips {
+	char group[TXT_SML+1];
+	char ip[TXT_MED+1];
+	char eventname[TXT_SML+1];
+	bool is_event;
+	int lifetime;
+	bool log;
+	char *description;
 	HISTORYDATECONTROLFIELDS;
-} EVENTLOG;
+} IPS;
 
-#define ALLOC_EVENTLOG 100
-#define LIMIT_EVENTLOG 0
-#define INIT_EVENTLOG(_item) INIT_GENERIC(_item, eventlog)
-#define DATA_EVENTLOG(_var, _item) DATA_GENERIC(_var, _item, eventlog, true)
+#define ALLOC_IPS 16
+#define LIMIT_IPS 0
+#define INIT_IPS(_item) INIT_GENERIC(_item, ips)
+#define DATA_IPS(_var, _item) DATA_GENERIC(_var, _item, ips, true)
+#define DATA_IPS_NULL(_var, _item) DATA_GENERIC(_var, _item, ips, false)
 
-extern K_TREE *eventlog_root;
-extern K_LIST *eventlog_free;
-extern K_STORE *eventlog_store;
-*/
+extern K_TREE *ips_root;
+extern K_LIST *ips_free;
+extern K_STORE *ips_store;
+
+// Only used by OK
+#define EVENTNAME_ALL "*E"
+#define OVENTNAME_ALL "*O"
+
+// All eventnames will be less than this
+#define EVENTNAME_MAX "~"
+
+#define IPS_GROUP_OK "OK"
+#define IPS_GROUP_BAD "BAD"
+#define IPS_GROUP_BAN "BAN"
+
+// OptionControl records for IPS_GROUP_OK
+#define OC_IPS "ips_"
+#define OC_IPS_OK OC_IPS "ok_"
+#define OC_IPS_BAN OC_IPS "ban_"
+
+// EVENTS RAM only
+typedef struct events {
+	int id;
+	// class C truncated version of createinet or full IP for IPv6
+	char ipc[TXT_MED+1];
+	// check for repeated use of the same hash
+	char hash[TXT_BIG+1];
+	// How many trees the item is still in
+	int trees;
+	// who: createby, createinet, createdate
+	HISTORYDATECONTROLFIELDS;
+} EVENTS;
+
+#define ALLOC_EVENTS 1000
+#define LIMIT_EVENTS 0
+#define INIT_EVENTS(_item) INIT_GENERIC(_item, events)
+#define DATA_EVENTS(_var, _item) DATA_GENERIC(_var, _item, events, true)
+#define DATA_EVENTS_NULL(_var, _item) DATA_GENERIC(_var, _item, events, false)
+
+extern K_TREE *events_user_root;
+extern K_TREE *events_ip_root;
+extern K_TREE *events_ipc_root;
+extern K_TREE *events_hash_root;
+extern K_LIST *events_free;
+extern K_STORE *events_store;
+// Emulate a list for lock checking     
+extern K_LIST *event_limits_free;
+
+#define OC_LIMITS "event_limits_"
+
+// Any password failure
+#define EVENTID_PASSFAIL 0
+// Add/Change address
+#define EVENTID_CREADDR 1
+// Create an account
+#define EVENTID_CREACC 2
+// API unkatts
+#define EVENTID_UNKATTS 3
+// 2FA rubbish
+#define EVENTID_INV2FA 4
+// 2FA incorrect
+#define EVENTID_WRONG2FA 5
+// Attempt change to an invalid BTC address (that required btcd checking)
+#define EVENTID_INVBTC 6
+// Attempt change to an incorrect BTC address (that failed the ckdb test)
+#define EVENTID_INCBTC 7
+// Attempt change to another used BTC address
+#define EVENTID_BTCUSED 8
+// Auto create account
+#define EVENTID_AUTOACC 9
+// Unknown auth username
+#define EVENTID_INVAUTH 10
+// Unknown chkpass username
+#define EVENTID_INVUSER 11
+#define EVENTID_NONE 12
+
+#define EVENT_OK -1
+
+// Homepage valid access
+#define OVENTID_HOMEPAGE 0
+// Blocks valid access
+#define OVENTID_BLOCKS 1
+// API valid access
+#define OVENTID_API 2
+// Add/Update single payment address
+#define OVENTID_ONEADDR 3
+// Add/Update multi payment address
+#define OVENTID_MULTIADDR 4
+// Workers valid access
+#define OVENTID_WORKERS 5
+// Other valid access
+#define OVENTID_OTHER 6
+#define OVENTID_NONE 7
+
+// OVENTS RAM only (OK EVENTS)
+typedef struct ovents {
+	// user, ip or ipc
+	char key[TXT_SML+1];
+	// One record per hour time/3600
+	int hour;
+	// per id per minute
+	int count[OVENTID_NONE * 60];
+	HISTORYDATECONTROLFIELDS;
+} OVENTS;
+
+#define ALLOC_OVENTS 1000
+#define LIMIT_OVENTS 0
+#define INIT_OVENTS(_item) INIT_GENERIC(_item, ovents)
+#define DATA_OVENTS(_var, _item) DATA_GENERIC(_var, _item, ovents, true)
+#define DATA_OVENTS_NULL(_var, _item) DATA_GENERIC(_var, _item, ovents, false)
+
+extern K_TREE *ovents_root;
+extern K_LIST *ovents_free;
+extern K_STORE *ovents_store;
+
+#define SEC_TO_HOUR(_s) ((int)((_s) / 3600))
+#define TV_TO_HOUR(_tv) SEC_TO_HOUR((_tv)->tv_sec)
+#define SEC_TO_MIN(_s) ((int)(((_s) % 3600) / 60))
+#define TV_TO_MIN(_tv) SEC_TO_MIN((_tv)->tv_sec)
+#define IDMIN(_id, _min) ((_id) * 60 + (_min))
+
+#define OC_OLIMITS "ovent_limits_"
+
+#define OVENT_OK EVENT_OK
+
+// Web uses this, so only check IP for this user
+#define ANON_USER "Anon"
+
+/* user limits are checked for matching id+user
+ * ip limits are checked for matching id+ip,
+ *  however, it requires more than one user found with the given ip
+ * i.e. a single user will not fail the test result for ip */
+typedef struct event_limits {
+	int id;
+	// optioncontrol/display name
+	char *name;
+	// enable/disable event/ovent generation
+	bool enabled;
+	int user_low_time;
+	// how many in above limit = ok (+1 = alert)
+	int user_low_time_limit;
+	int user_hi_time;
+	// how many in above limit = ok (+1 = alert)
+	int user_hi_time_limit;
+	int ip_low_time;
+	// how many in above limit = ok (+1 = alert)
+	int ip_low_time_limit;
+	int ip_hi_time;
+	// how many in above limit = ok (+1 = alert)
+	int ip_hi_time_limit;
+	// expire events
+	int lifetime;
+} EVENT_LIMITS;
+
+extern EVENT_LIMITS e_limits[];
+// Has a fixed limit of 1 event allowed
+extern int event_limits_hash_lifetime;
+
+// o_limits uses the event_limits_free lock (since it must)
+extern EVENT_LIMITS o_limits[];
+// multiply IP limit by this to get IPC limit
+extern double ovent_limits_ipc_factor;
+// maximum lifetime of all o_limits - set by code
+extern int o_limits_max_lifetime;
+
+#define APIKEY "KAPIKey"
 
 // AUTHS authorise.id.json={...}
 typedef struct auths {
@@ -2650,6 +2843,34 @@ extern K_ITEM *find_payoutid(int64_t payoutid);
 extern K_ITEM *find_payouts_wid(int64_t workinfoidend, K_TREE_CTX *ctx);
 extern double payout_stats(PAYOUTS *payouts, char *statname);
 extern bool process_pplns(int32_t height, char *blockhash, tv_t *now);
+extern cmp_t cmp_ips(K_ITEM *a, K_ITEM *b);
+extern bool _is_limitname(bool is_event, char *eventname, bool allow_all);
+#define is_elimitname(_name, _all) _is_limitname(true, _name, _all)
+#define is_olimitname(_name, _all) _is_limitname(false, _name, _all)
+extern K_ITEM *find_ips(char *group, char *ip, char *eventname, K_TREE_CTX *ctx);
+extern K_ITEM *last_ips(char *group, char *ip, K_TREE_CTX *ctx);
+extern bool _ok_ips(bool is_event, char *ip, char *eventname, tv_t *now);
+#define ok_ips_event(_ip, _name, _now) _ok_ips(true, _ip, _name, _now)
+#define ok_ips_ovent(_ip, _name, _now) _ok_ips(false, _ip, _name, _now)
+extern bool banned_ips(char *ip, tv_t *now, bool *is_event);
+extern cmp_t cmp_events_user(K_ITEM *a, K_ITEM *b);
+extern cmp_t cmp_events_ip(K_ITEM *a, K_ITEM *b);
+extern cmp_t cmp_events_ipc(K_ITEM *a, K_ITEM *b);
+extern cmp_t cmp_events_hash(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *last_events_user(int id, char *user, K_TREE_CTX *ctx);
+extern K_ITEM *last_events_ip(int id, char *ip, K_TREE_CTX *ctx);
+extern K_ITEM *last_events_ipc(int id, char *ipc, K_TREE_CTX *ctx);
+extern K_ITEM *last_events_hash(int id, char *hash, K_TREE_CTX *ctx);
+extern int check_events(EVENTS *events);
+extern char *_reply_event(bool is_event, int event, char *buf, bool fre);
+#define reply_event(_event, _buf) _reply_event(true, _event, _buf, false)
+#define reply_event_free(_event, _buf) _reply_event(true, _event, _buf, true)
+#define reply_ovent(_event, _buf) _reply_event(false, _event, _buf, false)
+#define reply_ovent_free(_event, _buf) _reply_event(false, _event, _buf, true)
+extern cmp_t cmp_ovents(K_ITEM *a, K_ITEM *b);
+extern K_ITEM *find_ovents(char *key, int hour, K_TREE_CTX *ctx);
+extern K_ITEM *last_ovents(char *key, K_TREE_CTX *ctx);
+extern int check_ovents(int id, char *u_key, char *i_key, char *c_key, tv_t *now);
 extern cmp_t cmp_auths(K_ITEM *a, K_ITEM *b);
 extern cmp_t cmp_poolstats(K_ITEM *a, K_ITEM *b);
 extern void dsp_userstats(K_ITEM *item, FILE *stream);
@@ -2755,7 +2976,8 @@ extern int64_t nextid(PGconn *conn, char *idname, int64_t increment,
 			tv_t *cd, char *by, char *code, char *inet);
 extern bool users_update(PGconn *conn, K_ITEM *u_item, char *oldhash,
 			 char *newhash, char *email, char *by, char *code,
-			 char *inet, tv_t *cd, K_TREE *trf_root, char *status);
+			 char *inet, tv_t *cd, K_TREE *trf_root, char *status,
+			 int *event);
 extern K_ITEM *users_add(PGconn *conn, char *username, char *emailaddress,
 			char *passwordhash, int64_t userbits, char *by,
 			char *code, char *inet, tv_t *cd, K_TREE *trf_root);
@@ -2857,11 +3079,18 @@ extern bool payouts_add(PGconn *conn, bool add, K_ITEM *p_item,
 extern K_ITEM *payouts_full_expire(PGconn *conn, int64_t payoutid, tv_t *now,
 				bool lock);
 extern bool payouts_fill(PGconn *conn);
+extern void ips_add(char *group, char *ip, char *eventname, bool is_event,
+		    char *des, bool log, bool cclass, int life, bool locked);
+extern int _events_add(int id, char *by, char *inet, tv_t *cd, K_TREE *trf_root);
+#define events_add(_id, _trf_root) _events_add(_id, NULL, NULL, NULL, _trf_root)
+extern int _ovents_add(int id, char *by, char *inet, tv_t *cd, K_TREE *trf_root);
+#define ovents_add(_id, _trf_root) _ovents_add(_id, NULL, NULL, NULL, _trf_root)
 extern bool auths_add(PGconn *conn, char *poolinstance, char *username,
 			char *workername, char *clientid, char *enonce1,
 			char *useragent, char *preauth, char *by, char *code,
 			char *inet, tv_t *cd, K_TREE *trf_root,
-			bool addressuser, USERS **users, WORKERS **workers);
+			bool addressuser, USERS **users, WORKERS **workers,
+			int *event);
 extern bool poolstats_add(PGconn *conn, bool store, char *poolinstance,
 				char *elapsed, char *users, char *workers,
 				char *hashrate, char *hashrate5m,

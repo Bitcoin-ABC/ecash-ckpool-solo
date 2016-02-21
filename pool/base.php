@@ -6,6 +6,9 @@ global $dbg, $dbgstr;
 $dbg = false;
 $dbgstr = '';
 #
+global $alrts;
+$alrts = array();
+#
 function adddbg($str)
 {
  global $dbg, $dbgstr;
@@ -338,6 +341,14 @@ function safetext($txt, $len = 1024)
 	$res .= '...';
 
  return $res;
+}
+#
+function isans($ans, $fld)
+{
+ if (isset($ans[$fld]))
+	return $ans[$fld];
+ else
+	return '&nbsp;';
 }
 #
 function dbd($data, $user)

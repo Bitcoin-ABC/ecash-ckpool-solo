@@ -193,8 +193,13 @@ function sendsock($fun, $msg, $tmo = false)
 # and the data $msg to send to ckdb
 # and it returns $ret = false on error or $ret = the string reply
 #
+# Alerts are always tagged on the end as: $fld_sep alert $val_sep text
+# There's allowed to be more than one. They are removed
+#
 function sendsockreply($fun, $msg, $tmo = false)
 {
+ global $fld_sep, $val_sep, $alrts;
+
  $ret = false;
  $socket = getsock($fun, $tmo);
  if ($socket !== false)
@@ -204,6 +209,21 @@ function sendsockreply($fun, $msg, $tmo = false)
 		$ret = readsockline($fun, $socket);
 
 	socket_close($socket);
+ }
+ $al = $fld_sep . 'alert' . $val_sep;
+ if ($ret !== false and strpos($ret, $al) !== false)
+ {
+	$all = explode($al, $ret);
+	$ret = $all[0];
+	$skip = true;
+	foreach ($all as $lrt)
+	{
+		if ($skip)
+			$skip = false;
+		else
+			// Discard duplicates
+			$alrts[preg_replace("/[\n\r]*$/",'',$lrt)] = 1;
+	}
  }
  return $ret;
 }

@@ -180,7 +180,7 @@ function pghead($css_marker, $script_marker, $name)
  return $head;
 }
 #
-function pgtop($info, $dotop, $user, $douser)
+function pgtop($alert_marker, $info, $dotop, $user, $douser)
 {
  global $site_title, $loginfailed;
 
@@ -342,6 +342,7 @@ function pgtop($info, $dotop, $user, $douser)
  $top .= " You need to enable javascript to use";
  $top .= " the $site_title web site.</div></noscript>";
 
+ $top .= $alert_marker;
  if ($loginfailed === true)
 	$top .= '<div class=accwarn>Login Failed</div>';
  if (isset($info['u_nopayaddr']))
@@ -507,7 +508,7 @@ function pgmenu($menus)
  return $ret;
 }
 #
-function pgbody($info, $page, $menu, $dotop, $user, $douser)
+function pgbody($alert_marker, $info, $page, $menu, $dotop, $user, $douser)
 {
  $body = '<body';
  if ($page == 'index')
@@ -519,7 +520,7 @@ function pgbody($info, $page, $menu, $dotop, $user, $douser)
  $body .=    '<table border=0 cellpadding=0 cellspacing=0 width=94%>';
 
  $body .=     '<tr><td>';
- $body .= pgtop($info, $dotop, $user, $douser);
+ $body .= pgtop($alert_marker, $info, $dotop, $user, $douser);
  $body .=     '</td></tr>';
 
  $body .=     '<tr><td>';
@@ -531,7 +532,7 @@ function pgbody($info, $page, $menu, $dotop, $user, $douser)
  return $body;
 }
 #
-function pgfoot($info)
+function pgfoot($elapsed_marker, $info)
 {
  global $stt;
  $foot =      '</div></td></tr>';
@@ -555,7 +556,8 @@ function pgfoot($info)
  $now = date('Y');
  if ($now != '2014')
 	$foot .= "-$now";
- $foot .= '&nbsp;<span class=ft>Z/s</span></span><span class=ftr id=ftr>&nbsp;</span></div>';
+ $foot .= '&nbsp;<span class=ft>' . $elapsed_marker;
+ $foot .= '</span></span><span class=ftr id=ftr>&nbsp;</span></div>';
  $foot .= "<script type='text/javascript'>jst();tim();mini();</script></body></html>\n";
 
  return $foot;
@@ -565,10 +567,13 @@ function gopage($info, $data, $pagefun, $page, $menu, $name, $user, $ispage = tr
 {
  global $dbg, $stt;
  global $page_css, $page_scripts;
+ global $alrts;
 
  $dbg_marker = '[@dbg@]';
  $css_marker = '[@css@]';
  $script_marker = '[@scripts@]';
+ $alert_marker = '[@alert@]';
+ $elapsed_marker = '[@elapsed@]';
 
  if ($dbg === true)
 	$pg = $dbg_marker.'<br>';
@@ -590,8 +595,8 @@ function gopage($info, $data, $pagefun, $page, $menu, $name, $user, $ispage = tr
 //	unset($_SESSION['logkey']);
 
  $head = pghead($css_marker, $script_marker, $name);
- $body = pgbody($info, $page, $menu, $dotop, $user, $douser);
- $foot = pgfoot($info);
+ $body = pgbody($alert_marker, $info, $page, $menu, $dotop, $user, $douser);
+ $foot = pgfoot($elapsed_marker, $info);
 
  if ($dbg === true)
 	$pg = str_replace($dbg_marker, cvtdbg(), $pg);
@@ -603,6 +608,11 @@ function gopage($info, $data, $pagefun, $page, $menu, $name, $user, $ispage = tr
 
  $head = str_replace($script_marker, $page_scripts, $head);
 
+ $alertstr = '';
+ foreach ($alrts as $str => $num)
+	$alertstr .= "<div class=accwarn>$str</div>";
+ $body = str_replace($alert_marker, $alertstr, $body);
+
  $all = $head;
  $all .= trm_force($body);
  $all .= trm($pg);
@@ -612,7 +622,7 @@ function gopage($info, $data, $pagefun, $page, $menu, $name, $user, $ispage = tr
  else
 	$elapsed = microtime(true) - $stt;
 
- $foot = trm_force(str_replace('Z/', number_format($elapsed, 4), $foot));
+ $foot = trm_force(str_replace($elapsed_marker, number_format($elapsed, 4).'s', $foot));
 
  usleep(100000);
 

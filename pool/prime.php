@@ -25,6 +25,8 @@ function process($p, $user, $menu)
 	$menu['Admin']['PPLNS2'] = 'pplns2';
 	$menu['Admin']['PPLNS'] = 'pplns';
 	$menu['Admin']['AllWork'] = 'allwork';
+	$menu['Admin']['IPS'] = 'ips';
+	$menu['Admin']['Events'] = 'events';
  }
 bp:
  $page = '';

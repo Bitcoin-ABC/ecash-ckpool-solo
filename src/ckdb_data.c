@@ -425,7 +425,7 @@ void _txt_to_tv(char *nam, char *fld, tv_t *data, size_t siz, WHERE_FFL_ARGS)
 	_txt_to_data(TYPE_TV, nam, fld, (void *)data, siz, WHERE_FFL_PASS);
 }
 
-// Convert msg S,nS to tv_t
+// Convert msg S[,nS] to tv_t
 void _txt_to_ctv(char *nam, char *fld, tv_t *data, size_t siz, WHERE_FFL_ARGS)
 {
 	_txt_to_data(TYPE_CTV, nam, fld, (void *)data, siz, WHERE_FFL_PASS);
@@ -4271,6 +4271,974 @@ oku:
 		addr_store = k_free_store(addr_store);
 	}
 	return ok;
+}
+
+// order by group asc,ip asc,eventname asc,expirydate desc
+cmp_t cmp_ips(K_ITEM *a, K_ITEM *b)
+{
+	IPS *ia, *ib;
+	DATA_IPS(ia, a);
+	DATA_IPS(ib, b);
+	cmp_t c = CMP_STR(ia->group, ib->group);
+	if (c == 0) {
+		c = CMP_STR(ia->ip, ib->ip);
+		if (c == 0) {
+			c = CMP_STR(ia->eventname, ib->eventname);
+			if (c == 0)
+				c = CMP_TV(ib->expirydate, ia->expirydate);
+		}
+	}
+	return c;
+}
+
+bool _is_limitname(bool is_event, char *eventname, bool allow_all)
+{
+	int i;
+
+	if (is_event) {
+		if (allow_all && strcmp(eventname, EVENTNAME_ALL) == 0)
+			return true;
+		i = -1;
+		while (e_limits[++i].name) {
+			if (strcmp(eventname, e_limits[i].name) == 0)
+				return true;
+		}
+	} else {
+		if (allow_all && strcmp(eventname, OVENTNAME_ALL) == 0)
+			return true;
+		i = -1;
+		while (o_limits[++i].name) {
+			if (strcmp(eventname, o_limits[i].name) == 0)
+				return true;
+		}
+	}
+	return false;
+}
+
+// Must be R or W locked before call
+K_ITEM *find_ips(char *group, char *ip, char *eventname, K_TREE_CTX *ctx)
+{
+	K_TREE_CTX ctx0[1];
+	K_ITEM look;
+	IPS ips;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	STRNCPY(ips.group, group);
+	STRNCPY(ips.ip, ip);
+	STRNCPY(ips.eventname, eventname);
+	ips.expirydate.tv_sec = default_expiry.tv_sec;
+	ips.expirydate.tv_usec = default_expiry.tv_usec;
+
+	INIT_IPS(&look);
+	look.data = (void *)(&ips);
+	return find_in_ktree(ips_root, &look, ctx);
+}
+
+K_ITEM *last_ips(char *group, char *ip, K_TREE_CTX *ctx)
+{
+	K_TREE_CTX ctx0[1];
+	K_ITEM look;
+	IPS ips;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	STRNCPY(ips.group, group);
+	STRNCPY(ips.ip, ip);
+	STRNCPY(ips.eventname, EVENTNAME_MAX);
+	copy_tv(&(ips.expirydate), &default_expiry);
+
+	INIT_IPS(&look);
+	look.data = (void *)(&ips);
+	return find_before_in_ktree(ips_root, &look, ctx);
+}
+
+// IPS override checking eventname
+bool _ok_ips(bool is_event, char *ip, char *eventname, tv_t *now)
+{
+	K_TREE_CTX ctx[1];
+	K_ITEM *i_item = NULL, *prev_item;
+	bool ret = false;
+	IPS *ips;
+
+	i_item = last_ips(IPS_GROUP_OK, ip, ctx);
+	DATA_IPS_NULL(ips, i_item);
+	while (i_item && strcmp(ips->group, IPS_GROUP_OK) == 0 &&
+	       strcmp(ips->ip, ip) == 0) {
+		if (CURRENT(&(ips->expirydate)) &&
+		    (strcmp(ips->eventname, eventname) == 0 ||
+		    (is_event && strcmp(ips->eventname, EVENTNAME_ALL) == 0) ||
+		    (!is_event && strcmp(ips->eventname, OVENTNAME_ALL) == 0))) {
+			if (ips->lifetime == 0 ||
+			    (int)tvdiff(now, &(ips->createdate)) <= ips->lifetime) {
+				ret = true;
+				break;
+			}
+			// The OK has expired, so remove it
+			prev_item = prev_in_ktree(ctx);
+			k_unlink_item(ips_store, i_item);
+			if (ips->description) {
+				LIST_MEM_SUB(ips_free, ips->description);
+				FREENULL(ips->description);
+			}
+			k_add_head(ips_free, i_item);
+			i_item = prev_item;
+			DATA_IPS_NULL(ips, i_item);
+			continue;
+		}
+		i_item = prev_in_ktree(ctx);
+		DATA_IPS_NULL(ips, i_item);
+	}
+	return ret;
+}
+
+/* Must be W locked before call
+ * N.B. a ban will ban an OK ip if both BAN and OK exist */
+bool banned_ips(char *ip, tv_t *now, bool *is_event)
+{
+	K_TREE_CTX ctx[1];
+	K_ITEM *i_item = NULL, *prev_item;
+	bool ret = false;
+	IPS *ips;
+
+	i_item = last_ips(IPS_GROUP_BAN, ip, ctx);
+	DATA_IPS_NULL(ips, i_item);
+	while (i_item && strcmp(ips->group, IPS_GROUP_BAN) == 0 &&
+	       strcmp(ips->ip, ip) == 0) {
+		if (CURRENT(&(ips->expirydate))) {
+			// Any current unexpired ban
+			if (ips->lifetime == 0 ||
+			    (int)tvdiff(now, &(ips->createdate)) <= ips->lifetime) {
+				if (is_event)
+					*is_event = ips->is_event;
+				ret = true;
+				break;
+			}
+			// The ban has expired, so remove it
+			prev_item = prev_in_ktree(ctx);
+			k_unlink_item(ips_store, i_item);
+			if (ips->description) {
+				LIST_MEM_SUB(ips_free, ips->description);
+				FREENULL(ips->description);
+			}
+			k_add_head(ips_free, i_item);
+			i_item = prev_item;
+			DATA_IPS_NULL(ips, i_item);
+			continue;
+		}
+		i_item = prev_in_ktree(ctx);
+		DATA_IPS_NULL(ips, i_item);
+	}
+	return ret;
+}
+
+// order by createby asc,id asc,expirydate desc, createdate asc
+cmp_t cmp_events_user(K_ITEM *a, K_ITEM *b)
+{
+	EVENTS *ea, *eb;
+	DATA_EVENTS(ea, a);
+	DATA_EVENTS(eb, b);
+	cmp_t c = CMP_STR(ea->createby, eb->createby);
+	if (c == 0) {
+		c = CMP_INT(ea->id, eb->id);
+		if (c == 0) {
+			c = CMP_TV(eb->expirydate, ea->expirydate);
+			if (c == 0)
+				c = CMP_TV(ea->createdate, eb->createdate);
+		}
+	}
+	return c;
+}
+
+// order by createinet asc,id asc,expirydate desc, createdate asc
+cmp_t cmp_events_ip(K_ITEM *a, K_ITEM *b)
+{
+	EVENTS *ea, *eb;
+	DATA_EVENTS(ea, a);
+	DATA_EVENTS(eb, b);
+	cmp_t c = CMP_STR(ea->createinet, eb->createinet);
+	if (c == 0) {
+		c = CMP_INT(ea->id, eb->id);
+		if (c == 0) {
+			c = CMP_TV(eb->expirydate, ea->expirydate);
+			if (c == 0)
+				c = CMP_TV(ea->createdate, eb->createdate);
+		}
+	}
+	return c;
+}
+
+// order by ipc asc,id asc,expirydate desc, createdate asc
+cmp_t cmp_events_ipc(K_ITEM *a, K_ITEM *b)
+{
+	EVENTS *ea, *eb;
+	DATA_EVENTS(ea, a);
+	DATA_EVENTS(eb, b);
+	cmp_t c = CMP_STR(ea->ipc, eb->ipc);
+	if (c == 0) {
+		c = CMP_INT(ea->id, eb->id);
+		if (c == 0) {
+			c = CMP_TV(eb->expirydate, ea->expirydate);
+			if (c == 0)
+				c = CMP_TV(ea->createdate, eb->createdate);
+		}
+	}
+	return c;
+}
+
+// order by hash asc,id asc,expirydate desc, createdate asc
+cmp_t cmp_events_hash(K_ITEM *a, K_ITEM *b)
+{
+	EVENTS *ea, *eb;
+	DATA_EVENTS(ea, a);
+	DATA_EVENTS(eb, b);
+	cmp_t c = CMP_STR(ea->hash, eb->hash);
+	if (c == 0) {
+		c = CMP_INT(ea->id, eb->id);
+		if (c == 0) {
+			c = CMP_TV(eb->expirydate, ea->expirydate);
+			if (c == 0)
+				c = CMP_TV(ea->createdate, eb->createdate);
+		}
+	}
+	return c;
+}
+
+K_ITEM *last_events_user(int id, char *user, K_TREE_CTX *ctx)
+{
+	K_TREE_CTX ctx0[1];
+	EVENTS events;
+	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	events.id = id;
+	STRNCPY(events.createby, user);
+	copy_tv(&(events.expirydate), &default_expiry);
+	copy_tv(&(events.createdate), &date_eot);
+
+	INIT_EVENTS(&look);
+	look.data = (void *)(&events);
+	return find_before_in_ktree(events_user_root, &look, ctx);
+}
+
+K_ITEM *last_events_ip(int id, char *ip, K_TREE_CTX *ctx)
+{
+	K_TREE_CTX ctx0[1];
+	EVENTS events;
+	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	events.id = id;
+	STRNCPY(events.createinet, ip);
+	copy_tv(&(events.expirydate), &default_expiry);
+	copy_tv(&(events.createdate), &date_eot);
+
+	INIT_EVENTS(&look);
+	look.data = (void *)(&events);
+	return find_before_in_ktree(events_ip_root, &look, ctx);
+}
+
+K_ITEM *last_events_ipc(int id, char *ipc, K_TREE_CTX *ctx)
+{
+	K_TREE_CTX ctx0[1];
+	EVENTS events;
+	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	events.id = id;
+	STRNCPY(events.ipc, ipc);
+	copy_tv(&(events.expirydate), &default_expiry);
+	copy_tv(&(events.createdate), &date_eot);
+
+	INIT_EVENTS(&look);
+	look.data = (void *)(&events);
+	return find_before_in_ktree(events_ipc_root, &look, ctx);
+}
+
+K_ITEM *last_events_hash(int id, char *hash, K_TREE_CTX *ctx)
+{
+	K_TREE_CTX ctx0[1];
+	EVENTS events;
+	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	events.id = id;
+	STRNCPY(events.hash, hash);
+	copy_tv(&(events.expirydate), &default_expiry);
+	copy_tv(&(events.createdate), &date_eot);
+
+	INIT_EVENTS(&look);
+	look.data = (void *)(&events);
+	return find_before_in_ktree(events_hash_root, &look, ctx);
+}
+
+enum event_cause {
+	CAUSE_NONE,
+	CAUSE_USER_LO,
+	CAUSE_USER_HI,
+	CAUSE_IP_LO,
+	CAUSE_IP_HI,
+	CAUSE_IPC_LO,
+	CAUSE_IPC_HI,
+	CAUSE_HASH
+};
+
+static const char *cause_none = "None";
+static const char *cause_user_lo = "User Low";
+static const char *cause_user_hi = "User High";
+static const char *cause_ip_lo = "IP Low";
+static const char *cause_ip_hi = "IP High";
+static const char *cause_ipc_lo = "IP C-Class Low";
+static const char *cause_ipc_hi = "IP C-Class Hi";
+static const char *cause_hash = "Hash";
+static const char *cause_unknown = "Unknown?";
+
+static const char *cause_str(enum event_cause cause)
+{
+	switch (cause) {
+		case CAUSE_NONE:
+			return cause_none;
+		case CAUSE_USER_LO:
+			return cause_user_lo;
+		case CAUSE_USER_HI:
+			return cause_user_hi;
+		case CAUSE_IP_LO:
+			return cause_ip_lo;
+		case CAUSE_IP_HI:
+			return cause_ip_hi;
+		case CAUSE_IPC_LO:
+			return cause_ipc_lo;
+		case CAUSE_IPC_HI:
+			return cause_ipc_hi;
+		case CAUSE_HASH:
+			return cause_hash;
+		default:
+			return cause_unknown;
+	}
+}
+
+// return EVENT_OK or timeout seconds
+int check_events(EVENTS *events)
+{
+	bool alert = false, ok, user1, user2;
+	char createby[TXT_SML+1], *st = NULL;
+	enum event_cause cause = CAUSE_NONE;
+	K_ITEM *e_item = NULL, *tmp_item, *u_item;
+	K_TREE_CTX ctx[1];
+	EVENTS *e = NULL;
+	char cmd[MAX_ALERT_CMD+1];
+	int count, secs;
+	int tyme, limit, lifetime = 0;
+	char name[TXT_SML+1];
+	pid_t pid;
+	tv_t now;
+
+	K_RLOCK(event_limits_free);
+	if (ckdb_alert_cmd)
+		STRNCPY(cmd, ckdb_alert_cmd);
+	else
+		cmd[0] = '\0';
+	K_RUNLOCK(event_limits_free);
+	// No way to send an alert, so don't test
+	if (!cmd[0])
+		return EVENT_OK;
+
+	setnow(&now);
+
+	K_WLOCK(ips_free);
+	ok = ok_ips_event(events->createinet, e_limits[events->id].name, &now);
+	if (!ok)
+		ok = ok_ips_event(events->ipc, e_limits[events->id].name, &now);
+	K_WUNLOCK(ips_free);
+	if (ok)
+		return EVENT_OK;
+
+	// All tests below always run all full checks to clean up old events
+	K_WLOCK(events_free);
+	K_RLOCK(event_limits_free);
+	// Check hash - same hash passfail on more than one valid User
+	if (events->id == EVENTID_PASSFAIL && *(events->hash)) {
+		e_item = last_events_hash(events->id, events->hash, ctx);
+		DATA_EVENTS_NULL(e, e_item);
+		user1 = false;
+		while (e_item && e->id == events->id &&
+		       strcmp(e->hash, events->hash) == 0 &&
+		       CURRENT(&(e->expirydate))) {
+			// rounded down seconds
+			secs = (int)tvdiff(&now, &(e->createdate));
+			// Is this event too old?
+			if (secs >= event_limits_hash_lifetime) {
+				tmp_item = e_item;
+				e_item = prev_in_ktree(ctx);
+				// Discard the old event - e is still old
+				remove_from_ktree(events_hash_root, tmp_item);
+				if (--(e->trees) < 1) {
+					// No longer in any of the event trees
+					k_unlink_item(events_store, tmp_item);
+					k_add_head(events_free, tmp_item);
+				}
+				DATA_EVENTS_NULL(e, e_item);
+				continue;
+			}
+			if (!alert) {
+				if (!user1) {
+					K_RLOCK(users_free);
+					u_item = find_users(e->createby);
+					K_RUNLOCK(users_free);
+					if (u_item) {
+						// Remember the username
+						STRNCPY(createby, e->createby);
+						user1 = true;
+					}
+				} else {
+					// Don't check username case mistyping errors
+					if (strcasecmp(createby, e->createby) != 0) {
+						K_RLOCK(users_free);
+						u_item = find_users(e->createby);
+						K_RUNLOCK(users_free);
+						if (u_item) {
+							alert = true;
+							cause = CAUSE_HASH;
+							tyme = 0;
+							limit = 1;
+							lifetime = event_limits_hash_lifetime;
+							STRNCPY(name, "HASH");
+						}
+					}
+				}
+			}
+			e_item = prev_in_ktree(ctx);
+			DATA_EVENTS_NULL(e, e_item);
+		}
+	}
+	// Check User
+	e_item = last_events_user(events->id, events->createby, ctx);
+	DATA_EVENTS_NULL(e, e_item);
+	count = 0;
+	while (e_item && e->id == events->id &&
+	       strcmp(e->createby, events->createby) == 0 &&
+	       CURRENT(&(e->expirydate))) {
+		// rounded down seconds
+		secs = (int)tvdiff(&now, &(e->createdate));
+		// Is this event too old?
+		if (secs >= e_limits[events->id].lifetime) {
+			tmp_item = e_item;
+			e_item = prev_in_ktree(ctx);
+			// Discard the old event - e is still tmp_item
+			remove_from_ktree(events_user_root, tmp_item);
+			if (--e->trees < 1) {
+				// No longer in any of the event trees
+				k_unlink_item(events_store, tmp_item);
+				k_add_head(events_free, tmp_item);
+			}
+			DATA_EVENTS_NULL(e, e_item);
+			continue;
+		}
+		count++;
+		if (alert == false &&
+		    secs <= e_limits[events->id].user_low_time &&
+		    count > e_limits[events->id].user_low_time_limit) {
+			alert = true;
+			cause = CAUSE_USER_LO;
+			tyme = e_limits[events->id].user_low_time;
+			limit = e_limits[events->id].user_low_time_limit;
+			lifetime = e_limits[events->id].lifetime;
+			STRNCPY(name, e_limits[events->id].name);
+		}
+		if (alert == false &&
+		    secs <= e_limits[events->id].user_hi_time &&
+		    count > e_limits[events->id].user_hi_time_limit) {
+			alert = true;
+			cause = CAUSE_USER_HI;
+			tyme = e_limits[events->id].user_hi_time;
+			limit = e_limits[events->id].user_hi_time_limit;
+			lifetime = e_limits[events->id].lifetime;
+			STRNCPY(name, e_limits[events->id].name);
+		}
+		e_item = prev_in_ktree(ctx);
+		DATA_EVENTS_NULL(e, e_item);
+	}
+	// Check IP
+	e_item = last_events_ip(events->id, events->createinet, ctx);
+	DATA_EVENTS_NULL(e, e_item);
+	count = 0;
+	// Remember the first username
+	STRNCPY(createby, e->createby);
+	user2 = false;
+	while (e_item && e->id == events->id &&
+	       strcmp(e->createinet, events->createinet) == 0 &&
+	       CURRENT(&(e->expirydate))) {
+		// rounded down seconds
+		secs = (int)tvdiff(&now, &(e->createdate));
+		// Is this event too old?
+		if (secs >= e_limits[events->id].lifetime) {
+			tmp_item = e_item;
+			e_item = prev_in_ktree(ctx);
+			// Discard the old event - e is still tmp_item
+			remove_from_ktree(events_ip_root, tmp_item);
+			if (--e->trees < 1) {
+				// No longer in any of the event trees
+				k_unlink_item(events_store, tmp_item);
+				k_add_head(events_free, tmp_item);
+			}
+			DATA_EVENTS_NULL(e, e_item);
+			continue;
+		}
+		count++;
+		// Allow username case typing errors
+		if (strcasecmp(createby, e->createby) != 0)
+			user2 = true;
+		if (alert == false &&
+		    secs <= e_limits[events->id].ip_low_time &&
+		    count > e_limits[events->id].ip_low_time_limit) {
+			alert = true;
+			cause = CAUSE_IP_LO;
+			tyme = e_limits[events->id].ip_low_time;
+			limit = e_limits[events->id].ip_low_time_limit;
+			lifetime = e_limits[events->id].lifetime;
+			STRNCPY(name, e_limits[events->id].name);
+		}
+		if (alert == false &&
+		    secs <= e_limits[events->id].ip_hi_time &&
+		    count > e_limits[events->id].ip_hi_time_limit) {
+			alert = true;
+			cause = CAUSE_IP_HI;
+			tyme = e_limits[events->id].ip_hi_time;
+			limit = e_limits[events->id].ip_hi_time_limit;
+			lifetime = e_limits[events->id].lifetime;
+			STRNCPY(name, e_limits[events->id].name);
+		}
+		e_item = prev_in_ktree(ctx);
+		DATA_EVENTS_NULL(e, e_item);
+	}
+	/* If the ip alert was a single user then it's not an ip failure
+	 *  since the User check already covers that */
+	if (alert && (cause == CAUSE_IP_LO || cause == CAUSE_IP_HI) &&
+	    user2 == false)
+		alert = false;
+
+	// Check IPC (Class C IP) use same rules as for IP
+	e_item = last_events_ipc(events->id, events->ipc, ctx);
+	DATA_EVENTS_NULL(e, e_item);
+	count = 0;
+	// Remember the first username
+	STRNCPY(createby, e->createby);
+	user2 = false;
+	while (e_item && e->id == events->id &&
+	       strcmp(e->ipc, events->ipc) == 0 &&
+	       CURRENT(&(e->expirydate))) {
+		// rounded down seconds
+		secs = (int)tvdiff(&now, &(e->createdate));
+		// Is this event too old?
+		if (secs >= e_limits[events->id].lifetime) {
+			tmp_item = e_item;
+			e_item = prev_in_ktree(ctx);
+			// Discard the old event - e is still tmp_item
+			remove_from_ktree(events_ipc_root, tmp_item);
+			if (--e->trees < 1) {
+				k_unlink_item(events_store, tmp_item);
+				k_add_head(events_free, tmp_item);
+			}
+			DATA_EVENTS_NULL(e, e_item);
+			continue;
+		}
+		count++;
+		// Allow username case typing errors
+		if (strcasecmp(createby, e->createby) != 0)
+			user2 = true;
+		if (alert == false &&
+		    secs <= e_limits[events->id].ip_low_time &&
+		    count > e_limits[events->id].ip_low_time_limit) {
+			alert = true;
+			cause = CAUSE_IPC_LO;
+			tyme = e_limits[events->id].ip_low_time;
+			limit = e_limits[events->id].ip_low_time_limit;
+			lifetime = e_limits[events->id].lifetime;
+			STRNCPY(name, e_limits[events->id].name);
+		}
+		if (alert == false &&
+		    secs <= e_limits[events->id].ip_hi_time &&
+		    count > e_limits[events->id].ip_hi_time_limit) {
+			alert = true;
+			cause = CAUSE_IPC_HI;
+			tyme = e_limits[events->id].ip_hi_time;
+			limit = e_limits[events->id].ip_hi_time_limit;
+			lifetime = e_limits[events->id].lifetime;
+			STRNCPY(name, e_limits[events->id].name);
+		}
+		e_item = prev_in_ktree(ctx);
+		DATA_EVENTS_NULL(e, e_item);
+	}
+	/* If the ipc alert was a single user then it's not an ipc failure
+	 *  since the User check already covers that */
+	if (alert && (cause == CAUSE_IPC_LO || cause == CAUSE_IPC_HI) &&
+	    user2 == false)
+		alert = false;
+
+	K_RUNLOCK(event_limits_free);
+	K_WUNLOCK(events_free);
+	if (alert) {
+		LOGERR("%s() ALERT ID:%d %s Lim:%d Time:%d Life:%d %s '%s' '%s'",
+			__func__,
+			events->id, name, limit, tyme, lifetime,
+			events->createinet,
+			st = safe_text_nonull(events->createby),
+			cause_str(cause));
+		FREENULL(st);
+		ips_add(IPS_GROUP_BAN, events->createinet, name, true,
+			(char *)cause_str(cause), true, false, lifetime, false);
+		pid = fork();
+		if (pid < 0) {
+			LOGERR("%s() ALERT failed to fork (%d)",
+				__func__, errno);
+		} else {
+			if (pid == 0) {
+				char buf1[16], buf2[16], buf3[16], buf4[16];
+				snprintf(buf1, sizeof(buf1), "%d", events->id);
+				snprintf(buf2, sizeof(buf2), "%d", limit);
+				snprintf(buf3, sizeof(buf3), "%d", tyme);
+				snprintf(buf4, sizeof(buf4), "%d", lifetime);
+				st = safe_text_nonull(events->createby);
+				execl(cmd, cmd, buf1, name, buf2, buf3, buf4,
+					events->createinet, st,
+					cause_str(cause), NULL);
+				LOGERR("%s() ALERT fork failed to execute (%d)",
+					__func__, errno);
+				FREENULL(st);
+				exit(0);
+			}
+		}
+		return lifetime;
+	}
+	return EVENT_OK;
+}
+
+static char lurt[] = "alert=";
+static size_t lurtsiz = sizeof(lurt);
+static char tmf[] = "Too many failures, come back later";
+static size_t tmfsiz = sizeof(tmf); // includes null
+static char tma[] = "Too many accesses, come back later";
+static size_t tmasiz = sizeof(tma); // includes null
+
+char *_reply_event(bool is_event, int event, char *buf, bool fre)
+{
+	size_t len;
+	char *reply;
+
+	if (event == EVENT_OK) {
+		if (fre)
+			return buf;
+		else {
+			reply = strdup(buf);
+			if (!reply)
+				quithere(1, "strdup OOM");
+			return reply;
+		}
+	}
+
+	len = strlen(buf);
+	len += 1 + lurtsiz;
+	if (is_event)
+		len += tmfsiz;
+	else
+		len += tmasiz;
+	reply = malloc(len);
+	if (!reply)
+		quithere(1, "malloc (%d) OOM", (int)len);
+	snprintf(reply, len, "%s%c%s%s", buf, FLDSEP, lurt,
+		 is_event ? tmf : tma);
+	if (fre)
+		free(buf);
+	return reply;
+}
+
+// order by key asc,hour asc,expirydate desc
+cmp_t cmp_ovents(K_ITEM *a, K_ITEM *b)
+{
+	OVENTS *ea, *eb;
+	DATA_OVENTS(ea, a);
+	DATA_OVENTS(eb, b);
+	cmp_t c = CMP_STR(ea->key, eb->key);
+	if (c == 0) {
+		c = CMP_INT(ea->hour, eb->hour);
+		if (c == 0) {
+			c = CMP_TV(eb->expirydate, ea->expirydate);
+		}
+	}
+	return c;
+}
+
+K_ITEM *find_ovents(char *key, int hour, K_TREE_CTX *ctx)
+{
+	K_TREE_CTX ctx0[1];
+	OVENTS ovents;
+	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	STRNCPY(ovents.key, key);
+	ovents.hour = hour;
+	copy_tv(&(ovents.expirydate), &default_expiry);
+
+	INIT_OVENTS(&look);
+	look.data = (void *)(&ovents);
+	return find_in_ktree(ovents_root, &look, ctx);
+}
+
+K_ITEM *last_ovents(char *key, K_TREE_CTX *ctx)
+{
+	K_TREE_CTX ctx0[1];
+	OVENTS ovents;
+	K_ITEM look;
+
+	if (ctx == NULL)
+		ctx = ctx0;
+
+	STRNCPY(ovents.key, key);
+	ovents.hour = SEC_TO_HOUR(DATE_S_EOT);
+	copy_tv(&(ovents.expirydate), &default_expiry);
+
+	INIT_OVENTS(&look);
+	look.data = (void *)(&ovents);
+	return find_before_in_ktree(ovents_root, &look, ctx);
+}
+
+enum was_alert {
+	ALERT_NO,
+	ALERT_LO,
+	ALERT_HI
+};
+
+// ovents must be W locked and event_limits R locked
+static enum was_alert check_one_ovent(int id, char *key, tv_t *now,
+				      int low_time, int low_time_limit,
+				      int hi_time, int hi_time_limit)
+{
+	K_TREE_CTX ctx[1];
+	K_ITEM *o_item = NULL, *tmp_item;
+	OVENTS *ovents = NULL;
+	int low_count, hi_count, hour, min;
+	enum was_alert ret = ALERT_NO;
+	bool alert = false;
+
+	o_item = last_ovents(key, ctx);
+	if (!o_item)
+		return ret;
+
+	low_count = hi_count = 0;
+	hour = TV_TO_HOUR(now);
+	DATA_OVENTS(ovents, o_item);
+	while (o_item && strcmp(key, ovents->key) == 0 &&
+	       CURRENT(&(ovents->expirydate))) {
+		// Is this event too old?
+		if (((hour * 3600) - ((ovents->hour + 1) * 3600)) >
+		    o_limits_max_lifetime) {
+			tmp_item = o_item;
+			// Get the prev event
+			o_item = prev_in_ktree(ctx);
+			DATA_OVENTS_NULL(ovents, o_item);
+			// Discard the old event
+			remove_from_ktree(ovents_root, tmp_item);
+			k_unlink_item(ovents_store, tmp_item);
+			k_add_head(ovents_free, tmp_item);
+			continue;
+		}
+		if (alert == false) {
+			min = hour * 3600 - low_time - ovents->hour * 3600;
+			if (min < 0)
+				min = 0;
+			while (min < 60) {
+				low_count += ovents->count[IDMIN(id, min)];
+				min++;
+			}
+			if (low_count > low_time_limit) {
+				alert = true;
+				ret = ALERT_LO;
+			}
+		}
+		if (alert == false) {
+			min = hour * 3600 - hi_time - ovents->hour * 3600;
+			if (min < 0)
+				min = 0;
+			while (min < 60) {
+				hi_count += ovents->count[IDMIN(id, min)];
+				min++;
+			}
+			if (hi_count > hi_time_limit) {
+				alert = true;
+				ret = ALERT_HI;
+			}
+		}
+		o_item = prev_in_ktree(ctx);
+		DATA_OVENTS_NULL(ovents, o_item);
+	}
+	return ret;
+}
+
+// return OVENT_OK or +timeout seconds
+int check_ovents(int id, char *u_key, char *i_key, char *c_key, tv_t *now)
+{
+	enum was_alert was;
+	bool alert = false, ok;
+	char *st = NULL;
+	enum event_cause cause = CAUSE_NONE;
+	char cmd[MAX_ALERT_CMD+1];
+	int tyme, limit, lifetime;
+	char name[TXT_SML+1];
+	pid_t pid;
+
+	K_RLOCK(event_limits_free);
+	if (ckdb_alert_cmd)
+		STRNCPY(cmd, ckdb_alert_cmd);
+	else
+		cmd[0] = '\0';
+	K_RUNLOCK(event_limits_free);
+	// No way to send an alert, so don't test
+	if (!cmd[0])
+		return OVENT_OK;
+
+	if (i_key[0]) {
+		K_WLOCK(ips_free);
+		ok = ok_ips_ovent(i_key, o_limits[id].name, now);
+		if (!ok && c_key[0])
+			ok = ok_ips_ovent(c_key, o_limits[id].name, now);
+		K_WUNLOCK(ips_free);
+		if (ok)
+			return OVENT_OK;
+	}
+
+	K_WLOCK(ovents_free);
+	K_RLOCK(event_limits_free);
+
+	if (u_key[0] && strcmp(u_key, ANON_USER) != 0) {
+		was = check_one_ovent(id, u_key, now,
+					o_limits[id].user_low_time,
+					o_limits[id].user_low_time_limit,
+					o_limits[id].user_hi_time,
+					o_limits[id].user_hi_time_limit);
+		if (was != ALERT_NO) {
+			alert = true;
+			if (was == ALERT_LO) {
+				cause = CAUSE_USER_LO;
+				tyme = o_limits[id].user_low_time;
+				limit = o_limits[id].user_low_time_limit;
+			} else {
+				cause = CAUSE_USER_HI;
+				tyme = o_limits[id].user_hi_time;
+				limit = o_limits[id].user_hi_time_limit;
+			}
+			lifetime = o_limits[id].lifetime;
+			STRNCPY(name, o_limits[id].name);
+		}
+	}
+
+	/* If we already have the alert, the check_one_ovent()
+	 *  cleanup isn't needed since the first call cleans up all */
+	if (alert == false && i_key[0]) {
+		was = check_one_ovent(id, i_key, now,
+					o_limits[id].ip_low_time,
+					o_limits[id].ip_low_time_limit,
+					o_limits[id].ip_hi_time,
+					o_limits[id].ip_hi_time_limit);
+		if (was != ALERT_NO) {
+			alert = true;
+			if (was == ALERT_LO) {
+				cause = CAUSE_IP_LO;
+				tyme = o_limits[id].ip_low_time;
+				limit = o_limits[id].ip_low_time_limit;
+			} else {
+				cause = CAUSE_IP_HI;
+				tyme = o_limits[id].ip_hi_time;
+				limit = o_limits[id].ip_hi_time_limit;
+			}
+			lifetime = o_limits[id].lifetime;
+			STRNCPY(name, o_limits[id].name);
+		}
+	}
+
+	if (alert == false && c_key[0]) {
+		was = check_one_ovent(id, c_key, now,
+					o_limits[id].ip_low_time,
+					(int)(ovent_limits_ipc_factor *
+					 (double)(o_limits[id].ip_low_time_limit)),
+					o_limits[id].ip_hi_time,
+					(int)(ovent_limits_ipc_factor *
+					 (double)(o_limits[id].ip_hi_time_limit)));
+		if (was != ALERT_NO) {
+			alert = true;
+			if (was == ALERT_LO) {
+				cause = CAUSE_IPC_LO;
+				tyme = o_limits[id].ip_low_time;
+				limit = (int)(ovent_limits_ipc_factor *
+					 (double)(o_limits[id].ip_low_time_limit));
+			} else {
+				cause = CAUSE_IPC_HI;
+				tyme = o_limits[id].ip_hi_time;
+				limit = (int)(ovent_limits_ipc_factor *
+					 (double)(o_limits[id].ip_hi_time_limit));
+			}
+			lifetime = o_limits[id].lifetime;
+			STRNCPY(name, o_limits[id].name);
+		}
+	}
+	K_RUNLOCK(event_limits_free);
+	K_WUNLOCK(ovents_free);
+	if (alert) {
+		LOGERR("%s() OLERT ID:%d %s Lim:%d Time:%d Life:%d '%s/%s' "
+			"'%s' '%s'", __func__,
+			id, name, limit, tyme, lifetime, i_key, c_key,
+			st = safe_text(u_key), cause_str(cause));
+		FREENULL(st);
+		if (!i_key[0]) {
+			LOGERR("%s() OLERT ID:%d '%s' can't ban, no IP",
+				__func__, id, st = safe_text(u_key));
+			FREENULL(st);
+		} else {
+			ips_add(IPS_GROUP_BAN, i_key, name, false,
+				(char *)cause_str(cause), true, false,
+				lifetime, false);
+			pid = fork();
+			if (pid < 0) {
+				LOGERR("%s() OLERT failed to fork (%d)",
+					__func__, errno);
+			} else {
+				if (pid == 0) {
+					char buf1[16], buf2[16];
+					char buf3[16], buf4[16];
+					snprintf(buf1, sizeof(buf1),
+						 "%d", id);
+					snprintf(buf2, sizeof(buf2),
+						 "%d", limit);
+					snprintf(buf3, sizeof(buf3),
+						 "%d", tyme);
+					snprintf(buf4, sizeof(buf4),
+						 "%d", lifetime);
+					st = safe_text_nonull(u_key);
+					execl(cmd, cmd, buf1, name, buf2, buf3,
+						buf4, i_key, st,
+						cause_str(cause), NULL);
+					LOGERR("%s() OLERT fork failed to "
+						"execute (%d)",
+						__func__, errno);
+					FREENULL(st);
+					exit(0);
+				}
+			}
+		}
+		return lifetime;
+	}
+	return OVENT_OK;
 }
 
 // order by userid asc,createdate asc,authid asc,expirydate desc

@@ -1,6 +1,5 @@
 <?php
 #
-include_once('socket.php');
 include_once('email.php');
 #
 function allow_reset($error)

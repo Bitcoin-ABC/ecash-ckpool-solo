@@ -1,7 +1,6 @@
 <?php
 #
 include_once('socket.php');
-include_once('base.php');
 #
 # List of db functions to call and get the results back from ckdb
 # From homeInfo() and the rest after that
@@ -492,6 +491,17 @@ function getOpts($user, $optlist)
  $flds = array('username' => $user, 'optlist' => $optlist);
  $msg = msgEncode('getopts', 'getopts', $flds, $user);
  $rep = sendsockreply('getOpts', $msg);
+ if (!$rep)
+	dbdown();
+ return repDecode($rep);
+}
+#
+function eventCmd($user, $flds)
+{
+ if ($user == false)
+	showIndex();
+ $msg = msgEncode('events', 'events', $flds, $user);
+ $rep = sendsockreply('eventCmd', $msg);
  if (!$rep)
 	dbdown();
  return repDecode($rep);

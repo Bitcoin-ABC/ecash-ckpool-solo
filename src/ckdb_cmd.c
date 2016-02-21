@@ -39,6 +39,7 @@ static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
 	K_ITEM *i_username, *i_emailaddress, *i_passwordhash, *u_item = NULL;
+	int event = EVENT_OK;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -66,15 +67,18 @@ static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 		if (!i_passwordhash)
 			return strdup(reply);
 
-		u_item = users_add(conn, transfer_data(i_username),
-					 transfer_data(i_emailaddress),
-					 transfer_data(i_passwordhash), 0,
-					 by, code, inet, now, trf_root);
+		event = events_add(EVENTID_CREACC, trf_root);
+		if (event == EVENT_OK) {
+			u_item = users_add(conn, transfer_data(i_username),
+						 transfer_data(i_emailaddress),
+						 transfer_data(i_passwordhash), 0,
+						 by, code, inet, now, trf_root);
+		}
 	}
 
 	if (!u_item) {
 		LOGERR("%s() %s.failed.DBE", __func__, id);
-		return strdup("failed.DBE");
+		return reply_event(event, "failed.DBE");
 	}
 	LOGDEBUG("%s.ok.added %s", id, transfer_data(i_username));
 	snprintf(reply, siz, "ok.added %s", transfer_data(i_username));
@@ -88,6 +92,7 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_ITEM *i_username, *i_oldhash, *i_newhash, *i_2fa, *u_item;
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
+	int event = EVENT_OK;
 	bool ok = true;
 	char *oldhash;
 	int32_t value;
@@ -112,8 +117,10 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 	}
 
 	i_2fa = require_name(trf_root, "2fa", 1, (char *)intpatt, reply, siz);
-	if (!i_2fa)
-		return strdup(reply);
+	if (!i_2fa) {
+		event = events_add(EVENTID_INV2FA, trf_root);
+		return reply_event(event, reply);
+	}
 
 	if (ok) {
 		i_newhash = require_name(trf_root, "newhash",
@@ -131,6 +138,8 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 			if (USER_TOTP_ENA(users)) {
 				value = (int32_t)atoi(transfer_data(i_2fa));
 				ok = check_2fa(users, value);
+				if (!ok)
+					event = events_add(EVENTID_WRONG2FA, trf_root);
 			}
 			if (ok) {
 				ok = users_update(NULL,
@@ -140,7 +149,7 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 						  NULL,
 						  by, code, inet, now,
 						  trf_root,
-						  NULL);
+						  NULL, &event);
 			}
 		} else
 			ok = false;
@@ -148,7 +157,7 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 	if (!ok) {
 		LOGERR("%s.failed.%s", id, transfer_data(i_username));
-		return strdup("failed.");
+		return reply_event(event, "failed.");
 	}
 	LOGDEBUG("%s.ok.%s", id, transfer_data(i_username));
 	return strdup("ok.");
@@ -162,6 +171,7 @@ static char *cmd_chkpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_ITEM *i_username, *i_passwordhash, *i_2fa, *u_item;
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
+	int event = EVENT_OK;
 	USERS *users;
 	bool ok;
 
@@ -177,27 +187,34 @@ static char *cmd_chkpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 		return strdup(reply);
 
 	i_2fa = require_name(trf_root, "2fa", 1, (char *)intpatt, reply, siz);
-	if (!i_2fa)
-		return strdup(reply);
+	if (!i_2fa) {
+		event = events_add(EVENTID_INV2FA, trf_root);
+		return reply_event(event, reply);
+	}
 
 	K_RLOCK(users_free);
 	u_item = find_users(transfer_data(i_username));
 	K_RUNLOCK(users_free);
 
-	if (!u_item)
+	if (!u_item) {
+		event = events_add(EVENTID_INVUSER, trf_root);
 		ok = false;
-	else {
+	} else {
 		DATA_USERS(users, u_item);
 		ok = check_hash(users, transfer_data(i_passwordhash));
+		if (!ok)
+			event = events_add(EVENTID_PASSFAIL, trf_root);
 		if (ok && USER_TOTP_ENA(users)) {
 			uint32_t value = (int32_t)atoi(transfer_data(i_2fa));
 			ok = check_2fa(users, value);
+			if (!ok)
+				event = events_add(EVENTID_WRONG2FA, trf_root);
 		}
 	}
 
 	if (!ok) {
 		LOGERR("%s.failed.%s", id, transfer_data(i_username));
-		return strdup("failed.");
+		return reply_event(event, "failed.");
 	}
 	LOGDEBUG("%s.ok.%s", id, transfer_data(i_username));
 	return strdup("ok.");
@@ -210,6 +227,7 @@ static char *cmd_2fa(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_ITEM *i_username, *i_action, *i_entropy, *i_value, *u_item, *u_new;
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
+	int event = EVENT_OK;
 	size_t len, off;
 	char tmp[1024];
 	int32_t entropy, value;
@@ -241,8 +259,10 @@ static char *cmd_2fa(__maybe_unused PGconn *conn, char *cmd, char *id,
 	// Field always expected, use 0 if not required
 	i_value = require_name(trf_root, "value", 1, (char *)intpatt,
 				reply, siz);
-	if (!i_value)
-		return strdup(reply);
+	if (!i_value) {
+		event = events_add(EVENTID_INV2FA, trf_root);
+		return reply_event(event, reply);
+	}
 
 	K_RLOCK(users_free);
 	u_item = find_users(transfer_data(i_username));
@@ -328,6 +348,7 @@ static char *cmd_2fa(__maybe_unused PGconn *conn, char *cmd, char *id,
 				goto dame;
 			value = (int32_t)atoi(transfer_data(i_value));
 			if (!check_2fa(users, value)) {
+				event = events_add(EVENTID_WRONG2FA, trf_root);
 				sfa_error = "Invalid code";
 				// Report sfa_error to web
 				ok = true;
@@ -350,6 +371,7 @@ static char *cmd_2fa(__maybe_unused PGconn *conn, char *cmd, char *id,
 			// remove requires value
 			value = (int32_t)atoi(transfer_data(i_value));
 			if (!check_2fa(users, value)) {
+				event = events_add(EVENTID_WRONG2FA, trf_root);
 				sfa_error = "Invalid code";
 				// Report sfa_error to web
 				ok = true;
@@ -428,7 +450,7 @@ dame:
 		// Only db/php/code errors should get here
 		LOGERR("%s.failed.%s-%s", id, transfer_data(i_username), action);
 		FREENULL(buf);
-		return strdup("failed.");
+		return reply_event(event, "failed.");
 	}
 
 	snprintf(tmp, sizeof(tmp), "2fa_status=%s%c2fa_error=%s%c2fa_msg=%s",
@@ -436,7 +458,7 @@ dame:
 				   sfa_msg);
 	APPEND_REALLOC(buf, off, len, tmp);
 	LOGDEBUG("%s.%s-%s.%s", id, transfer_data(i_username), action, buf);
-	return buf;
+	return reply_event_free(event, buf);
 }
 
 static char *cmd_userset(PGconn *conn, char *cmd, char *id,
@@ -451,6 +473,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 	char *email, *address, *payname;
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
+	int event = EVENT_OK;
 	char tmp[1024];
 	PAYMENTADDRESSES *row, *pa;
 	K_STORE *pa_store = NULL;
@@ -479,6 +502,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 	K_RUNLOCK(users_free);
 
 	if (!u_item) {
+		event = events_add(EVENTID_UNKATTS, trf_root);
 		reason = "Unknown user";
 		goto struckout;
 	} else {
@@ -548,11 +572,13 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 			i_2fa = require_name(trf_root, "2fa", 1, (char *)intpatt,
 					      reply, siz);
 			if (!i_2fa) {
+				event = events_add(EVENTID_INV2FA, trf_root);
 				reason = "Invalid data";
 				goto struckout;
 			}
 
 			if (!check_hash(users, transfer_data(i_passwordhash))) {
+				event = events_add(EVENTID_PASSFAIL, trf_root);
 				reason = "Incorrect password";
 				goto struckout;
 			}
@@ -560,6 +586,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 			if (USER_TOTP_ENA(users)) {
 				uint32_t value = (int32_t)atoi(transfer_data(i_2fa));
 				if (!check_2fa(users, value)) {
+					event = events_add(EVENTID_WRONG2FA, trf_root);
 					reason = "Invalid data";
 					goto struckout;
 				}
@@ -624,6 +651,8 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 									 reply, siz);
 						if (!i_address) {
 							K_WUNLOCK(paymentaddresses_free);
+							event = events_add(EVENTID_INCBTC,
+									   trf_root);
 							reason = "Invalid address";
 							goto struckout;
 						}
@@ -679,10 +708,14 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 						 * payout address */
 						DATA_PAYMENTADDRESSES(pa, old_pa_item);
 						if (pa->userid != users->userid) {
+							event = events_add(EVENTID_BTCUSED,
+									   trf_root);
 							reason = "Unavailable BTC address";
 							goto struckout;
 						}
 					} else if (!btc_valid_address(row->payaddress)) {
+						event = events_add(EVENTID_INVBTC,
+								   trf_root);
 						reason = "Invalid BTC address";
 						goto struckout;
 					}
@@ -696,7 +729,7 @@ static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 							email,
 							by, code, inet, now,
 							trf_root,
-							NULL);
+							NULL, &event);
 				if (!ok) {
 					reason = "email error";
 					goto struckout;
@@ -728,16 +761,22 @@ struckout:
 		pa_store = NULL;
 	}
 	if (reason) {
+		char *user, *st = NULL;
 		snprintf(reply, siz, "ERR.%s", reason);
-		LOGERR("%s.%s.%s", cmd, id, reply);
-		return strdup(reply);
+		if (i_username)
+			user = st = safe_text(transfer_data(i_username));
+		else
+			user = EMPTY;
+		LOGERR("%s.%s.%s (%s)", cmd, id, reply, user);
+		FREENULL(st);
+		return reply_event(event, reply);
 	}
 	APPEND_REALLOC_INIT(ret, off, len);
 	APPEND_REALLOC(ret, off, len, "ok.");
 	APPEND_REALLOC(ret, off, len, answer);
 	free(answer);
 	LOGDEBUG("%s.%s", id, ret);
-	return ret;
+	return reply_event_free(event, ret);
 }
 
 static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
@@ -755,6 +794,7 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 	USERATTS *useratts;
 	WORKERS *workers;
 	USERS *users;
+	int ovent = OVENT_OK, done;
 	int32_t difficultydefault;
 	char *reason = NULL;
 	char *answer = NULL;
@@ -762,6 +802,12 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 	bool ok;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	ovent = ovents_add(OVENTID_WORKERS, trf_root);
+	if (ovent != OVENT_OK) {
+		snprintf(reply, siz, "ERR");
+		return reply_ovent(ovent, reply);
+	}
 
 	i_username = require_name(trf_root, "username", MIN_USERNAME,
 				  (char *)userpatt, reply, siz);
@@ -815,6 +861,7 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 			goto kazuki;
 		}
 
+		done = 0;
 		// Loop through the list of workers and do any changes
 		for (workernum = 0; workernum < 9999; workernum++) {
 			snprintf(workername_buf, sizeof(workername_buf),
@@ -824,6 +871,17 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 							1, NULL, reply, siz);
 			if (!i_workername)
 				break;
+
+			// More than 1?
+			if (done++ == 1) {
+				ovent = ovents_add(OVENTID_MULTIADDR, trf_root);
+				if (ovent != OVENT_OK) {
+					if (answer)
+						free(answer);
+					snprintf(reply, siz, "ERR");
+					return reply_ovent(ovent, reply);
+				}
+			}
 
 			w_item = find_workers(false, users->userid,
 					      transfer_data(i_workername));
@@ -887,6 +945,16 @@ static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 				K_WLOCK(heartbeatqueue_free);
 				k_add_tail(heartbeatqueue_store, hq_item);
 				K_WUNLOCK(heartbeatqueue_free);
+			}
+		}
+		// Only 1?
+		if (done == 1) {
+			ovent = ovents_add(OVENTID_ONEADDR, trf_root);
+			if (ovent != OVENT_OK) {
+				if (answer)
+					free(answer);
+				snprintf(reply, siz, "ERR");
+				return reply_ovent(ovent, reply);
 			}
 		}
 	}
@@ -1197,6 +1265,7 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 			   __maybe_unused tv_t *notcd,
 			   __maybe_unused K_TREE *trf_root)
 {
+	int ovent = OVENT_OK;
 	K_TREE_CTX ctx[1];
 	K_ITEM *b_item;
 	BLOCKS *blocks;
@@ -1210,6 +1279,12 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 	bool has_stats;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	ovent = ovents_add(OVENTID_BLOCKS, trf_root);
+	if (ovent != OVENT_OK) {
+		snprintf(tmp, sizeof(tmp), "ERR");
+		return reply_ovent(ovent, tmp);
+	}
 
 	maxrows = sys_setting(BLOCKS_SETTING_NAME, BLOCKS_DEFAULT, now);
 
@@ -1991,6 +2066,7 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 	USERSTATS *userstats;
 	USERATTS *useratts;
 	USERS *users;
+	int ovent = OVENT_OK;
 	char reply[1024] = "";
 	char tmp[1024];
 	int64_t oldworkers = USER_OLD_WORKERS_DEFAULT;
@@ -2002,6 +2078,12 @@ static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 	int rows;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	ovent = ovents_add(OVENTID_WORKERS, trf_root);
+	if (ovent != OVENT_OK) {
+		snprintf(reply, siz, "ERR");
+		return reply_ovent(ovent, reply);
+	}
 
 	i_username = adminuser(trf_root, reply, siz);
 	if (!i_username)
@@ -2894,6 +2976,7 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	K_TREE_CTX ctx[1];
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
+	int event = EVENT_OK;
 	K_ITEM *i_poolinstance, *i_username, *i_workername, *i_clientid;
 	K_ITEM *i_enonce1, *i_useragent, *i_preauth, *u_item, *oc_item, *w_item;
 	USERS *users = NULL;
@@ -2902,7 +2985,7 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 	OPTIONCONTROL *optioncontrol;
 	size_t len, off;
 	char *buf;
-	bool ok, first;
+	bool ok = true, first;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -2958,26 +3041,33 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 		u_item = find_users(username);
 		K_RUNLOCK(users_free);
 		if (!u_item) {
-			DATA_OPTIONCONTROL(optioncontrol, oc_item);
-			u_item = users_add(conn, username, EMPTY,
-					   optioncontrol->optionvalue, 0,
-					   by, code, inet, cd, trf_root);
+			event = events_add(EVENTID_AUTOACC, trf_root);
+			if (event == EVENT_OK) {
+				DATA_OPTIONCONTROL(optioncontrol, oc_item);
+				u_item = users_add(conn, username, EMPTY,
+						   optioncontrol->optionvalue,
+						   0, by, code, inet, cd,
+						   trf_root);
+			} else
+				ok = false;
 		}
 	}
 
-	ok = auths_add(conn, transfer_data(i_poolinstance),
-			     username,
-			     transfer_data(i_workername),
-			     transfer_data(i_clientid),
-			     transfer_data(i_enonce1),
-			     transfer_data(i_useragent),
-			     transfer_data(i_preauth),
-			     by, code, inet, cd, trf_root, false,
-			     &users, &workers);
+	if (ok) {
+		ok = auths_add(conn, transfer_data(i_poolinstance),
+				     username,
+				     transfer_data(i_workername),
+				     transfer_data(i_clientid),
+				     transfer_data(i_enonce1),
+				     transfer_data(i_useragent),
+				     transfer_data(i_preauth),
+				     by, code, inet, cd, trf_root, false,
+				     &users, &workers, &event);
+	}
 
 	if (!ok) {
 		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
-		return strdup("failed.DBE");
+		return reply_event(event, "failed.DBE");
 	}
 
 	// Only flag a successful auth
@@ -3042,6 +3132,7 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 	K_TREE_CTX ctx[1];
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
+	int event = EVENT_OK;
 	K_ITEM *i_poolinstance, *i_username, *i_workername, *i_clientid;
 	K_ITEM *i_enonce1, *i_useragent, *i_preauth, *w_item;
 	USERS *users = NULL;
@@ -3105,11 +3196,11 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 			     transfer_data(i_useragent),
 			     transfer_data(i_preauth),
 			     by, code, inet, cd, trf_root, true,
-			     &users, &workers);
+			     &users, &workers, &event);
 
 	if (!ok) {
 		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
-		return strdup("failed.DBE");
+		return reply_event(event, "failed.DBE");
 	}
 
 	// Only flag a successful auth
@@ -3239,6 +3330,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 {
 	K_ITEM *i_username, *u_item, *b_item, *p_item, *us_item, look;
 	K_ITEM *ua_item, *pa_item;
+	int ovent = OVENT_OK;
 	double u_hashrate5m, u_hashrate1hr;
 	char reply[1024], tmp[1024], *buf;
 	size_t siz = sizeof(reply);
@@ -3253,6 +3345,12 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	bool has_uhr;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	ovent = ovents_add(OVENTID_HOMEPAGE, trf_root);
+	if (ovent != OVENT_OK) {
+		snprintf(reply, siz, "ERR");
+		return reply_ovent(ovent, reply);
+	}
 
 	i_username = optional_name(trf_root, "username", 1, NULL, reply, siz);
 
@@ -3352,7 +3450,7 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 				   pool.shareinv, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
-	// TODO: assumes only one poolinstance (for now)
+	// TODO: DB only has one poolinstance with -i
 	K_RLOCK(poolstats_free);
 	p_item = last_in_ktree(poolstats_root, ctx);
 	K_RUNLOCK(poolstats_free);
@@ -3524,6 +3622,7 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_ITEM *i_username, *i_attlist, *u_item, *ua_item;
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
+	int event = EVENT_OK;
 	char tmp[1024];
 	USERATTS *useratts;
 	USERS *users;
@@ -3538,6 +3637,7 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 	i_username = require_name(trf_root, "username", MIN_USERNAME,
 				  (char *)userpatt, reply, siz);
 	if (!i_username) {
+		// Shouldn't happen except with a code problem no event required
 		reason = "Missing username";
 		goto nuts;
 	}
@@ -3547,6 +3647,8 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 	K_RUNLOCK(users_free);
 
 	if (!u_item) {
+		// page_api.php without a valid username
+		event = events_add(EVENTID_UNKATTS, trf_root);
 		reason = "Unknown user";
 		goto nuts;
 	} else {
@@ -3570,6 +3672,18 @@ static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 				goto nuts;
 			}
 			*(dot++) = '\0';
+			if (strcmp(ptr, APIKEY) == 0) {
+				// API request count
+				event = ovents_add(OVENTID_API, trf_root);
+				if (event != OVENT_OK) {
+					if (attlist)
+						free(attlist);
+					if (answer)
+						free(answer);
+					snprintf(reply, siz, "ERR");
+					return reply_ovent(event, reply);
+				}
+			}
 			K_RLOCK(useratts_free);
 			ua_item = find_useratts(users->userid, ptr);
 			K_RUNLOCK(useratts_free);
@@ -3639,7 +3753,7 @@ nuts:
 			free(answer);
 		snprintf(reply, siz, "ERR.%s", reason);
 		LOGERR("%s.%s.%s", cmd, id, reply);
-		return strdup(reply);
+		return reply_event(event, reply);
 	}
 	snprintf(reply, siz, "ok.%s", answer);
 	LOGDEBUG("%s.%s", id, answer);
@@ -5871,7 +5985,7 @@ static char *cmd_userstatus(PGconn *conn, char *cmd, char *id, tv_t *now, char *
 					NULL,
 					by, code, inet, now,
 					trf_root,
-					status);
+					status, NULL);
 	}
 
 	if (!ok) {
@@ -7432,6 +7546,491 @@ static char *cmd_locks(__maybe_unused PGconn *conn, char *cmd, char *id,
 	return strdup(reply);
 }
 
+static void event_tree(K_TREE *event_tree, char *list, char *reply, size_t siz,
+			char *buf, size_t *off, size_t *len, int *rows)
+{
+	K_TREE_CTX ctx[1];
+	K_ITEM *e_item;
+	EVENTS *e;
+
+	e_item = first_in_ktree(event_tree, ctx);
+	while (e_item) {
+		DATA_EVENTS(e, e_item);
+		if (CURRENT(&(e->expirydate))) {
+			snprintf(reply, siz, "list:%d=%s%c",
+				 *rows, list, FLDSEP);
+			APPEND_REALLOC(buf, *off, *len, reply);
+
+			snprintf(reply, siz, "id:%d=%d%c",
+				 *rows, e->id, FLDSEP);
+			APPEND_REALLOC(buf, *off, *len, reply);
+
+			snprintf(reply, siz, "user:%d=%s%c",
+				 *rows, e->createby, FLDSEP);
+			APPEND_REALLOC(buf, *off, *len, reply);
+
+			if (event_tree == events_ipc_root) {
+				snprintf(reply, siz, "ipc:%d=%s%c",
+					 *rows, e->ipc, FLDSEP);
+				APPEND_REALLOC(buf, *off, *len, reply);
+			} else {
+				snprintf(reply, siz, "ip:%d=%s%c",
+					 *rows, e->createinet, FLDSEP);
+				APPEND_REALLOC(buf, *off, *len, reply);
+			}
+
+			if (event_tree == events_hash_root) {
+				snprintf(reply, siz, "hash:%d=%.8s%c",
+					 *rows, e->hash, FLDSEP);
+				APPEND_REALLOC(buf, *off, *len, reply);
+			}
+
+			snprintf(reply, siz, CDTRF":%d=%ld%c",
+				 (*rows)++, e->createdate.tv_sec, FLDSEP);
+			APPEND_REALLOC(buf, *off, *len, reply);
+		}
+		e_item = next_in_ktree(ctx);
+	}
+}
+
+// Events status/settings
+static char *cmd_events(__maybe_unused PGconn *conn, char *cmd, char *id,
+			tv_t *now, __maybe_unused char *by,
+			__maybe_unused char *code, __maybe_unused char *inet,
+			__maybe_unused tv_t *cd, K_TREE *trf_root)
+{
+	K_ITEM *i_action, *i_cmd, *i_list, *i_ip, *i_eventname, *i_lifetime;
+	K_ITEM *i_des, *i_item, *next_item;
+	K_TREE_CTX ctx[1];
+	IPS *ips;
+	char *action, *alert_cmd, *list, *ip, *eventname, *des;
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	char tmp[1024] = "";
+	char *buf = NULL;
+	size_t len, off;
+	int i, rows, oldlife, lifetime;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	i_action = require_name(trf_root, "action", 1, NULL, reply, siz);
+	if (!i_action)
+		return strdup(reply);
+	action = transfer_data(i_action);
+
+	if (strcasecmp(action, "cmd") == 0) {
+		/* Change ckdb_alert_cmd to 'cmd'
+		 * blank to disable it */
+		i_cmd = require_name(trf_root, "cmd", 0, NULL, reply, siz);
+		if (!i_cmd)
+			return strdup(reply);
+		alert_cmd = transfer_data(i_cmd);
+		if (strlen(alert_cmd) > MAX_ALERT_CMD)
+			return strdup("Invalid cmd length - limit " STRINT(MAX_ALERT_CMD));
+		K_WLOCK(event_limits_free);
+		FREENULL(ckdb_alert_cmd);
+		if (*alert_cmd)
+			ckdb_alert_cmd = strdup(alert_cmd);
+		K_WUNLOCK(event_limits_free);
+		APPEND_REALLOC_INIT(buf, off, len);
+		if (*alert_cmd)
+			APPEND_REALLOC(buf, off, len, "ok.cmd set");
+		else
+			APPEND_REALLOC(buf, off, len, "ok.cmd disabled");
+	} else if (strcasecmp(action, "settings") == 0) {
+		// Return all current event settings
+		APPEND_REALLOC_INIT(buf, off, len);
+		APPEND_REALLOC(buf, off, len, "ok.");
+		K_RLOCK(event_limits_free);
+		i = -1;
+		while (e_limits[++i].name) {
+			snprintf(tmp, sizeof(tmp), "%s_enabled=%c%c",
+				 e_limits[i].name,
+				 e_limits[i].enabled ? TRUE_CHR : FALSE_CHR,
+				 FLDSEP);
+			APPEND_REALLOC(buf, off, len, tmp);
+
+#define EVENTFLD(_fld) do { \
+		snprintf(tmp, sizeof(tmp), "%s_" #_fld "=%d%c", \
+			 e_limits[i].name, e_limits[i]._fld, FLDSEP); \
+		APPEND_REALLOC(buf, off, len, tmp); \
+	} while (0)
+
+			EVENTFLD(user_low_time);
+			EVENTFLD(user_low_time_limit);
+			EVENTFLD(user_hi_time);
+			EVENTFLD(user_hi_time_limit);
+			EVENTFLD(ip_low_time);
+			EVENTFLD(ip_low_time_limit);
+			EVENTFLD(ip_hi_time);
+			EVENTFLD(ip_hi_time_limit);
+			EVENTFLD(lifetime);
+		}
+		snprintf(tmp, sizeof(tmp), "event_limits_hash_lifetime=%d%c",
+			 event_limits_hash_lifetime, FLDSEP);
+		APPEND_REALLOC(buf, off, len, tmp);
+		i = -1;
+		while (o_limits[++i].name) {
+			snprintf(tmp, sizeof(tmp), "%s_enabled=%c%c",
+				 o_limits[i].name,
+				 o_limits[i].enabled ? TRUE_CHR : FALSE_CHR,
+				 FLDSEP);
+			APPEND_REALLOC(buf, off, len, tmp);
+
+#define OVENTFLD(_fld) do { \
+		snprintf(tmp, sizeof(tmp), "%s_" #_fld "=%d%c", \
+			 o_limits[i].name, o_limits[i]._fld, FLDSEP); \
+		APPEND_REALLOC(buf, off, len, tmp); \
+	} while (0)
+
+			OVENTFLD(user_low_time);
+			OVENTFLD(user_low_time_limit);
+			OVENTFLD(user_hi_time);
+			OVENTFLD(user_hi_time_limit);
+			OVENTFLD(ip_low_time);
+			OVENTFLD(ip_low_time_limit);
+			OVENTFLD(ip_hi_time);
+			OVENTFLD(ip_hi_time_limit);
+			OVENTFLD(lifetime);
+		}
+		snprintf(tmp, sizeof(tmp), "ovent_limits_ipc_factor=%f",
+			 ovent_limits_ipc_factor);
+		APPEND_REALLOC(buf, off, len, tmp);
+		K_RUNLOCK(event_limits_free);
+	} else if (strcasecmp(action, "events") == 0) {
+		/* List the event tree contents
+		 * List is 'all' or one of: hash, user, ip or ipc <- tree names
+		 * Output can be large - check web Admin->ckp for tree sizes */
+		bool all, one = false;
+		i_list = require_name(trf_root, "list", 1, NULL, reply, siz);
+		if (!i_list)
+			return strdup(reply);
+		list = transfer_data(i_list);
+		APPEND_REALLOC_INIT(buf, off, len);
+		APPEND_REALLOC(buf, off, len, "ok.");
+		rows = 0;
+		all = (strcmp(list, "all") == 0);
+		K_RLOCK(events_free);
+		if (all || strcmp(list, "user") == 0) {
+			one = true;
+			event_tree(events_user_root, "user", reply, siz, buf,
+				   &off, &len, &rows);
+		}
+		if (all || strcmp(list, "ip") == 0) {
+			one = true;
+			event_tree(events_ip_root, "ip", reply, siz, buf,
+				   &off, &len, &rows);
+		}
+		if (all || strcmp(list, "ipc") == 0) {
+			one = true;
+			event_tree(events_ipc_root, "ipc", reply, siz, buf,
+				   &off, &len, &rows);
+		}
+		if (all || strcmp(list, "hash") == 0) {
+			one = true;
+			event_tree(events_hash_root, "hash", reply, siz, buf,
+				   &off, &len, &rows);
+		}
+		K_RUNLOCK(events_free);
+		if (!one) {
+			free(buf);
+			snprintf(reply, siz, "unknown stats list '%s'", list);
+			LOGERR("%s() %s.%s", __func__, id, reply);
+			return strdup(reply);
+		}
+		snprintf(tmp, sizeof(tmp), "rows=%d", rows);
+		APPEND_REALLOC(buf, off, len, tmp);
+	} else if (strcasecmp(action, "ips") == 0) {
+		// List the ips tree contents
+		APPEND_REALLOC_INIT(buf, off, len);
+		APPEND_REALLOC(buf, off, len, "ok.");
+		rows = 0;
+		K_RLOCK(ips_free);
+		i_item = first_in_ktree(ips_root, ctx);
+		while (i_item) {
+			DATA_IPS(ips, i_item);
+			if (CURRENT(&(ips->expirydate))) {
+				snprintf(tmp, sizeof(tmp), "group:%d=%s%c",
+					 rows, ips->group, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+				snprintf(tmp, sizeof(tmp), "ip:%d=%s%c",
+					 rows, ips->ip, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+				snprintf(tmp, sizeof(tmp), "eventname:%d=%s%c",
+					 rows, ips->eventname, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+				snprintf(tmp, sizeof(tmp), "is_event:%d=%c%c",
+					 rows,
+					 ips->is_event ?  TRUE_CHR : FALSE_CHR,
+					 FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+				snprintf(tmp, sizeof(tmp), "lifetime:%d=%d%c",
+					 rows, ips->lifetime, FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+				snprintf(tmp, sizeof(tmp), "log:%d=%c%c",
+					 rows, ips->log ? TRUE_CHR : FALSE_CHR,
+					 FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+				snprintf(tmp, sizeof(tmp), "description:%d=%s%c",
+					 rows, ips->description ? : EMPTY,
+					 FLDSEP);
+				APPEND_REALLOC(buf, off, len, tmp);
+				snprintf(reply, siz, CDTRF":%d=%ld%c",
+					 rows++, ips->createdate.tv_sec,
+					 FLDSEP);
+				APPEND_REALLOC(buf, off, len, reply);
+			}
+			i_item = next_in_ktree(ctx);
+		}
+		K_RUNLOCK(ips_free);
+		snprintf(tmp, sizeof(tmp), "rows=%d", rows);
+		APPEND_REALLOC(buf, off, len, tmp);
+	} else if (strcasecmp(action, "ban") == 0) {
+		/* Ban the ip with optional eventname and lifetime
+		 * N.B. this doesn't survive a CKDB restart
+		 *	use just cmd_setopts for permanent bans */
+		bool found = false;
+		oldlife = 0;
+		i_ip = require_name(trf_root, "ip", 1, NULL, reply, siz);
+		if (!i_ip)
+			return strdup(reply);
+		ip = transfer_data(i_ip);
+		i_eventname = optional_name(trf_root, "eventname", 1, NULL, reply, siz);
+		if (i_eventname)
+			eventname = transfer_data(i_eventname);
+		else {
+			if (*reply)
+				return strdup(reply);
+			eventname = EVENTNAME_ALL;
+		}
+		i_lifetime = optional_name(trf_root, "lifetime", 1,
+					   (char *)intpatt, reply, siz);
+		if (i_lifetime)
+			lifetime = atoi(transfer_data(i_lifetime));
+		else {
+			if (*reply)
+				return strdup(reply);
+			// default to almost 42 years :)
+			lifetime = 60*60*24*365*42;
+		}
+		i_des = optional_name(trf_root, "des", 1, NULL, reply, siz);
+		if (i_des)
+			des = transfer_data(i_des);
+		else {
+			if (*reply)
+				return strdup(reply);
+			des = NULL;
+		}
+		K_WLOCK(ips_free);
+		i_item = find_ips(IPS_GROUP_BAN, ip, eventname, NULL);
+		if (i_item) {
+			DATA_IPS(ips, i_item);
+			found = true;
+			oldlife = ips->lifetime;
+			ips->lifetime = lifetime;
+			// Don't change it if it's not supplied
+			if (des) {
+				LIST_MEM_SUB(ips_free, ips->description);
+				FREENULL(ips->description);
+				ips->description = strdup(des);
+				LIST_MEM_ADD(ips_free, ips->description);
+			}
+		} else {
+			ips_add(IPS_GROUP_BAN, ip, eventname,
+				is_elimitname(eventname, true), des, true,
+				false, lifetime, true);
+		}
+		K_WUNLOCK(ips_free);
+		APPEND_REALLOC_INIT(buf, off, len);
+		APPEND_REALLOC(buf, off, len, "ok.");
+		if (found) {
+			snprintf(tmp, sizeof(tmp), "already %s/%s %d->%d",
+				 ip, eventname, oldlife, lifetime);
+		} else {
+			snprintf(tmp, sizeof(tmp), "ban %s/%s %d",
+				 ip, eventname, lifetime);
+		}
+		APPEND_REALLOC(buf, off, len, tmp);
+	} else if (strcasecmp(action, "unban") == 0) {
+		/* Unban the ip+eventname - sets lifetime to 1 meaning
+		 *  it expires 1 second after it was created
+		 *  so next access will remove the ban and succeed
+		 * N.B. if it was a permanent 'cmd_setopts' ban, the unban
+		 *	won't survive a CKDB restart.
+		 *	You need to BOTH use this AND remove the optioncontrol
+		 *	record from the database to permanently remove a ban
+		 *	(since there's no cmd_expopts ... yet) */
+		bool found = false;
+		i_ip = require_name(trf_root, "ip", 1, NULL, reply, siz);
+		if (!i_ip)
+			return strdup(reply);
+		ip = transfer_data(i_ip);
+		i_eventname = require_name(trf_root, "eventname", 1, NULL, reply, siz);
+		if (!i_eventname)
+			return strdup(reply);
+		eventname = transfer_data(i_eventname);
+		K_WLOCK(ips_free);
+		i_item = find_ips(IPS_GROUP_BAN, ip, eventname, NULL);
+		if (i_item) {
+			found = true;
+			DATA_IPS(ips, i_item);
+			ips->lifetime = 1;
+		}
+		K_WUNLOCK(ips_free);
+		APPEND_REALLOC_INIT(buf, off, len);
+		if (found) {
+			APPEND_REALLOC(buf, off, len, "ok.");
+			APPEND_REALLOC(buf, off, len, ip);
+			APPEND_REALLOC(buf, off, len, "/");
+			APPEND_REALLOC(buf, off, len, eventname);
+			APPEND_REALLOC(buf, off, len, " unbanned");
+		} else {
+			APPEND_REALLOC(buf, off, len,
+					"ERR.unknown BAN ip+eventname");
+		}
+	} else if (strcasecmp(action, "ok") == 0) {
+		/* OK the ip+eventname with optional lifetime
+		 * N.B. this doesn't survive a CKDB restart
+		 *	use just cmd_setopts for permanent OKs */
+		bool found = false;
+		oldlife = 0;
+		i_ip = require_name(trf_root, "ip", 1, NULL, reply, siz);
+		if (!i_ip)
+			return strdup(reply);
+		ip = transfer_data(i_ip);
+		i_eventname = require_name(trf_root, "eventname", 1, NULL, reply, siz);
+		if (!i_eventname)
+			return strdup(reply);
+		eventname = transfer_data(i_eventname);
+		i_lifetime = optional_name(trf_root, "lifetime", 1,
+					   (char *)intpatt, reply, siz);
+		if (i_lifetime)
+			lifetime = atoi(transfer_data(i_lifetime));
+		else {
+			if (*reply)
+				return strdup(reply);
+			// Forever
+			lifetime = 0;
+		}
+		i_des = optional_name(trf_root, "des", 1, NULL, reply, siz);
+		if (i_des)
+			des = transfer_data(i_des);
+		else {
+			if (*reply)
+				return strdup(reply);
+			des = NULL;
+		}
+		K_WLOCK(ips_free);
+		i_item = find_ips(IPS_GROUP_OK, ip, eventname, NULL);
+		if (i_item) {
+			DATA_IPS(ips, i_item);
+			found = true;
+			oldlife = ips->lifetime;
+			ips->lifetime = lifetime;
+			// Don't change it if it's not supplied
+			if (des) {
+				LIST_MEM_SUB(ips_free, ips->description);
+				FREENULL(ips->description);
+				ips->description = strdup(des);
+				LIST_MEM_ADD(ips_free, ips->description);
+			}
+		} else {
+			ips_add(IPS_GROUP_OK, ip, eventname,
+				is_elimitname(eventname, true), des, true,
+				false, lifetime, true);
+		}
+		K_WUNLOCK(ips_free);
+		APPEND_REALLOC_INIT(buf, off, len);
+		APPEND_REALLOC(buf, off, len, "ok.");
+		if (found) {
+			snprintf(tmp, sizeof(tmp), "already %s/%s %d->%d",
+				 ip, eventname, oldlife, lifetime);
+		} else {
+			snprintf(tmp, sizeof(tmp), "ok %s/%s %d",
+				 ip, eventname, lifetime);
+		}
+		APPEND_REALLOC(buf, off, len, tmp);
+	} else if (strcasecmp(action, "unok") == 0) {
+		/* UnOK the ip+eventname - sets lifetime to 1 meaning
+		 *  it expires 1 second after it was created
+		 *  so next access will remove the OK and succeed
+		 * N.B. if it was a permanent 'cmd_setopts' OK, the unOK
+		 *	won't survive a CKDB restart.
+		 *	You need to BOTH use this AND remove the optioncontrol
+		 *	record from the database to permanently remove an OK
+		 *	(since there's no cmd_expopts ... yet) */
+		bool found = false;
+		i_ip = require_name(trf_root, "ip", 1, NULL, reply, siz);
+		if (!i_ip)
+			return strdup(reply);
+		ip = transfer_data(i_ip);
+		i_eventname = require_name(trf_root, "eventname", 1, NULL, reply, siz);
+		if (!i_eventname)
+			return strdup(reply);
+		eventname = transfer_data(i_eventname);
+		K_WLOCK(ips_free);
+		i_item = find_ips(IPS_GROUP_OK, ip, eventname, NULL);
+		if (i_item) {
+			found = true;
+			DATA_IPS(ips, i_item);
+			ips->lifetime = 1;
+		}
+		K_WUNLOCK(ips_free);
+		APPEND_REALLOC_INIT(buf, off, len);
+		if (found) {
+			APPEND_REALLOC(buf, off, len, "ok.");
+			APPEND_REALLOC(buf, off, len, ip);
+			APPEND_REALLOC(buf, off, len, "/");
+			APPEND_REALLOC(buf, off, len, eventname);
+			APPEND_REALLOC(buf, off, len, " unOKed");
+		} else {
+			APPEND_REALLOC(buf, off, len,
+					"ERR.unknown OK ip+eventname");
+		}
+	} else if (strcasecmp(action, "expire") == 0) {
+		/* Expire all ips that are too old
+		 *  and remove all non-current */
+		bool expire;
+		rows = 0;
+		K_WLOCK(ips_free);
+		i_item = first_in_ktree(ips_root, ctx);
+		while (i_item) {
+			DATA_IPS(ips, i_item);
+			expire = false;
+			if (!CURRENT(&(ips->expirydate)))
+				expire = true;
+			else if (ips->lifetime != 0 &&
+				 (int)tvdiff(now, &(ips->createdate)) > ips->lifetime) {
+					expire = true;
+				}
+			if (expire) {
+				rows++;
+				next_item = next_in_ktree(ctx);
+				remove_from_ktree(ips_root, i_item);
+				k_unlink_item(ips_store, i_item);
+				if (ips->description) {
+					LIST_MEM_SUB(ips_free, ips->description);
+					FREENULL(ips->description);
+				}
+				k_add_head(ips_free, i_item);
+				i_item = next_item;
+				continue;
+			}
+			i_item = next_in_ktree(ctx);
+		}
+		K_WUNLOCK(ips_free);
+		APPEND_REALLOC_INIT(buf, off, len);
+		snprintf(tmp, sizeof(tmp), "ok.expired %d", rows);
+		APPEND_REALLOC(buf, off, len, tmp);
+	} else {
+		snprintf(reply, siz, "unknown action '%s'", action);
+		LOGERR("%s() %s.%s", __func__, id, reply);
+		return strdup(reply);
+	}
+
+	return buf;
+}
+
 /* The socket command format is as follows:
  *  Basic structure:
  *    cmd.ID.fld1=value1 FLDSEP fld2=value2 FLDSEP fld3=...
@@ -7542,5 +8141,6 @@ struct CMDS ckdb_cmds[] = {
 	{ CMD_BTCSET,	"btcset",	false,	false,	cmd_btcset,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_QUERY,	"query",	false,	false,	cmd_query,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_LOCKS,	"locks",	false,	false,	cmd_locks,	SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_EVENTS,	"events",	false,	false,	cmd_events,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_END,	NULL,		false,	false,	NULL,		SEQ_NONE,	0 }
 };

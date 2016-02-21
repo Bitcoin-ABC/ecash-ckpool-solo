@@ -389,10 +389,10 @@ cleanup:
 	return lastid;
 }
 
-// status was added to the end so type checking intercepts new mistakes
 bool users_update(PGconn *conn, K_ITEM *u_item, char *oldhash,
 		  char *newhash, char *email, char *by, char *code,
-		  char *inet, tv_t *cd, K_TREE *trf_root, char *status)
+		  char *inet, tv_t *cd, K_TREE *trf_root, char *status,
+		  int *event)
 {
 	ExecStatusType rescode;
 	bool conned = false;
@@ -414,8 +414,11 @@ bool users_update(PGconn *conn, K_ITEM *u_item, char *oldhash,
 
 	DATA_USERS(users, u_item);
 	// i.e. if oldhash == EMPTY, just overwrite with new
-	if (hash && oldhash != EMPTY && !check_hash(users, oldhash))
+	if (hash && oldhash != EMPTY && !check_hash(users, oldhash)) {
+		if (event)
+			*event = events_add(EVENTID_PASSFAIL, trf_root);
 		return false;
+	}
 
 	K_WLOCK(users_free);
 	item = k_unlink_head(users_free);
@@ -2435,6 +2438,283 @@ foil:
 	return ok;
 }
 
+void oc_switch_state(OPTIONCONTROL *oc, const char *from)
+{
+	switch_state = atoi(oc->optionvalue);
+	LOGWARNING("%s(%s) set switch_state to %d",
+		   from, __func__, switch_state);
+}
+
+void oc_diff_percent(OPTIONCONTROL *oc, __maybe_unused const char *from)
+{
+	diff_percent = DIFF_VAL(strtod(oc->optionvalue, NULL));
+	if (errno == ERANGE)
+		diff_percent = DIFF_VAL(DIFF_PERCENT_DEFAULT);
+}
+
+/* An event limit setting looks like:
+ *	OC_LIMITS + event_limits.name + '_' + Item
+ * Item is one of the field names in event_limits
+ * 	e.g. user_low_time, user_low_time_limit etc
+ * 		as below in the if tests
+ *	lifetime values can't = EVENT_OK */
+void oc_event_limits(OPTIONCONTROL *oc, const char *from)
+{
+	bool processed = false;
+	size_t len;
+	char *ptr, *ptr2;
+	int val, i;
+
+	K_WLOCK(event_limits_free);
+	val = atoi(oc->optionvalue);
+	ptr = oc->optionname + strlen(OC_LIMITS);
+	i = -1;
+	while (e_limits[++i].name) {
+		len = strlen(e_limits[i].name);
+		if (strncmp(ptr, e_limits[i].name, len) == 0 &&
+		    ptr[len] == '_') {
+			ptr2 = ptr + len + 1;
+			if (strcmp(ptr2, "user_low_time") == 0) {
+				e_limits[i].user_low_time = val;
+			} else if (strcmp(ptr2, "user_low_time_limit") == 0) {
+				e_limits[i].user_low_time_limit = val;
+			} else if (strcmp(ptr2, "user_hi_time") == 0) {
+				e_limits[i].user_hi_time = val;
+			} else if (strcmp(ptr2, "user_hi_time_limit") == 0) {
+				e_limits[i].user_hi_time_limit = val;
+			} else if (strcmp(ptr2, "ip_low_time") == 0) {
+				e_limits[i].ip_low_time = val;
+			} else if (strcmp(ptr2, "ip_low_time_limit") == 0) {
+				e_limits[i].ip_low_time_limit = val;
+			} else if (strcmp(ptr2, "ip_hi_time") == 0) {
+				e_limits[i].ip_hi_time = val;
+			} else if (strcmp(ptr2, "ip_hi_time_limit") == 0) {
+				e_limits[i].ip_hi_time_limit = val;
+			} else if (strcmp(ptr2, "lifetime") == 0) {
+				if (val != EVENT_OK)
+					e_limits[i].lifetime = val;
+				else {
+					LOGERR("%s(%s): ERR: lifetime can't be"
+						" %d in '%s'",
+						from, __func__, EVENT_OK,
+						oc->optionname);
+				}
+			} else if (strcmp(ptr2, "enabled") == 0) {
+				char ch = toupper(oc->optionvalue[0]);
+				if (ch == TRUE_CHR || ch == TRUE2_CHR)
+					e_limits[i].enabled = true;
+				else
+					e_limits[i].enabled = false;
+			} else {
+				LOGERR("%s(%s): ERR: Unknown %s item '%s' "
+					"in '%s'",
+					from, __func__, OC_LIMITS, ptr2,
+					oc->optionname);
+			}
+			processed = true;
+			break;
+		}
+	}
+	if (!processed) {
+		if (strcmp(ptr, "hash_lifetime") == 0) {
+			if (val != EVENT_OK)
+				event_limits_hash_lifetime = val;
+			else {
+				LOGERR("%s(%s): ERR: lifetime can't be"
+					" %d in '%s'",
+					from, __func__, EVENT_OK,
+					oc->optionname);
+			}
+			processed = true;
+		}
+	}
+	K_WUNLOCK(event_limits_free);
+	if (!processed) {
+		LOGERR("%s(%s): ERR: Unknown %s name '%s'",
+			from, __func__, OC_LIMITS, oc->optionname);
+	}
+}
+
+/* An ovent limit setting looks like:
+ *	OC_OLIMITS + event_limits.name + '_' + Item
+ * Item is one of the field names in event_limits
+ * 	e.g. user_low_time, user_low_time_limit etc
+ * 		as below in the if tests
+ *	lifetime values can't = OVENT_OK */
+void oc_ovent_limits(OPTIONCONTROL *oc, const char *from)
+{
+	bool processed = false, lifetime_changed = false;
+	size_t len;
+	char *ptr, *ptr2;
+	int val, i;
+
+	K_WLOCK(event_limits_free);
+	val = atoi(oc->optionvalue);
+	ptr = oc->optionname + strlen(OC_OLIMITS);
+	i = -1;
+	while (o_limits[++i].name) {
+		len = strlen(o_limits[i].name);
+		if (strncmp(ptr, o_limits[i].name, len) == 0 &&
+		    ptr[len] == '_') {
+			ptr2 = ptr + len + 1;
+			if (strcmp(ptr2, "user_low_time") == 0) {
+				o_limits[i].user_low_time = val;
+			} else if (strcmp(ptr2, "user_low_time_limit") == 0) {
+				o_limits[i].user_low_time_limit = val;
+			} else if (strcmp(ptr2, "user_hi_time") == 0) {
+				o_limits[i].user_hi_time = val;
+			} else if (strcmp(ptr2, "user_hi_time_limit") == 0) {
+				o_limits[i].user_hi_time_limit = val;
+			} else if (strcmp(ptr2, "ip_low_time") == 0) {
+				o_limits[i].ip_low_time = val;
+			} else if (strcmp(ptr2, "ip_low_time_limit") == 0) {
+				o_limits[i].ip_low_time_limit = val;
+			} else if (strcmp(ptr2, "ip_hi_time") == 0) {
+				o_limits[i].ip_hi_time = val;
+			} else if (strcmp(ptr2, "ip_hi_time_limit") == 0) {
+				o_limits[i].ip_hi_time_limit = val;
+			} else if (strcmp(ptr2, "lifetime") == 0) {
+				if (val != OVENT_OK) {
+					o_limits[i].lifetime = val;
+					lifetime_changed = true;
+				} else {
+					LOGERR("%s(%s): ERR: lifetime can't be"
+						" %d in '%s'",
+						from, __func__, OVENT_OK,
+						oc->optionname);
+				}
+			} else if (strcmp(ptr2, "enabled") == 0) {
+				char ch = toupper(oc->optionvalue[0]);
+				if (ch == TRUE_CHR || ch == TRUE2_CHR)
+					o_limits[i].enabled = true;
+				else
+					o_limits[i].enabled = false;
+			} else {
+				LOGERR("%s(%s): ERR: Unknown %s item '%s' "
+					"in '%s'",
+					from, __func__, OC_OLIMITS, ptr2,
+					oc->optionname);
+			}
+			processed = true;
+			break;
+		}
+	}
+	if (!processed) {
+		if (strcmp(ptr, "ipc_factor") == 0) {
+			ovent_limits_ipc_factor = atof(oc->optionvalue);
+			processed = true;
+		}
+	}
+	if (lifetime_changed) {
+		o_limits_max_lifetime = -1;
+		i = -1;
+		while (o_limits[++i].name) {
+			if (o_limits_max_lifetime < o_limits[i].lifetime)
+				o_limits_max_lifetime = o_limits[i].lifetime;
+		}
+	}
+	K_WUNLOCK(event_limits_free);
+	if (!processed) {
+		LOGERR("%s(%s): ERR: Unknown %s name '%s'",
+			from, __func__, OC_OLIMITS, oc->optionname);
+	}
+}
+
+/* IPS for IPS_GROUP_OK/BAN look like:
+ *	optionname: (OC_IPS_OK or OC_IPS_BAN) + description
+ *	optionvalue: is the IP address:EVENTNAME
+ * If you want to add the cclass subnet of an IP then add it separately
+ * 127.0.0.1 is hard coded OK in ckdb.c */
+void oc_ips(OPTIONCONTROL *oc, const char *from)
+{
+	char *colon;
+	IPS ips;
+	bool e;
+
+	colon = strchr(oc->optionvalue, ':');
+	if (!colon) {
+		LOGERR("%s(%s): ERR: Missing ':' after IP '%s' name '%s'",
+			from, __func__, oc->optionvalue, oc->optionname);
+	}
+	STRNCPY(ips.eventname, colon+1);
+
+	STRNCPY(ips.ip, oc->optionvalue);
+	colon = strchr(ips.ip, ':');
+	if (colon)
+		*colon = '\0';
+	
+	if (strncmp(oc->optionname, OC_IPS_OK, strlen(OC_IPS_OK)) == 0) {
+		e = is_elimitname(ips.eventname, true);
+		ips_add(IPS_GROUP_OK, ips.ip, ips.eventname, e,
+			oc->optionname, false, false, 0, false);
+	} else if (strncmp(oc->optionname, OC_IPS_BAN,
+			   strlen(OC_IPS_BAN)) == 0) {
+		e = is_elimitname(ips.eventname, true);
+		ips_add(IPS_GROUP_BAN, ips.ip, ips.eventname, e,
+			oc->optionname, false, false, 0, false);
+	} else {
+		LOGERR("%s(%s): ERR: Unknown %s name '%s'",
+			from, __func__, OC_IPS, oc->optionname);
+	}
+}
+
+OC_TRIGGER oc_trigger[] = {
+	{ SWITCH_STATE_NAME,	true,	oc_switch_state },
+	{ DIFF_PERCENT_NAME,	true,	oc_diff_percent },
+	{ OC_LIMITS,		false,	oc_event_limits },
+	{ OC_OLIMITS,		false,	oc_ovent_limits },
+	{ OC_IPS,		false,	oc_ips },
+	{ NULL, 0, NULL }
+};
+
+/* For oc items that aren't date/height controlled, and use global variables
+ *  rather than having to look up the value every time it's needed
+ * Called from within the write lock that loaded/added the oc_item */
+static void optioncontrol_trigger(K_ITEM *oc_item, const char *from)
+{
+	char cd_buf[DATE_BUFSIZ], cd2_buf[DATE_BUFSIZ];
+	OPTIONCONTROL *oc;
+	int got, i;
+
+	DATA_OPTIONCONTROL(oc, oc_item);
+	if (CURRENT(&(oc->expirydate))) {
+		got = -1;
+		for (i = 0; oc_trigger[i].match; i++) {
+			if (oc_trigger[i].exact) {
+				if (strcmp(oc->optionname,
+					   oc_trigger[i].match) == 0) {
+					got = i;
+					break;
+				}
+			} else {
+				if (strncmp(oc->optionname, oc_trigger[i].match,
+					    strlen(oc_trigger[i].match)) == 0) {
+					got = i;
+					break;
+				}
+			}
+		}
+		if (got > -1) {
+			// If it's date/height controlled, display an ERR
+			if (oc->activationheight != OPTIONCONTROL_HEIGHT ||
+			    tv_newer(&date_begin, &(oc->activationdate)))
+			{
+				tv_to_buf(&(oc->activationdate), cd_buf,
+					  sizeof(cd_buf));
+				tv_to_buf((tv_t *)&date_begin, cd2_buf,
+					  sizeof(cd_buf));
+				LOGERR("%s(%s) ERR: ignored '%s' - has "
+					"height %"PRId32" & date '%s' - "
+					"expect height %d & date <= '%s'",
+					from, __func__, oc->optionname,
+					oc->activationheight, cd_buf,
+					OPTIONCONTROL_HEIGHT, cd2_buf);
+			} else
+				oc_trigger[i].func(oc, from);
+		}
+	}
+}
+
 K_ITEM *optioncontrol_item_add(PGconn *conn, K_ITEM *oc_item, tv_t *cd, bool begun)
 {
 	ExecStatusType rescode;
@@ -2457,13 +2737,6 @@ K_ITEM *optioncontrol_item_add(PGconn *conn, K_ITEM *oc_item, tv_t *cd, bool beg
 		row->activationdate.tv_sec = date_begin.tv_sec;
 		row->activationdate.tv_usec = date_begin.tv_usec;
 		row->activationheight = OPTIONCONTROL_HEIGHT;
-	}
-
-	// Update if it's changed
-	if (strcmp(row->optionname, DIFF_PERCENT_NAME) == 0) {
-		diff_percent = DIFF_VAL(strtod(row->optionvalue, NULL));
-		if (errno == ERANGE)
-			diff_percent = DIFF_VAL(DIFF_PERCENT_DEFAULT);
 	}
 
 	INIT_OPTIONCONTROL(&look);
@@ -2549,6 +2822,8 @@ nostart:
 	for (n = 0; n < par; n++)
 		free(params[n]);
 
+	/* N.B. if the DB update fails,
+	 *	optioncontrol_trigger() will not be called */
 	K_WLOCK(optioncontrol_free);
 	if (!ok) {
 		// Cleanup item passed in
@@ -2564,11 +2839,8 @@ nostart:
 		}
 		add_to_ktree(optioncontrol_root, oc_item);
 		k_add_head(optioncontrol_store, oc_item);
-		if (strcmp(row->optionname, SWITCH_STATE_NAME) == 0) {
-			switch_state = atoi(row->optionvalue);
-			LOGWARNING("%s() set switch_state to %d",
-				   __func__, switch_state);
-		}
+
+		optioncontrol_trigger(oc_item, __func__);
 	}
 	K_WUNLOCK(optioncontrol_free);
 
@@ -2622,8 +2894,10 @@ bool optioncontrol_fill(PGconn *conn)
 	PGresult *res;
 	K_ITEM *item;
 	OPTIONCONTROL *row;
+	K_TREE_CTX ctx[1];
+	IPS *ips;
 	char *params[1];
-	int n, i, par = 0;
+	int n, i, par = 0, ban_count, ok_count;
 	char *field;
 	char *sel;
 	int fields = 4;
@@ -2697,21 +2971,7 @@ bool optioncontrol_fill(PGconn *conn)
 		add_to_ktree(optioncontrol_root, item);
 		k_add_head(optioncontrol_store, item);
 
-		// There should only be one CURRENT version of switch_state
-		if (CURRENT(&(row->expirydate)) &&
-		    strcmp(row->optionname, SWITCH_STATE_NAME) == 0) {
-			switch_state = atoi(row->optionvalue);
-			LOGWARNING("%s() set switch_state to %d",
-				   __func__, switch_state);
-		}
-
-		// The last loaded CURRENT value will be used
-		if (CURRENT(&(row->expirydate)) &&
-		    strcmp(row->optionname, DIFF_PERCENT_NAME) == 0) {
-			diff_percent = DIFF_VAL(strtod(row->optionvalue, NULL));
-			if (errno == ERANGE)
-				diff_percent = DIFF_VAL(DIFF_PERCENT_DEFAULT);
-		}
+		optioncontrol_trigger(item, __func__);
 	}
 	if (!ok) {
 		free_optioncontrol_data(item);
@@ -2726,6 +2986,25 @@ bool optioncontrol_fill(PGconn *conn)
 		LOGWARNING("%s(): loaded %d optioncontrol records", __func__, n);
 		LOGWARNING("%s() switch_state initially %d",
 			   __func__, switch_state);
+
+		ok_count = ban_count = 0;
+		K_RLOCK(ips_free);
+		item = first_in_ktree(ips_root, ctx);
+		while (item) {
+			DATA_IPS(ips, item);
+			if (CURRENT(&(ips->expirydate))) {
+				if (strcmp(ips->group, IPS_GROUP_OK) == 0)
+					ok_count++;
+				else if (strcmp(ips->group, IPS_GROUP_BAN) == 0)
+					ban_count++;
+			}
+			item = next_in_ktree(ctx);
+		}
+		K_RUNLOCK(ips_free);
+
+		LOGWARNING("%s() IPS: %s:%d %s:%d",
+			   __func__, IPS_GROUP_OK, ok_count,
+			   IPS_GROUP_BAN, ban_count);
 	}
 
 	return ok;
@@ -2938,6 +3217,14 @@ bool workinfo_fill(PGconn *conn)
 	if (!PGOK(rescode)) {
 		PGLOGERR("Begin", rescode, conn);
 		return false;
+	}
+
+	res = PQexec(conn, "Lock table workinfo in access exclusive mode", CKPQ_READ);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Lock", rescode, conn);
+		goto flail;
 	}
 
 	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
@@ -5465,6 +5752,14 @@ bool miningpayouts_fill(PGconn *conn)
 		return false;
 	}
 
+	res = PQexec(conn, "Lock table miningpayouts in access exclusive mode", CKPQ_READ);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Lock", rescode, conn);
+		goto flail;
+	}
+
 	res = PQexec(conn, sel, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	PQclear(res);
@@ -6125,12 +6420,344 @@ bool payouts_fill(PGconn *conn)
 	return ok;
 }
 
+// trf_root overrides by,inet,cd fields
+int _events_add(int id, char *by, char *inet, tv_t *cd, K_TREE *trf_root)
+{
+	K_ITEM look, *e_item, *i_passwordhash, *i_webtime, *i_username;
+	K_TREE_CTX ctx[1];
+	EVENTS events, *d_events;
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+
+	LOGDEBUG("%s(): add", __func__);
+
+	if (e_limits[id].enabled == false)
+		return EVENT_OK;
+
+	bzero(&events, sizeof(events));
+	events.id = id;
+	events.expirydate.tv_sec = default_expiry.tv_sec;
+	events.expirydate.tv_usec = default_expiry.tv_usec;
+
+	// Default to now if not specified
+	setnow(&(events.createdate));
+
+	if (by)
+		STRNCPY(events.createby, by);
+
+	if (inet)
+		STRNCPY(events.createinet, inet);
+
+	if (cd)
+		copy_tv(&(events.createdate), cd);
+
+	// trf_root values overrides parameters
+	HISTORYDATETRANSFER(trf_root, &events);
+
+	// username overrides createby
+	i_username = optional_name(trf_root, "username", 1, NULL,
+					reply, siz);
+	if (i_username)
+		STRNCPY(events.createby, transfer_data(i_username));
+
+	// webtime overrides
+	i_webtime = optional_name(trf_root, "webtime", 1, NULL,
+					reply, siz);
+	if (i_webtime) {
+		TXT_TO_CTV("webtime", transfer_data(i_webtime),
+			  events.createdate);
+	}
+
+	/* We don't care if it's valid or not, though php should have
+	 *  already ensured it's valid */
+	i_passwordhash = optional_name(trf_root, "passwordhash", 1, NULL,
+					reply, siz);
+	if (i_passwordhash)
+		STRNCPY(events.hash, transfer_data(i_passwordhash));
+
+	if (events.createinet[0]) {
+		char *dot;
+		STRNCPY(events.ipc, events.createinet);
+		dot = strchr(events.ipc, '.');
+		if (dot) {
+			dot = strchr(dot+1, '.');
+			if (dot) {
+				dot = strchr(dot+1, '.');
+				if (dot)
+					*(dot+1) = '\0';
+			}
+		}
+	}
+
+	// Only store an event that had actual usable data
+	if (!events.createby[0] && !events.createinet[0] &&
+	    !events.ipc[0] && !events.hash[0])
+		return EVENT_OK;
+
+	INIT_EVENTS(&look);
+	look.data = (void *)(&events);
+
+	// All processing under lock - since we must be able to delete events
+	K_WLOCK(events_free);
+	// keep looping incrementing the usec time until it's not a duplicate
+	while (find_in_ktree(events_user_root, &look, ctx) ||
+	       find_in_ktree(events_ip_root, &look, ctx) ||
+	       find_in_ktree(events_ipc_root, &look, ctx) ||
+	       find_in_ktree(events_hash_root, &look, ctx)) {
+		if (++events.createdate.tv_usec >= 1000000) {
+			events.createdate.tv_usec -= 1000000;
+			events.createdate.tv_sec++;
+		}
+	}
+	e_item = k_unlink_head(events_free);
+	DATA_EVENTS(d_events, e_item);
+	COPY_DATA(d_events, &events);
+	k_add_head(events_store, e_item);
+	if (d_events->createby[0]) {
+		add_to_ktree(events_user_root, e_item);
+		d_events->trees++;
+	}
+	if (d_events->createinet[0]) {
+		add_to_ktree(events_ip_root, e_item);
+		d_events->trees++;
+	}
+	// Don't bother if it's the same as IP
+	if (d_events->ipc[0] &&
+	    strcmp(d_events->ipc, d_events->createinet) != 0) {
+		add_to_ktree(events_ipc_root, e_item);
+		d_events->trees++;
+	}
+	if (d_events->hash[0]) {
+		add_to_ktree(events_hash_root, e_item);
+		d_events->trees++;
+	}
+	K_WUNLOCK(events_free);
+
+	return check_events(&events);
+}
+
+// trf_root overrides by,inet,cd fields
+int _ovents_add(int id, char *by, char *inet, tv_t *cd, K_TREE *trf_root)
+{
+	K_ITEM *o_item, *i_webtime, *i_username;
+	OVENTS ovents, *d_ovents;
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	char u_key[TXT_SML+1], i_key[TXT_SML+1], c_key[TXT_SML+1];
+	int hour, min;
+	bool gotc;
+
+	LOGDEBUG("%s(): add", __func__);
+
+	if (o_limits[id].enabled == false)
+		return EVENT_OK;
+
+	bzero(&ovents, sizeof(ovents));
+
+	// Default to now if not specified
+	setnow(&(ovents.createdate));
+
+	if (by)
+		STRNCPY(ovents.createby, by);
+
+	if (inet)
+		STRNCPY(ovents.createinet, inet);
+
+	if (cd)
+		copy_tv(&(ovents.createdate), cd);
+
+	// trf_root values overrides parameters
+	HISTORYDATETRANSFER(trf_root, &ovents);
+
+	// username overrides createby
+	i_username = optional_name(trf_root, "username", 1, NULL,
+					reply, siz);
+	if (i_username)
+		STRNCPY(ovents.createby, transfer_data(i_username));
+
+	// webtime overrides
+	i_webtime = optional_name(trf_root, "webtime", 1, NULL,
+					reply, siz);
+	if (i_webtime) {
+		TXT_TO_CTV("webtime", transfer_data(i_webtime),
+			  ovents.createdate);
+	}
+
+	STRNCPY(u_key, ovents.createby);
+	STRNCPY(i_key, ovents.createinet);
+	gotc = false;
+	if (i_key[0]) {
+		char *dot;
+		STRNCPY(c_key, i_key);
+		dot = strchr(c_key, '.');
+		if (dot) {
+			dot = strchr(dot+1, '.');
+			if (dot) {
+				dot = strchr(dot+1, '.');
+				if (dot) {
+					*(dot+1) = '\0';
+					gotc = true;
+				}
+			}
+		}
+	}
+	if (!gotc)
+		c_key[0] = '\0';
+
+	if (!u_key[0] && !i_key[0] && !c_key[0])
+		return OVENT_OK;
+
+	hour = TV_TO_HOUR(&(ovents.createdate));
+	min = TV_TO_MIN(&(ovents.createdate));
+
+	K_WLOCK(ovents_free);
+	if (u_key[0] && strcmp(u_key, ANON_USER) != 0) {
+		o_item = find_ovents(u_key, hour, NULL);
+		if (o_item) {
+			DATA_OVENTS(d_ovents, o_item);
+			d_ovents->count[IDMIN(id, min)]++;
+		} else {
+			o_item = k_unlink_head(ovents_free);
+			DATA_OVENTS(d_ovents, o_item);
+			bzero(d_ovents, sizeof(*d_ovents));
+			STRNCPY(d_ovents->key, u_key);
+			d_ovents->hour = hour;
+			d_ovents->count[IDMIN(id, min)]++;
+			copy_tv(&(d_ovents->createdate), &(ovents.createdate));
+			STRNCPY(d_ovents->createby, ovents.createby);
+			STRNCPY(d_ovents->createinet, ovents.createinet);
+			copy_tv(&(d_ovents->expirydate), &default_expiry);
+			k_add_head(ovents_store, o_item);
+			add_to_ktree(ovents_root, o_item);
+		}
+	}
+
+	if (i_key[0]) {
+		o_item = find_ovents(i_key, hour, NULL);
+		if (o_item) {
+			DATA_OVENTS(d_ovents, o_item);
+			d_ovents->count[IDMIN(id, min)]++;
+		} else {
+			o_item = k_unlink_head(ovents_free);
+			DATA_OVENTS(d_ovents, o_item);
+			bzero(d_ovents, sizeof(*d_ovents));
+			STRNCPY(d_ovents->key, i_key);
+			d_ovents->hour = hour;
+			d_ovents->count[IDMIN(id, min)]++;
+			copy_tv(&(d_ovents->createdate), &(ovents.createdate));
+			STRNCPY(d_ovents->createby, ovents.createby);
+			STRNCPY(d_ovents->createinet, ovents.createinet);
+			copy_tv(&(d_ovents->expirydate), &default_expiry);
+			k_add_head(ovents_store, o_item);
+			add_to_ktree(ovents_root, o_item);
+		}
+	}
+
+	if (c_key[0]) {
+		o_item = find_ovents(c_key, hour, NULL);
+		if (o_item) {
+			DATA_OVENTS(d_ovents, o_item);
+			d_ovents->count[IDMIN(id, min)]++;
+		} else {
+			o_item = k_unlink_head(ovents_free);
+			DATA_OVENTS(d_ovents, o_item);
+			bzero(d_ovents, sizeof(*d_ovents));
+			STRNCPY(d_ovents->key, c_key);
+			d_ovents->hour = hour;
+			d_ovents->count[IDMIN(id, min)]++;
+			copy_tv(&(d_ovents->createdate), &(ovents.createdate));
+			STRNCPY(d_ovents->createby, ovents.createby);
+			STRNCPY(d_ovents->createinet, ovents.createinet);
+			copy_tv(&(d_ovents->expirydate), &default_expiry);
+			k_add_head(ovents_store, o_item);
+			add_to_ktree(ovents_root, o_item);
+		}
+	}
+	K_WUNLOCK(ovents_free);
+
+	return check_ovents(id, u_key, i_key, c_key, &(ovents.createdate));
+}
+
+void ips_add(char *group, char *ip, char *eventname, bool is_event, char *des,
+		bool log, bool cclass, int life, bool locked)
+{
+	K_ITEM *i_item, *i2_item;
+	IPS *ips, *ips2;
+	char *dot;
+	tv_t now;
+	bool ok;
+
+	if (is_event) {
+		if (!is_elimitname(eventname, true)) {
+			LOGERR("%s() invalid Event name '%s' - ignored",
+				__func__, eventname);
+			return;
+		}
+	} else {
+		if (!is_olimitname(eventname, true)) {
+			LOGERR("%s() invalid Ovent name '%s' - ignored",
+				__func__, eventname);
+			return;
+		}
+	}
+
+	setnow(&now);
+	if (!locked)
+		K_WLOCK(ips_free);
+	i_item = k_unlink_head(ips_free);
+	DATA_IPS(ips, i_item);
+	STRNCPY(ips->group, group);
+	STRNCPY(ips->ip, ip);
+	STRNCPY(ips->eventname, eventname);
+	ips->is_event = is_event;
+	if (des) {
+		ips->description = strdup(des);
+		if (!ips->description)
+			quithere(1, "strdup OOM");
+		LIST_MEM_ADD(ips_free, ips->description);
+	}
+	ips->log = log;
+	ips->lifetime = life;
+	HISTORYDATEDEFAULT(ips, &now);
+	add_to_ktree(ips_root, i_item);
+	k_add_head(ips_store, i_item);
+	if (cclass) {
+		i2_item = k_unlink_head(ips_free);
+		DATA_IPS(ips2, i2_item);
+		memcpy(ips2, ips, sizeof(*ips2));
+		ok = false;
+		dot = strchr(ips->ip, '.');
+		if (dot) {
+			dot = strchr(dot+1, '.');
+			if (dot) {
+				dot = strchr(dot+1, '.');
+				if (dot) {
+					*(dot+1) = '\0';
+					ok = true;
+				}
+			}
+		}
+		if (ok) {
+			if (des) {
+				ips2->description = strdup(des);
+				LIST_MEM_ADD(ips_free, ips2->description);
+			}
+			add_to_ktree(ips_root, i2_item);
+			k_add_head(ips_store, i2_item);
+		} else
+			k_add_head(ips_free, i2_item);
+	}
+	if (!locked)
+		K_WUNLOCK(ips_free);
+}
+
 // TODO: discard them from RAM
 bool auths_add(PGconn *conn, char *poolinstance, char *username,
 		char *workername, char *clientid, char *enonce1,
 		char *useragent, char *preauth, char *by, char *code,
 		char *inet, tv_t *cd, K_TREE *trf_root,
-		bool addressuser, USERS **users, WORKERS **workers)
+		bool addressuser, USERS **users, WORKERS **workers,
+		int *event)
 {
 	K_TREE_CTX ctx[1];
 	K_ITEM *a_item, *u_item, *w_item;
@@ -6161,6 +6788,7 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 				 __func__,
 				 st = safe_text_nonull(username));
 			FREENULL(st);
+			*event = events_add(EVENTID_INVAUTH, trf_root);
 		}
 		if (!u_item)
 			goto unitem;
@@ -6795,9 +7423,6 @@ bool markersummary_fill(PGconn *conn)
 
 	LOGDEBUG("%s(): select", __func__);
 
-	printf(TICK_PREFIX"ms 0\r");
-	fflush(stdout);
-
 	// TODO: limit how far back
 	sel = "declare ws cursor for select "
 		"markerid,userid,workername,diffacc,diffsta,diffdup,diffhi,"
@@ -6815,12 +7440,23 @@ bool markersummary_fill(PGconn *conn)
 
 	LOGWARNING("%s(): loading from markerid>=%s", __func__, params[0]);
 
+	printf(TICK_PREFIX"ms 0\r");
+	fflush(stdout);
+
 	res = PQexec(conn, "Begin", CKPQ_READ);
 	rescode = PQresultStatus(res);
 	PQclear(res);
 	if (!PGOK(rescode)) {
 		PGLOGERR("Begin", rescode, conn);
 		return false;
+	}
+
+	res = PQexec(conn, "Lock table markersummary in access exclusive mode", CKPQ_READ);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Lock", rescode, conn);
+		goto flail;
 	}
 
 	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);

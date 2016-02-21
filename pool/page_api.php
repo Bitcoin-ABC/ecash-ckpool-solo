@@ -23,6 +23,7 @@ function show_api($info, $page, $menu, $name, $user)
  $ans = getAtts($u, 'KAPIKey.str');
  if ($ans['STATUS'] != 'ok')
 	no_api($jfu);
+ # TODO: pass $api to ckdb to produce an invalid Key event
  if (!isset($ans['KAPIKey.str']))
 	no_api($jfu);
  if ($ans['KAPIKey.str'] != $api)
