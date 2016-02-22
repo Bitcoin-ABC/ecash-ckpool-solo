@@ -112,6 +112,7 @@ static void *ckmsg_queue(void *arg)
 
 	pthread_detach(pthread_self());
 	rename_proc(ckmsgq->name);
+	ckmsgq->active = true;
 
 	while (42) {
 		ckmsg_t *msg;
@@ -181,8 +182,18 @@ ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, cons
  * ckmsgq parsing thread(s) to wake up and process it. */
 void ckmsgq_add(ckmsgq_t *ckmsgq, void *data)
 {
-	ckmsg_t *msg = ckalloc(sizeof(ckmsg_t));
+	ckmsg_t *msg;
 
+	if (unlikely(!ckmsgq)) {
+		/* Discard data if we're unlucky enough to be sending it to
+		 * msg queues not set up during start up */
+		free(data);
+		return;
+	}
+	while (unlikely(!ckmsgq->active))
+		cksleep_ms(10);
+
+	msg = ckalloc(sizeof(ckmsg_t));
 	msg->data = data;
 
 	mutex_lock(ckmsgq->lock);
@@ -197,11 +208,14 @@ bool ckmsgq_empty(ckmsgq_t *ckmsgq)
 {
 	bool ret = true;
 
+	if (unlikely(!ckmsgq || !ckmsgq->active))
+		goto out;
+
 	mutex_lock(ckmsgq->lock);
 	if (ckmsgq->msgs)
 		ret = (ckmsgq->msgs->next == ckmsgq->msgs->prev);
 	mutex_unlock(ckmsgq->lock);
-
+out:
 	return ret;
 }
 
