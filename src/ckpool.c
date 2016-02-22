@@ -601,7 +601,7 @@ static int recv_available(ckpool_t *ckp, connsock_t *cs)
 int read_socket_line(connsock_t *cs, float *timeout)
 {
 	ckpool_t *ckp = cs->ckp;
-	bool proxy = ckp->proxy;
+	bool quiet = ckp->proxy | ckp->remote;
 	char *eom = NULL;
 	tv_t start, now;
 	float diff;
@@ -620,7 +620,7 @@ int read_socket_line(connsock_t *cs, float *timeout)
 		}
 
 		if (*timeout < 0) {
-			if (proxy)
+			if (quiet)
 				LOGINFO("Timed out in read_socket_line");
 			else
 				LOGERR("Timed out in read_socket_line");
@@ -629,7 +629,7 @@ int read_socket_line(connsock_t *cs, float *timeout)
 		}
 		ret = wait_read_select(cs->fd, *timeout);
 		if (ret < 1) {
-			if (proxy)
+			if (quiet)
 				LOGINFO("Select %s in read_socket_line", !ret ? "timed out" : "failed");
 			else
 				LOGERR("Select %s in read_socket_line", !ret ? "timed out" : "failed");
@@ -640,7 +640,7 @@ int read_socket_line(connsock_t *cs, float *timeout)
 			/* If we have done wait_read_select there should be
 			 * something to read and if we get nothing it means the
 			 * socket is closed. */
-			if (proxy)
+			if (quiet)
 				LOGINFO("Failed to recv in read_socket_line");
 			else
 				LOGERR("Failed to recv in read_socket_line");

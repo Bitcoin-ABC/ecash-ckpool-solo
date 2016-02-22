@@ -1135,8 +1135,6 @@ static void *urecv_process(void *arg)
 	connsock_t *cs = &cdata->upstream_cs;
 	bool alive = true;
 
-	ckp->proxy = true;
-
 	rename_proc("ureceiver");
 
 	pthread_detach(pthread_self());
