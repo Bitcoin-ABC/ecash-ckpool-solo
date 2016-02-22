@@ -20,6 +20,8 @@
 #include "libckpool.h"
 #include "uthash.h"
 #include "utlist.h"
+#include "stratifier.h"
+#include "generator.h"
 
 #define MAX_MSGSIZE 1024
 
@@ -365,15 +367,11 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 static void generator_drop_client(ckpool_t *ckp, const client_instance_t *client)
 {
 	json_t *val;
-	char *s;
 
 	JSON_CPACK(val, "{si,sI:ss:si:ss:s[]}", "id", 42, "client_id", client->id, "address",
 		   client->address_name, "server", client->server, "method", "mining.term",
 		   "params");
-	s = json_dumps(val, JSON_COMPACT);
-	json_decref(val);
-	send_proc(ckp->generator, s);
-	free(s);
+	generator_add_send(ckp, val);
 }
 
 static void stratifier_drop_id(ckpool_t *ckp, const int64_t id)
@@ -511,8 +509,6 @@ reparse:
 		send_client(cdata, client->id, buf);
 		return false;
 	} else {
-		char *s;
-
 		if (client->passthrough) {
 			int64_t passthrough_id;
 
@@ -526,20 +522,19 @@ reparse:
 			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
 		}
 		json_object_set_new_nocheck(val, "server", json_integer(client->server));
-		s = json_dumps(val, JSON_COMPACT);
 
 		/* Do not send messages of clients we've already dropped. We
 		 * do this unlocked as the occasional false negative can be
 		 * filtered by the stratifier. */
 		if (likely(!client->invalid)) {
-			if (!ckp->passthrough || ckp->node)
-				send_proc(ckp->stratifier, s);
+			if (!ckp->passthrough)
+				stratifier_add_recv(ckp, val);
+			if (ckp->node)
+				stratifier_add_recv(ckp, json_deep_copy(val));
 			if (ckp->passthrough)
-				send_proc(ckp->generator, s);
-		}
-
-		free(s);
-		json_decref(val);
+				generator_add_send(ckp, val);
+		} else
+			json_decref(val);
 	}
 	client->bufofs -= buflen;
 	if (client->bufofs)
@@ -572,7 +567,7 @@ static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
 {
 	const uint32_t events = event->events;
 	const uint64_t id = event->data.u64;
-	cdata_t *cdata = ckp->data;
+	cdata_t *cdata = ckp->cdata;
 	client_instance_t *client;
 
 	client = ref_client_by_id(cdata, id);
@@ -688,7 +683,6 @@ static void *receiver(void *arg)
 	}
 out:
 	/* We shouldn't get here unless there's an error */
-	childsighandler(15);
 	return NULL;
 }
 
@@ -797,7 +791,6 @@ static void *sender(void *arg)
 		mutex_unlock(&cdata->sender_lock);
 	}
 	/* We shouldn't get here unless there's an error */
-	childsighandler(15);
 	return NULL;
 }
 
@@ -828,7 +821,7 @@ static int add_redirect(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client
 static void redirect_client(ckpool_t *ckp, client_instance_t *client)
 {
 	sender_send_t *sender_send;
-	cdata_t *cdata = ckp->data;
+	cdata_t *cdata = ckp->cdata;
 	json_t *val;
 	char *buf;
 	int num;
@@ -970,17 +963,13 @@ static void send_client(cdata_t *cdata, const int64_t id, char *buf)
 		}
 		if (ckp->node) {
 			json_t *val = json_loads(buf, 0, NULL);
-			char *msg;
 
 			if (!val) // Can happen if client sent invalid json message
 				goto out;
 			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
 			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
 			json_object_set_new_nocheck(val, "server", json_integer(client->server));
-			msg = json_dumps(val, JSON_COMPACT);
-			json_decref(val);
-			send_proc(ckp->stratifier, msg);
-			free(msg);
+			stratifier_add_recv(ckp, val);
 		}
 		if (ckp->redirector && !client->redirected)
 			test_redirector_shares(ckp, client, buf);
@@ -1092,7 +1081,7 @@ out:
 
 static void usend_process(ckpool_t *ckp, char *buf)
 {
-	cdata_t *cdata = ckp->data;
+	cdata_t *cdata = ckp->cdata;
 	connsock_t *cs = &cdata->upstream_cs;
 	int len, sent;
 
@@ -1142,7 +1131,7 @@ static void ping_upstream(cdata_t *cdata)
 static void *urecv_process(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
-	cdata_t *cdata = ckp->data;
+	cdata_t *cdata = ckp->cdata;
 	connsock_t *cs = &cdata->upstream_cs;
 	bool alive = true;
 
@@ -1229,16 +1218,10 @@ out:
 	return ret;
 }
 
-static void client_message_processor(ckpool_t *ckp, char *buf)
+static void client_message_processor(ckpool_t *ckp, json_t *json_msg)
 {
-	json_t *json_msg = json_loads(buf, 0, NULL);
 	int64_t client_id;
 	char *msg;
-
-	if (unlikely(!json_msg)) {
-		LOGWARNING("Invalid json message in process_client_msg: %s", buf);
-		goto out;
-	}
 
 	/* Extract the client id from the json message and remove its entry */
 	client_id = json_integer_value(json_object_get(json_msg, "client_id"));
@@ -1249,10 +1232,15 @@ static void client_message_processor(ckpool_t *ckp, char *buf)
 		json_object_set_new_nocheck(json_msg, "client_id", json_integer(client_id & 0xffffffffll));
 
 	msg = json_dumps(json_msg, JSON_EOL | JSON_COMPACT);
-	send_client(ckp->data, client_id, msg);
+	send_client(ckp->cdata, client_id, msg);
 	json_decref(json_msg);
-out:
-	free(buf);
+}
+
+void connector_add_message(ckpool_t *ckp, json_t *val)
+{
+	cdata_t *cdata = ckp->cdata;
+
+	ckmsgq_add(cdata->cmpq, val);
 }
 
 /* Send the passthrough the terminate node.method */
@@ -1364,8 +1352,9 @@ retry:
 	/* The bulk of the messages will be json messages to send to clients
 	 * so look for them first. */
 	if (likely(buf[0] == '{')) {
-		ckmsgq_add(cdata->cmpq, buf);
-		umsg->buf = NULL;
+		json_t *val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+
+		ckmsgq_add(cdata->cmpq, val);
 	} else if (cmdmatch(buf, "upstream=")) {
 		char *msg = strdup(buf + 9);
 
@@ -1469,26 +1458,26 @@ out:
 	return ret;
 }
 
-int connector(proc_instance_t *pi)
+void *connector(void *arg)
 {
+	proc_instance_t *pi = (proc_instance_t *)arg;
 	cdata_t *cdata = ckzalloc(sizeof(cdata_t));
 	int threads, sockd, ret = 0, i, tries = 0;
+	char newurl[INET6_ADDRSTRLEN], newport[8];
 	ckpool_t *ckp = pi->ckp;
 	const int on = 1;
 
+	rename_proc(pi->processname);
 	LOGWARNING("%s connector starting", ckp->name);
-	ckp->data = cdata;
+	ckp->cdata = cdata;
 	cdata->ckp = ckp;
-
-	if (!ckp->serverurls)
-		cdata->serverfd = ckalloc(sizeof(int *));
-	else
-		cdata->serverfd = ckalloc(sizeof(int *) * ckp->serverurls);
 
 	if (!ckp->serverurls) {
 		/* No serverurls have been specified. Bind to all interfaces
 		 * on default sockets. */
 		struct sockaddr_in serv_addr;
+
+		cdata->serverfd = ckalloc(sizeof(int *));
 
 		sockd = socket(AF_INET, SOCK_STREAM, 0);
 		if (sockd < 0) {
@@ -1521,11 +1510,14 @@ int connector(proc_instance_t *pi)
 			goto out;
 		}
 		cdata->serverfd[0] = sockd;
+		url_from_socket(sockd, newurl, newport);
+		ASPRINTF(&ckp->serverurl[0], "%s:%s", newurl, newport);
 		ckp->serverurls = 1;
 	} else {
+		cdata->serverfd = ckalloc(sizeof(int *) * ckp->serverurls);
+
 		for (i = 0; i < ckp->serverurls; i++) {
 			char oldurl[INET6_ADDRSTRLEN], oldport[8];
-			char newurl[INET6_ADDRSTRLEN], newport[8];
 			char *serverurl = ckp->serverurl[i];
 
 			if (!url_from_serverurl(serverurl, newurl, newport)) {
@@ -1593,6 +1585,6 @@ int connector(proc_instance_t *pi)
 
 	ret = connector_loop(pi, cdata);
 out:
-	dealloc(ckp->data);
-	return process_exit(ckp, pi, ret);
+	dealloc(ckp->cdata);
+	return NULL;
 }

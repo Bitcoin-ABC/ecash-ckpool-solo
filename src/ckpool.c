@@ -227,7 +227,6 @@ static void *unix_receiver(void *arg)
 		sockd = accept(rsockd, NULL, NULL);
 		if (unlikely(sockd < 0)) {
 			LOGEMERG("Failed to accept on %s socket, exiting", qname);
-			childsighandler(15);
 			break;
 		}
 		buf = recv_unix_msg(sockd);
@@ -283,17 +282,6 @@ void create_unix_receiver(proc_instance_t *pi)
 	create_pthread(&pth, unix_receiver, pi);
 }
 
-static void broadcast_proc(ckpool_t *ckp, const char *buf)
-{
-	int i;
-
-	for (i = 0; i < ckp->proc_instances; i++) {
-		proc_instance_t *pi = ckp->children[i];
-
-		send_proc(pi, buf);
-	}
-}
-
 /* Put a sanity check on kill calls to make sure we are not sending them to
  * pid 0. */
 static int kill_pid(const int pid, const int sig)
@@ -318,62 +306,40 @@ static int pid_wait(const pid_t pid, const int ms)
 	return ret;
 }
 
-static int get_proc_pid(const proc_instance_t *pi)
-{
-	int ret, pid = 0;
-	char path[256];
-	FILE *fp;
-
-	sprintf(path, "%s%s.pid", pi->ckp->socket_dir, pi->processname);
-	fp = fopen(path, "re");
-	if (!fp)
-		goto out;
-	ret = fscanf(fp, "%d", &pid);
-	if (ret < 1)
-		pid = 0;
-	fclose(fp);
-out:
-	return pid;
-}
-
-static int send_procmsg(proc_instance_t *pi, const char *buf)
+static int _send_procmsg(proc_instance_t *pi, const char *buf, const char *file, const char *func, const int line)
 {
 	char *path = pi->us.path;
 	int ret = -1;
 	int sockd;
 
 	if (unlikely(!path || !strlen(path))) {
-		LOGERR("Attempted to send message %s to null path in send_proc", buf ? buf : "");
+		LOGERR("Attempted to send message %s to null path in send_proc from %s %s:%d",
+		       buf ? buf : "", file, func, line);
 		goto out;
 	}
 	if (unlikely(!buf || !strlen(buf))) {
-		LOGERR("Attempted to send null message to socket %s in send_proc", path);
-		goto out;
-	}
-	if (unlikely(!pi->pid)) {
-		pi->pid = get_proc_pid(pi);
-		if (!pi->pid)
-			goto out;
-
-	}
-	if (unlikely(kill_pid(pi->pid, 0))) {
-		LOGALERT("Attempting to send message %s to dead process %s", buf, pi->processname);
+		LOGERR("Attempted to send null message to socket %s in send_proc from %s %s:%d",
+		       path, file, func, line);
 		goto out;
 	}
 	sockd = open_unix_client(path);
 	if (unlikely(sockd < 0)) {
-		LOGWARNING("Failed to open socket %s in send_procmsg", path);
+		LOGWARNING("Failed to open socket %s in send_procmsg from %s %s:%d",
+			   path, file, func, line);
 		goto out;
 	}
 	if (unlikely(!send_unix_msg(sockd, buf)))
-		LOGWARNING("Failed to send %s to socket %s", buf, path);
+		LOGWARNING("Failed to send %s to socket %s from %s %s:%d", buf,
+			   path, file, func, line);
 	else
 		ret = sockd;
 out:
 	if (unlikely(ret == -1))
-		LOGERR("Failure in send_procmsg");
+		LOGERR("Failure in send_procmsg from %s %s:%d", file, func, line);
 	return ret;
 }
+
+#define send_procmsg(PI, BUF) _send_procmsg(&(PI), BUF, __FILE__, __func__, __LINE__)
 
 static void api_message(ckpool_t *ckp, char **buf, int *sockd)
 {
@@ -429,7 +395,6 @@ retry:
 			send_unix_msg(sockd, "Invalid");
 		} else {
 			ckp->loglevel = loglevel;
-			broadcast_proc(ckp, buf);
 			send_unix_msg(sockd, "success");
 		}
 	} else if (cmdmatch(buf, "getxfd")) {
@@ -493,19 +458,6 @@ out:
 	dealloc(buf);
 	close_unix_socket(us->sockd, us->path);
 	return NULL;
-}
-
-bool ping_main(ckpool_t *ckp)
-{
-	char *buf;
-
-	if (unlikely(kill_pid(ckp->main.pid, 0)))
-		return false;
-	buf = send_recv_proc(&ckp->main, "ping");
-	if (unlikely(!buf))
-		return false;
-	free(buf);
-	return true;
 }
 
 void empty_buffer(connsock_t *cs)
@@ -719,7 +671,7 @@ out:
 
 /* Send a single message to a process instance when there will be no response,
  * closing the socket immediately. */
-void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line)
+void _send_proc(const proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line)
 {
 	char *path = pi->us.path;
 	bool ret = false;
@@ -735,20 +687,6 @@ void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const ch
 		goto out;
 	}
 
-	/* At startup the pid fields are not set up before some processes are
-	 * forked so they never inherit them. */
-	if (unlikely(!pi->pid)) {
-		pi->pid = get_proc_pid(pi);
-		if (!pi->pid) {
-			LOGALERT("Attempting to send message %s to non existent process %s", msg, pi->processname);
-			return;
-		}
-	}
-	if (unlikely(kill_pid(pi->pid, 0))) {
-		LOGALERT("Attempting to send message %s to non existent process %s pid %d",
-			 msg, pi->processname, pi->pid);
-		goto out;
-	}
 	sockd = open_unix_client(path);
 	if (unlikely(sockd < 0)) {
 		LOGWARNING("Failed to open socket %s", path);
@@ -766,7 +704,7 @@ out:
 
 /* Send a single message to a process instance and retrieve the response, then
  * close the socket. */
-char *_send_recv_proc(proc_instance_t *pi, const char *msg, int writetimeout, int readtimedout,
+char *_send_recv_proc(const proc_instance_t *pi, const char *msg, int writetimeout, int readtimedout,
 		      const char *file, const char *func, const int line)
 {
 	char *path = pi->us.path, *buf = NULL;
@@ -778,18 +716,6 @@ char *_send_recv_proc(proc_instance_t *pi, const char *msg, int writetimeout, in
 	}
 	if (unlikely(!msg || !strlen(msg))) {
 		LOGERR("Attempted to send null message to socket %s in send_proc", path);
-		goto out;
-	}
-	if (unlikely(!pi->pid)) {
-		pi->pid = get_proc_pid(pi);
-		if (!pi->pid)
-			goto out;
-	}
-	if (unlikely(kill_pid(pi->pid, 0))) {
-		/* Reset the pid value in case we are still looking for an old
-		 * process */
-		pi->pid = 0;
-		LOGALERT("Attempting to send message %s to dead process %s", msg, pi->processname);
 		goto out;
 	}
 	sockd = open_unix_client(path);
@@ -1121,103 +1047,15 @@ static void rm_namepid(const proc_instance_t *pi)
 	unlink(s);
 }
 
-/* Disable signal handlers for child processes, but simply pass them onto the
- * parent process to shut down cleanly. */
-void childsighandler(const int sig)
+static void launch_logger(ckpool_t *ckp)
 {
-	signal(sig, SIG_IGN);
-	signal(SIGTERM, SIG_IGN);
-	if (sig != SIGUSR1) {
-		LOGWARNING("Child process received signal %d, forwarding signal to %s main process",
-			   sig, global_ckp->name);
-		kill_pid(global_ckp->main.pid, sig);
-	}
-	exit(0);
-}
-
-static void launch_logger(const proc_instance_t *pi)
-{
-	ckpool_t *ckp = pi->ckp;
-	char loggername[16];
-
-	/* Note that the logger is unique per process so it is the only value
-	 * in ckp that differs between processes */
-	snprintf(loggername, 15, "%clogger", pi->processname[0]);
-	ckp->logger = create_ckmsgq(ckp, loggername, &proclog);
-}
-
-static void launch_process(proc_instance_t *pi)
-{
-	pid_t pid;
-
-	pid = fork();
-	if (pid < 0)
-		quit(1, "Failed to fork %s in launch_process", pi->processname);
-	if (!pid) {
-		struct sigaction handler;
-		int ret;
-
-		json_set_alloc_funcs(json_ckalloc, free);
-		launch_logger(pi);
-		handler.sa_handler = &childsighandler;
-		handler.sa_flags = 0;
-		sigemptyset(&handler.sa_mask);
-		sigaction(SIGUSR1, &handler, NULL);
-		sigaction(SIGTERM, &handler, NULL);
-		signal(SIGINT, SIG_IGN);
-
-		rename_proc(pi->processname);
-		write_namepid(pi);
-		ret = pi->process(pi);
-		close_unix_socket(pi->us.sockd, pi->us.path);
-		rm_namepid(pi);
-		exit(ret);
-	}
-	pi->pid = pid;
-}
-
-static void launch_processes(const ckpool_t *ckp)
-{
-	int i;
-
-	for (i = 0; i < ckp->proc_instances; i++)
-		launch_process(ckp->children[i]);
-}
-
-int process_exit(ckpool_t *ckp, const proc_instance_t *pi, int ret)
-{
-	if (ret) {
-		/* Abnormal termination, kill entire process */
-		LOGWARNING("%s %s exiting with return code %d, shutting down!",
-			   ckp->name, pi->processname, ret);
-		send_proc(&ckp->main, "shutdown");
-		cksleep_ms(100);
-		ret = 1;
-	} else /* Should be part of a normal shutdown */
-		LOGNOTICE("%s %s exited normally", ckp->name, pi->processname);
-
-	return ret;
+	ckp->logger = create_ckmsgq(ckp, "logger", &proclog);
 }
 
 static void clean_up(ckpool_t *ckp)
 {
-	int i, children = ckp->proc_instances;
-
 	rm_namepid(&ckp->main);
 	dealloc(ckp->socket_dir);
-	ckp->proc_instances = 0;
-	for (i = 0; i < children; i++)
-		dealloc(ckp->children[i]);
-	dealloc(ckp->children);
-}
-
-static void cancel_join_pthread(pthread_t *pth)
-{
-	if (!pth || !*pth)
-		return;
-	pthread_cancel(*pth);
-	join_pthread(*pth);
-	pth = NULL;
 }
 
 static void cancel_pthread(pthread_t *pth)
@@ -1228,54 +1066,15 @@ static void cancel_pthread(pthread_t *pth)
 	pth = NULL;
 }
 
-static void wait_child(const pid_t *pid)
-{
-	int ret;
-
-	do {
-		ret = waitpid(*pid, NULL, 0);
-	} while (ret != *pid);
-}
-
-static void __shutdown_children(ckpool_t *ckp)
-{
-	int i;
-
-	cancel_join_pthread(&ckp->pth_watchdog);
-
-	/* They never got set up in the first place */
-	if (!ckp->children)
-		return;
-
-	/* Send the children a SIGUSR1 for them to shutdown gracefully, then
-	 * wait for them to exit and kill them if they don't for 500ms. */
-	for (i = 0; i < ckp->proc_instances; i++) {
-		pid_t pid = ckp->children[i]->pid;
-
-		kill_pid(pid, SIGUSR1);
-		if (!ck_completion_timeout(&wait_child, (void *)&pid, 500))
-			kill_pid(pid, SIGKILL);
-	}
-}
-
-static void shutdown_children(ckpool_t *ckp)
-{
-	cancel_join_pthread(&ckp->pth_watchdog);
-
-	__shutdown_children(ckp);
-}
-
 static void sighandler(const int sig)
 {
 	ckpool_t *ckp = global_ckp;
 
 	signal(sig, SIG_IGN);
 	signal(SIGTERM, SIG_IGN);
-	LOGWARNING("Parent process %s received signal %d, shutting down",
+	LOGWARNING("Process %s received signal %d, shutting down",
 		   ckp->name, sig);
-	cancel_join_pthread(&ckp->pth_watchdog);
 
-	__shutdown_children(ckp);
 	cancel_pthread(&ckp->pth_listener);
 	exit(0);
 }
@@ -1651,7 +1450,7 @@ static void parse_config(ckpool_t *ckp)
 	json_decref(json_conf);
 }
 
-static void manage_old_child(ckpool_t *ckp, proc_instance_t *pi)
+static void manage_old_instance(ckpool_t *ckp, proc_instance_t *pi)
 {
 	struct stat statbuf;
 	char path[256];
@@ -1679,85 +1478,13 @@ static void manage_old_child(ckpool_t *ckp, proc_instance_t *pi)
 	}
 }
 
-static proc_instance_t *prepare_child(ckpool_t *ckp, int (*process)(), char *name)
+static void prepare_child(ckpool_t *ckp, proc_instance_t *pi, void *process, char *name)
 {
-	proc_instance_t *pi = ckzalloc(sizeof(proc_instance_t));
-
-	ckp->children = realloc(ckp->children, sizeof(proc_instance_t *) * (ckp->proc_instances + 1));
-	ckp->children[ckp->proc_instances++] = pi;
 	pi->ckp = ckp;
 	pi->processname = name;
 	pi->sockname = pi->processname;
-	pi->process = process;
 	create_process_unixsock(pi);
-	manage_old_child(ckp, pi);
-	/* Remove the old pid file if we've succeeded in coming this far */
-	rm_namepid(pi);
-	return pi;
-}
-
-static proc_instance_t *child_by_pid(const ckpool_t *ckp, const pid_t pid)
-{
-	proc_instance_t *pi = NULL;
-	int i;
-
-	for (i = 0; i < ckp->proc_instances; i++) {
-		if (ckp->children[i]->pid == pid) {
-			pi = ckp->children[i];
-			break;
-		}
-	}
-	return pi;
-}
-
-static void *watchdog(void *arg)
-{
-#if 0
-	time_t last_relaunch_t = time(NULL);
-#endif
-	ckpool_t *ckp = (ckpool_t *)arg;
-
-	rename_proc("watchdog");
-	sleep(1);
-	while (42) {
-		proc_instance_t *pi;
-#if 0
-		time_t relaunch_t;
-#endif
-		int pid, status;
-
-		pid = waitpid(0, &status, 0);
-		pi = child_by_pid(ckp, pid);
-		if (pi && WIFEXITED(status)) {
-			LOGWARNING("Child process %s exited, terminating!", pi->processname);
-			break;
-		}
-#if 0
-		/* Don't bother trying to respawn for now since communication
-		 * breakdown between the processes will make them exit. */
-		relaunch_t = time(NULL);
-		if (relaunch_t == last_relaunch_t) {
-			LOGEMERG("Respawning processes too fast, exiting!");
-			break;
-		}
-		last_relaunch_t = relaunch_t;
-		if (pi) {
-			LOGERR("%s process dead! Relaunching", pi->processname);
-			launch_process(pi);
-		} else {
-			LOGEMERG("Unknown child process %d dead, exiting!", pid);
-			break;
-		}
-#else
-		if (pi)
-			LOGEMERG("%s process dead, terminating!", pi->processname);
-		else
-			LOGEMERG("Unknown child process %d dead, exiting!", pid);
-		break;
-#endif
-	}
-	send_proc(&ckp->main, "shutdown");
-	return NULL;
+	create_pthread(&pi->pth_process, process, pi);
 }
 
 #ifdef USE_CKDB
@@ -2138,10 +1865,10 @@ int main(int argc, char **argv)
 	}
 
 	if (!ckp.handover)
-		manage_old_child(&ckp, &ckp.main);
+		manage_old_instance(&ckp, &ckp.main);
 	write_namepid(&ckp.main);
 	open_process_sock(&ckp, &ckp.main, &ckp.main.us);
-	launch_logger(&ckp.main);
+	launch_logger(&ckp);
 	ckp.logfd = fileno(ckp.logfp);
 
 	ret = sysconf(_SC_OPEN_MAX);
@@ -2158,26 +1885,21 @@ int main(int argc, char **argv)
 	ckp.ckpapi = create_ckmsgq(&ckp, "api", &ckpool_api);
 	create_pthread(&ckp.pth_listener, listener, &ckp.main);
 
-	/* Launch separate processes from here */
-	ckp.generator = prepare_child(&ckp, &generator, "generator");
-	ckp.stratifier = prepare_child(&ckp, &stratifier, "stratifier");
-	ckp.connector = prepare_child(&ckp, &connector, "connector");
-
-	launch_processes(&ckp);
-
-	create_pthread(&ckp.pth_watchdog, watchdog, &ckp);
-
 	handler.sa_handler = &sighandler;
 	handler.sa_flags = 0;
 	sigemptyset(&handler.sa_mask);
 	sigaction(SIGTERM, &handler, NULL);
 	sigaction(SIGINT, &handler, NULL);
 
+	/* Launch separate processes from here */
+	prepare_child(&ckp, &ckp.generator, generator, "generator");
+	prepare_child(&ckp, &ckp.stratifier, stratifier, "stratifier");
+	prepare_child(&ckp, &ckp.connector, connector, "connector");
+
 	/* Shutdown from here if the listener is sent a shutdown message */
 	if (ckp.pth_listener)
 		join_pthread(ckp.pth_listener);
 
-	shutdown_children(&ckp);
 	clean_up(&ckp);
 
 	return 0;

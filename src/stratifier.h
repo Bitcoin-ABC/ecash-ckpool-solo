@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2016 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -10,6 +10,7 @@
 #ifndef STRATIFIER_H
 #define STRATIFIER_H
 
-int stratifier(proc_instance_t *pi);
+void stratifier_add_recv(ckpool_t *ckp, json_t *val);
+void *stratifier(void *arg);
 
 #endif /* STRATIFIER_H */

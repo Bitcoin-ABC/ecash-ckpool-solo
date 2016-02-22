@@ -63,7 +63,7 @@ struct proc_instance {
 	char *sockname;
 	int pid;
 	int oldpid;
-	int (*process)(proc_instance_t *);
+	pthread_t pth_process;
 
 	/* Linked list of received messages, locking and conditional */
 	unix_msg_t *unix_msgs;
@@ -169,17 +169,14 @@ struct ckpool_instance {
 	/* API message queue */
 	ckmsgq_t *ckpapi;
 
-	/* Logger message queue NOTE: Unique per process */
+	/* Logger message queue */
 	ckmsgq_t *logger;
 	/* Process instance data of parent/child processes */
 	proc_instance_t main;
 
-	int proc_instances;
-	proc_instance_t **children;
-
-	proc_instance_t *generator;
-	proc_instance_t *stratifier;
-	proc_instance_t *connector;
+	proc_instance_t generator;
+	proc_instance_t stratifier;
+	proc_instance_t connector;
 
 	/* Threads of main process */
 	pthread_t pth_listener;
@@ -259,7 +256,9 @@ struct ckpool_instance {
 	char **redirectport;
 
 	/* Private data for each process */
-	void *data;
+	void *gdata;
+	void *sdata;
+	void *cdata;
 };
 
 enum stratum_msgtype {
@@ -330,11 +329,11 @@ void empty_buffer(connsock_t *cs);
 int set_sendbufsize(ckpool_t *ckp, const int fd, const int len);
 int set_recvbufsize(ckpool_t *ckp, const int fd, const int len);
 int read_socket_line(connsock_t *cs, float *timeout);
-void _send_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
-#define send_proc(pi, msg) _send_proc(pi, msg, __FILE__, __func__, __LINE__)
-char *_send_recv_proc(proc_instance_t *pi, const char *msg, int writetimeout, int readtimedout,
+void _send_proc(const proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
+#define send_proc(pi, msg) _send_proc(&(pi), msg, __FILE__, __func__, __LINE__)
+char *_send_recv_proc(const proc_instance_t *pi, const char *msg, int writetimeout, int readtimedout,
 		      const char *file, const char *func, const int line);
-#define send_recv_proc(pi, msg) _send_recv_proc(pi, msg, UNIX_WRITE_TIMEOUT, UNIX_READ_TIMEOUT, __FILE__, __func__, __LINE__)
+#define send_recv_proc(pi, msg) _send_recv_proc(&(pi), msg, UNIX_WRITE_TIMEOUT, UNIX_READ_TIMEOUT, __FILE__, __func__, __LINE__)
 char *_send_recv_ckdb(const ckpool_t *ckp, const char *msg, const char *file, const char *func, const int line);
 #define send_recv_ckdb(ckp, msg) _send_recv_ckdb(ckp, msg, __FILE__, __func__, __LINE__)
 char *_ckdb_msg_call(const ckpool_t *ckp, const char *msg,  const char *file, const char *func,
@@ -345,8 +344,6 @@ json_t *json_rpc_call(connsock_t *cs, const char *rpc_req);
 bool send_json_msg(connsock_t *cs, const json_t *json_msg);
 json_t *json_msg_result(const char *msg, json_t **res_val, json_t **err_val);
 
-void childsighandler(const int sig);
-int process_exit(ckpool_t *ckp, const proc_instance_t *pi, int ret);
 bool json_get_string(char **store, const json_t *val, const char *res);
 bool json_get_int64(int64_t *store, const json_t *val, const char *res);
 bool json_get_int(int *store, const json_t *val, const char *res);

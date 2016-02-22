@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Con Kolivas
+ * Copyright 2014-2016 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -12,6 +12,7 @@
 
 #include "config.h"
 
-int generator(proc_instance_t *pi);
+void generator_add_send(ckpool_t *ckp, json_t *val);
+void *generator(void *arg);
 
 #endif /* GENERATOR_H */

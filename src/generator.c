@@ -163,6 +163,8 @@ struct generator_data {
 	mutex_t share_lock;
 	share_msg_t *shares;
 	int64_t share_id;
+
+	proxy_instance_t *current_proxy;
 };
 
 typedef struct generator_data gdata_t;
@@ -232,9 +234,6 @@ static server_instance_t *live_server(ckpool_t *ckp)
 
 	LOGDEBUG("Attempting to connect to bitcoind");
 retry:
-	if (!ping_main(ckp))
-		goto out;
-
 	/* First find a server that is already flagged alive if possible
 	 * without blocking on server_alive() */
 	for (i = 0; i < ckp->btcds; i++) {
@@ -262,7 +261,6 @@ retry:
 living:
 	cs = &alive->cs;
 	LOGINFO("Connected to live server %s:%s", cs->url, cs->port);
-out:
 	send_proc(ckp->connector, alive ? "accept" : "reject");
 	return alive;
 }
@@ -294,7 +292,7 @@ static void clear_unix_msg(unix_msg_t **umsg)
 	}
 }
 
-static int gen_loop(proc_instance_t *pi)
+static void gen_loop(proc_instance_t *pi)
 {
 	server_instance_t *si = NULL, *old_si;
 	unix_msg_t *umsg = NULL;
@@ -304,7 +302,6 @@ static int gen_loop(proc_instance_t *pi)
 	connsock_t *cs;
 	gbtbase_t *gbt;
 	char hash[68];
-	int ret = 0;
 
 reconnect:
 	clear_unix_msg(&umsg);
@@ -329,11 +326,6 @@ retry:
 
 	do {
 		umsg = get_unix_msg(pi);
-		if (unlikely(!umsg &&!ping_main(ckp))) {
-			LOGEMERG("Generator failed to ping main process, exiting");
-			ret = 1;
-			goto out;
-		}
 	} while (!umsg);
 
 	if (unlikely(!si->alive)) {
@@ -343,10 +335,6 @@ retry:
 
 	buf = umsg->buf;
 	LOGDEBUG("Generator received request: %s", buf);
-	if (cmdmatch(buf, "shutdown")) {
-		ret = 0;
-		goto out;
-	}
 	if (cmdmatch(buf, "getbase")) {
 		if (!gen_gbtbase(cs, gbt)) {
 			LOGWARNING("Failed to get block template from %s:%s",
@@ -418,7 +406,6 @@ retry:
 
 out:
 	kill_server(si);
-	return ret;
 }
 
 static bool connect_proxy(ckpool_t *ckp, connsock_t *cs, proxy_instance_t *proxy)
@@ -793,7 +780,7 @@ static void reconnect_generator(const ckpool_t *ckp)
 static bool parse_notify(ckpool_t *ckp, proxy_instance_t *proxi, json_t *val)
 {
 	const char *prev_hash, *bbversion, *nbit, *ntime;
-	gdata_t *gdata = proxi->ckp->data;
+	gdata_t *gdata = proxi->ckp->gdata;
 	char *coinbase1, *coinbase2;
 	const char *jobidbuf;
 	bool clean, ret = false;
@@ -1026,7 +1013,7 @@ static bool parse_reconnect(proxy_instance_t *proxy, json_t *val)
 {
 	bool sameurl = false, ret = false;
 	ckpool_t *ckp = proxy->ckp;
-	gdata_t *gdata = ckp->data;
+	gdata_t *gdata = ckp->gdata;
 	proxy_instance_t *parent;
 	const char *new_url;
 	int new_port;
@@ -1318,7 +1305,7 @@ out:
 		LOGNOTICE("Disabling userproxy %d:%d %s that failed authorisation as %s",
 			  proxi->id, proxi->subid, proxi->url, proxi->auth);
 		proxi->disabled = true;
-		disable_subproxy(ckp->data, proxi->parent, proxi);
+		disable_subproxy(ckp->gdata, proxi->parent, proxi);
 	}
 	return ret;
 }
@@ -1626,7 +1613,7 @@ static void add_json_msgq(cs_msg_t **csmsgq, proxy_instance_t *proxy, json_t **v
 static void *proxy_send(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
-	gdata_t *gdata = ckp->data;
+	gdata_t *gdata = ckp->gdata;
 	stratum_msg_t *msg = NULL;
 	cs_msg_t *csmsgq = NULL;
 
@@ -1746,14 +1733,37 @@ out:
 	free(pm);
 }
 
-static void passthrough_add_send(proxy_instance_t *proxy, const char *msg)
+static void passthrough_add_send(proxy_instance_t *proxy, char *msg)
 {
 	pass_msg_t *pm = ckzalloc(sizeof(pass_msg_t));
 
 	pm->proxy = proxy;
 	pm->cs = &proxy->cs;
-	ASPRINTF(&pm->msg, "%s\n", msg);
+	pm->msg = msg;
 	ckmsgq_add(proxy->passsends, pm);
+}
+
+void generator_add_send(ckpool_t *ckp, json_t *val)
+{
+	gdata_t *gdata = ckp->gdata;
+	char *buf;
+
+	if (!ckp->passthrough) {
+		submit_share(gdata, val);
+		return;
+	}
+	if (unlikely(!gdata->current_proxy)) {
+		LOGWARNING("No current proxy to send passthrough data to");
+		goto out;
+	}
+	buf = json_dumps(val, JSON_COMPACT | JSON_EOL);
+	if (unlikely(!buf)) {
+		LOGWARNING("Unable to decode json in generator_add_send");
+		goto out;
+	}
+	passthrough_add_send(gdata->current_proxy, buf);
+out:
+	json_decref(val);
 }
 
 static bool proxy_alive(ckpool_t *ckp, proxy_instance_t *proxi, connsock_t *cs,
@@ -1837,7 +1847,7 @@ static void *proxy_recruit(void *arg)
 {
 	proxy_instance_t *proxy, *parent = (proxy_instance_t *)arg;
 	ckpool_t *ckp = parent->ckp;
-	gdata_t *gdata = ckp->data;
+	gdata_t *gdata = ckp->gdata;
 	bool recruit, alive;
 
 	pthread_detach(pthread_self());
@@ -1996,7 +2006,7 @@ static void *proxy_recv(void *arg)
 	connsock_t *cs = &proxi->cs;
 	proxy_instance_t *subproxy;
 	ckpool_t *ckp = proxi->ckp;
-	gdata_t *gdata = ckp->data;
+	gdata_t *gdata = ckp->gdata;
 	struct epoll_event event;
 	bool alive;
 	int epfd;
@@ -2112,7 +2122,7 @@ static void *proxy_recv(void *arg)
 static void *userproxy_recv(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
-	gdata_t *gdata = ckp->data;
+	gdata_t *gdata = ckp->gdata;
 	struct epoll_event event;
 	int epfd;
 
@@ -2223,9 +2233,6 @@ static proxy_instance_t *wait_best_proxy(ckpool_t *ckp, gdata_t *gdata)
 	int retries = 0;
 
 	while (42) {
-		if (!ping_main(ckp))
-			break;
-
 		mutex_lock(&gdata->lock);
 		HASH_ITER(hh, gdata->proxies, proxi, tmp) {
 			if (proxi->disabled || !proxi->global)
@@ -2678,17 +2685,16 @@ static void parse_globaluser(ckpool_t *ckp, gdata_t *gdata, const char *buf)
 	add_userproxy(ckp, gdata, userid, url, username, pass);
 }
 
-static int proxy_loop(proc_instance_t *pi)
+static void proxy_loop(proc_instance_t *pi)
 {
 	proxy_instance_t *proxi = NULL, *cproxy;
 	server_instance_t *si = NULL, *old_si;
 	ckpool_t *ckp = pi->ckp;
-	gdata_t *gdata = ckp->data;
+	gdata_t *gdata = ckp->gdata;
 	unix_msg_t *umsg = NULL;
 	connsock_t *cs = NULL;
 	bool started = false;
 	char *buf = NULL;
-	int ret = 0;
 
 reconnect:
 	clear_unix_msg(&umsg);
@@ -2711,7 +2717,7 @@ reconnect:
 	if (!cproxy)
 		goto out;
 	if (proxi != cproxy) {
-		proxi = cproxy;
+		gdata->current_proxy = proxi = cproxy;
 		LOGWARNING("Successfully connected to pool %d %s as proxy%s",
 			   proxi->id, proxi->url, ckp->passthrough ? " in passthrough mode" : "");
 	}
@@ -2724,28 +2730,11 @@ retry:
 	clear_unix_msg(&umsg);
 	do {
 		umsg = get_unix_msg(pi);
-		if (unlikely(!umsg &&!ping_main(ckp))) {
-			LOGEMERG("Generator failed to ping main process, exiting");
-			ret = 1;
-			goto out;
-		}
 	} while (!umsg);
 
 	buf = umsg->buf;
 	LOGDEBUG("Proxy received request: %s", buf);
-	if (likely(buf[0] == '{')) {
-		if (ckp->passthrough)
-			passthrough_add_send(proxi, buf);
-		else {
-			/* Anything remaining should be share submissions */
-			json_t *val = json_loads(buf, 0, NULL);
-
-			if (unlikely(!val))
-				LOGWARNING("Generator received invalid json message: %s", buf);
-			else
-				submit_share(gdata, val);
-		}
-	} else if (cmdmatch(buf, "stats")) {
+	if (cmdmatch(buf, "stats")) {
 		send_stats(gdata, umsg->sockd);
 	} else if (cmdmatch(buf, "list")) {
 		send_list(gdata, umsg->sockd);
@@ -2763,9 +2752,6 @@ retry:
 		parse_proxystats(gdata, umsg->sockd, buf + 11);
 	} else if (cmdmatch(buf, "globaluser")) {
 		parse_globaluser(ckp, gdata, buf + 11);
-	} else if (cmdmatch(buf, "shutdown")) {
-		ret = 0;
-		goto out;
 	} else if (cmdmatch(buf, "reconnect")) {
 		goto reconnect;
 	} else if (cmdmatch(buf, "submitblock:")) {
@@ -2791,7 +2777,7 @@ retry:
 	}
 	goto retry;
 out:
-	return ret;
+	return;
 }
 
 /* Check which servers are alive, maintaining a connection with them and
@@ -2799,7 +2785,7 @@ out:
 static void *server_watchdog(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
-	gdata_t *gdata = ckp->data;
+	gdata_t *gdata = ckp->gdata;
 
 	while (42) {
 		server_instance_t *best = NULL;
@@ -2849,13 +2835,13 @@ static void setup_servers(ckpool_t *ckp)
 	create_pthread(&pth_watchdog, server_watchdog, ckp);
 }
 
-static int server_mode(ckpool_t *ckp, proc_instance_t *pi)
+static void server_mode(ckpool_t *ckp, proc_instance_t *pi)
 {
-	int i, ret;
+	int i;
 
 	setup_servers(ckp);
 
-	ret = gen_loop(pi);
+	gen_loop(pi);
 
 	for (i = 0; i < ckp->btcds; i++) {
 		server_instance_t *si = ckp->servers[i];
@@ -2864,7 +2850,6 @@ static int server_mode(ckpool_t *ckp, proc_instance_t *pi)
 		dealloc(si);
 	}
 	dealloc(ckp->servers);
-	return ret;
 }
 
 static proxy_instance_t *__add_proxy(ckpool_t *ckp, gdata_t *gdata, const int id)
@@ -2888,11 +2873,11 @@ static proxy_instance_t *__add_proxy(ckpool_t *ckp, gdata_t *gdata, const int id
 	return proxy;
 }
 
-static int proxy_mode(ckpool_t *ckp, proc_instance_t *pi)
+static void proxy_mode(ckpool_t *ckp, proc_instance_t *pi)
 {
-	gdata_t *gdata = ckp->data;
+	gdata_t *gdata = ckp->gdata;
 	proxy_instance_t *proxy;
-	int i, ret;
+	int i;
 
 	mutex_init(&gdata->lock);
 	mutex_init(&gdata->notify_lock);
@@ -2916,20 +2901,19 @@ static int proxy_mode(ckpool_t *ckp, proc_instance_t *pi)
 		}
 	}
 
-	ret = proxy_loop(pi);
-
-	return ret;
+	proxy_loop(pi);
 }
 
-int generator(proc_instance_t *pi)
+void *generator(void *arg)
 {
+	proc_instance_t *pi = (proc_instance_t *)arg;
 	ckpool_t *ckp = pi->ckp;
 	gdata_t *gdata;
-	int ret;
 
+	rename_proc(pi->processname);
 	LOGWARNING("%s generator starting", ckp->name);
 	gdata = ckzalloc(sizeof(gdata_t));
-	ckp->data = gdata;
+	ckp->gdata = gdata;
 	gdata->ckp = ckp;
 	create_unix_receiver(pi);
 
@@ -2938,18 +2922,13 @@ int generator(proc_instance_t *pi)
 
 		/* Wait for the stratifier to be ready for us */
 		do {
-			if (!ping_main(ckp)) {
-				ret = 1;
-				goto out;
-			}
 			cksleep_ms(10);
 			buf = send_recv_proc(ckp->stratifier, "ping");
 		} while (!buf);
 		dealloc(buf);
-		ret = proxy_mode(ckp, pi);
+		proxy_mode(ckp, pi);
 	} else
-		ret = server_mode(ckp, pi);
-out:
-	dealloc(ckp->data);
-	return process_exit(ckp, pi, ret);
+		server_mode(ckp, pi);
+	dealloc(ckp->gdata);
+	return NULL;
 }

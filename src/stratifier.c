@@ -27,6 +27,8 @@
 #include "stratifier.h"
 #include "uthash.h"
 #include "utlist.h"
+#include "connector.h"
+#include "generator.h"
 
 #define MIN1	60
 #define MIN5	300
@@ -591,7 +593,7 @@ static void info_msg_entries(char_entry_t **entries)
 static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 {
 	uint64_t *u64, g64, d64 = 0;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	char header[228];
 	int len, ofs = 0;
 	ts_t now;
@@ -738,7 +740,7 @@ static void clear_userwb(sdata_t *sdata, int64_t id)
 static void clear_workbase(ckpool_t *ckp, workbase_t *wb)
 {
 	if (ckp->btcsolo)
-		clear_userwb(ckp->data, wb->id);
+		clear_userwb(ckp->sdata, wb->id);
 	free(wb->flags);
 	free(wb->txn_data);
 	free(wb->txn_hashes);
@@ -828,7 +830,7 @@ static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char 
 		       const char *func, const int line)
 {
 	static time_t time_counter;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	static int counter = 0;
 	char *json_msg;
 	time_t now_t;
@@ -1096,7 +1098,7 @@ static void generate_userwbs(sdata_t *sdata, workbase_t *wb)
 static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_block)
 {
 	workbase_t *tmp, *tmpa, *aged = NULL;
-	sdata_t *ckp_sdata = ckp->data;
+	sdata_t *ckp_sdata = ckp->sdata;
 	int len, ret;
 
 	ts_realtime(&wb->gentime);
@@ -1180,7 +1182,7 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
  * read the wrong priority but occasional wrong values are harmless. */
 static char *__send_recv_generator(ckpool_t *ckp, const char *msg, const int prio)
 {
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	char *buf = NULL;
 	bool set;
 
@@ -1189,7 +1191,7 @@ static char *__send_recv_generator(ckpool_t *ckp, const char *msg, const int pri
 		set = true;
 	} else
 		set = false;
-	buf = _send_recv_proc(ckp->generator, msg, UNIX_WRITE_TIMEOUT, RPC_TIMEOUT, __FILE__, __func__, __LINE__);
+	buf = _send_recv_proc(&ckp->generator, msg, UNIX_WRITE_TIMEOUT, RPC_TIMEOUT, __FILE__, __func__, __LINE__);
 	if (unlikely(!buf))
 		buf = strdup("failed");
 	if (set)
@@ -1203,7 +1205,7 @@ static char *__send_recv_generator(ckpool_t *ckp, const char *msg, const int pri
  * processed for priority reasons, "failed" for an actual failure. */
 static char *send_recv_generator(ckpool_t *ckp, const char *msg, const int prio)
 {
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	char *buf = NULL;
 
 	if (prio >= sdata->gen_priority)
@@ -1213,7 +1215,7 @@ static char *send_recv_generator(ckpool_t *ckp, const char *msg, const int prio)
 
 static void send_generator(const ckpool_t *ckp, const char *msg, const int prio)
 {
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	bool set;
 
 	if (prio > sdata->gen_priority) {
@@ -1431,7 +1433,7 @@ static void *do_update(void *arg)
 	struct update_req *ur = (struct update_req *)arg;
 	int prio = ur->prio, retries = 0;
 	ckpool_t *ckp = ur->ckp;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	json_t *val, *txn_array;
 	bool new_block = false;
 	bool ret = false;
@@ -1576,7 +1578,7 @@ out_unlock:
 static void add_node_base(ckpool_t *ckp, json_t *val)
 {
 	workbase_t *wb = ckzalloc(sizeof(workbase_t));
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	bool new_block = false;
 	json_t *txnhashes;
 	char header[228];
@@ -1776,7 +1778,7 @@ static void upstream_blocksubmit(ckpool_t *ckp, const char *gbt_block)
 static void downstream_blocksubmits(ckpool_t *ckp, const char *gbt_block, const stratum_instance_t *source)
 {
 	stratum_instance_t *client;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	ckmsg_t *bulk_send = NULL;
 	int messages = 0;
 
@@ -2051,7 +2053,7 @@ static void connector_drop_client(ckpool_t *ckp, const int64_t id)
 static void drop_allclients(ckpool_t *ckp)
 {
 	stratum_instance_t *client, *tmp;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	int kills = 0;
 
 	ck_wlock(&sdata->instance_lock);
@@ -2441,7 +2443,7 @@ static void dead_proxyid(sdata_t *sdata, const int id, const int subid, const bo
 
 static void update_subscribe(ckpool_t *ckp, const char *cmd)
 {
-	sdata_t *sdata = ckp->data, *dsdata;
+	sdata_t *sdata = ckp->sdata, *dsdata;
 	int id = 0, subid = 0, userid = 0;
 	proxy_t *proxy, *old = NULL;
 	const char *buf;
@@ -2604,7 +2606,7 @@ static proxy_t *best_proxy(sdata_t *sdata)
 
 static void update_notify(ckpool_t *ckp, const char *cmd)
 {
-	sdata_t *sdata = ckp->data, *dsdata;
+	sdata_t *sdata = ckp->sdata, *dsdata;
 	bool new_block = false, clean;
 	int i, id = 0, subid = 0;
 	char header[228];
@@ -2709,7 +2711,7 @@ static void stratum_send_diff(sdata_t *sdata, const stratum_instance_t *client);
 
 static void update_diff(ckpool_t *ckp, const char *cmd)
 {
-	sdata_t *sdata = ckp->data, *dsdata;
+	sdata_t *sdata = ckp->sdata, *dsdata;
 	stratum_instance_t *client, *tmp;
 	double old_diff, diff;
 	int id = 0, subid = 0;
@@ -2952,7 +2954,7 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t i
 						  const char *address, int server)
 {
 	stratum_instance_t *client;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 
 	client = __recruit_stratum_instance(sdata);
 	client->start_time = time(NULL);
@@ -3030,7 +3032,7 @@ static void connector_test_client(ckpool_t *ckp, const int64_t id)
 static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 {
 	ckpool_t *ckp = sdata->ckp;
-	sdata_t *ckp_sdata = ckp->data;
+	sdata_t *ckp_sdata = ckp->sdata;
 	stratum_instance_t *client, *tmp;
 	ckmsg_t *bulk_send = NULL;
 	int messages = 0;
@@ -3282,7 +3284,7 @@ static void block_solve(ckpool_t *ckp, const char *blockhash)
 {
 	ckmsg_t *block, *tmp, *found = NULL;
 	char *msg, *workername = NULL;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	char cdfield[64];
 	double diff = 0;
 	int height = 0;
@@ -4061,7 +4063,7 @@ static void get_poolstats(sdata_t *sdata, int *sockd)
 	_Close(sockd);
 }
 
-static void srecv_process(ckpool_t *ckp, char *buf);
+static void srecv_process(ckpool_t *ckp, json_t *val);
 
 /* For emergency use only, flushes all pending ckdbq messages */
 static void ckdbq_flush(sdata_t *sdata)
@@ -4084,9 +4086,9 @@ static void ckdbq_flush(sdata_t *sdata)
 	LOGWARNING("Flushed %d messages from ckdb queue", flushed);
 }
 
-static int stratum_loop(ckpool_t *ckp, proc_instance_t *pi)
+static void stratum_loop(ckpool_t *ckp, proc_instance_t *pi)
 {
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	unix_msg_t *umsg = NULL;
 	int ret = 0;
 	char *buf;
@@ -4115,21 +4117,15 @@ retry:
 		}
 
 		umsg = get_unix_msg(pi);
-		if (unlikely(!umsg &&!ping_main(ckp))) {
-			LOGEMERG("Stratifier failed to ping main process, exiting");
-			ret = 1;
-			goto out;
-		}
 	} while (!umsg);
 
 	buf = umsg->buf;
-	if (likely(buf[0] == '{')) {
-		/* The bulk of the messages will be received json from the
-		 * connector so look for this first. The srecv_process frees
-		 * the buf heap ram */
+	if (buf[0] == '{') {
+		json_t *val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+
+		/* This is a message for a node */
 		Close(umsg->sockd);
-		ckmsgq_add(sdata->srecvs, umsg->buf);
-		umsg->buf = NULL;
+		ckmsgq_add(sdata->srecvs, val);
 		goto retry;
 	}
 	if (cmdmatch(buf, "ping")) {
@@ -4207,10 +4203,7 @@ retry:
 
 	Close(umsg->sockd);
 	LOGDEBUG("Stratifier received request: %s", buf);
-	if (cmdmatch(buf, "shutdown")) {
-		ret = 0;
-		goto out;
-	} else if (cmdmatch(buf, "update")) {
+	if (cmdmatch(buf, "update")) {
 		update_base(ckp, GEN_PRIORITY);
 	} else if (cmdmatch(buf, "subscribe")) {
 		/* Proxifier has a new subscription */
@@ -4253,15 +4246,12 @@ retry:
 	} else
 		LOGWARNING("Unhandled stratifier message: %s", buf);
 	goto retry;
-
-out:
-	return ret;
 }
 
 static void *blockupdate(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	char *buf = NULL;
 	char request[8];
 
@@ -4490,7 +4480,7 @@ out_unlock:
 static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_id, const json_t *params_val)
 {
 	ckpool_t *ckp = client->ckp;
-	sdata_t *sdata, *ckp_sdata = ckp->data;
+	sdata_t *sdata, *ckp_sdata = ckp->sdata;
 	int session_id = 0, userid = -1;
 	bool old_match = false;
 	char sessionid[12];
@@ -4908,7 +4898,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 {
 	char *base_username = strdupa(workername), *username;
 	bool new_user = false, new_worker = false;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	worker_instance_t *worker;
 	user_instance_t *user;
 	int len;
@@ -4978,7 +4968,7 @@ static int send_recv_auth(stratum_instance_t *client)
 {
 	user_instance_t *user = client->user_instance;
 	ckpool_t *ckp = client->ckp;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	char *buf = NULL, *json_msg;
 	bool contended = false;
 	size_t responselen = 0;
@@ -5122,7 +5112,7 @@ static void queue_delayed_auth(stratum_instance_t *client)
 
 static void check_global_user(ckpool_t *ckp, user_instance_t *user, stratum_instance_t *client)
 {
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	proxy_t *proxy = best_proxy(sdata);
 	int proxyid = proxy->id;
 	char buf[256];
@@ -5260,7 +5250,7 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 	client->authorising = false;
 out:
 	if (ckp->btcsolo && ret) {
-		sdata_t *sdata = ckp->data;
+		sdata_t *sdata = ckp->sdata;
 
 		/* recursive lock, grab instance first then workbase */
 		ck_wlock(&sdata->instance_lock);
@@ -5322,7 +5312,7 @@ static void upstream_shares(ckpool_t *ckp, const char *workername, const int64_t
 static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double diff, const bool valid,
 		       const bool submit, const double sdiff)
 {
-	sdata_t *ckp_sdata = ckp->data, *sdata = client->sdata;
+	sdata_t *ckp_sdata = ckp->sdata, *sdata = client->sdata;
 	worker_instance_t *worker = client->worker_instance;
 	double tdiff, bdiff, dsps, drr, network_diff, bias;
 	user_instance_t *user = client->user_instance;
@@ -5627,16 +5617,12 @@ static void submit_share(stratum_instance_t *client, const int64_t jobid, const 
 	ckpool_t *ckp = client->ckp;
 	json_t *json_msg;
 	char enonce2[32];
-	char *msg;
 
 	sprintf(enonce2, "%s%s", client->enonce1var, nonce2);
 	JSON_CPACK(json_msg, "{sIsssssssIsIsi}", "jobid", jobid, "nonce2", enonce2,
 			     "ntime", ntime, "nonce", nonce, "client_id", client->id,
 			     "proxy", client->proxyid, "subproxy", client->subproxyid);
-	msg = json_dumps(json_msg, JSON_COMPACT);
-	json_decref(json_msg);
-	send_generator(ckp, msg, GEN_LAX);
-	free(msg);
+	generator_add_send(ckp, json_msg);
 }
 
 static void check_best_diff(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user,
@@ -6094,7 +6080,7 @@ static json_params_t
 static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff)
 {
 	stratum_instance_t *client;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	worker_instance_t *worker;
 	user_instance_t *user;
 
@@ -6139,7 +6125,7 @@ static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindif
 static void suggest_diff(stratum_instance_t *client, const char *method, const json_t *params_val)
 {
 	json_t *arr_val = json_array_get(params_val, 0);
-	sdata_t *sdata = client->ckp->data;
+	sdata_t *sdata = client->ckp->sdata;
 	int64_t sdiff;
 
 	if (unlikely(!client_active(client))) {
@@ -6494,7 +6480,7 @@ out:
 static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workername)
 {
 	char *base_username = strdupa(workername), *username;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	bool new_user = false;
 	user_instance_t *user;
 	int len;
@@ -6650,17 +6636,17 @@ static void send_remote_pong(sdata_t *sdata, stratum_instance_t *client)
 	stratum_add_send(sdata, json_msg, client->id, SM_PONG);
 }
 
-static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf,
-			      stratum_instance_t *client)
+static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratum_instance_t *client)
 {
 	json_t *method_val = json_object_get(val, "method");
+	char *buf = json_dumps(val, 0);
 	const char *method;
 
 	LOGDEBUG("Got remote message %s", buf);
 	method = json_string_value(method_val);
 	if (unlikely(!method_val || !method)) {
 		LOGWARNING("Failed to get method from remote message %s", buf);
-		return;
+		goto out;
 	}
 	if (likely(!safecmp(method, "shares")))
 		parse_remote_shares(ckp, sdata, val, buf);
@@ -6674,6 +6660,8 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const 
 		send_remote_pong(sdata, client);
 	else
 		LOGWARNING("unrecognised trusted message %s", buf);
+out:
+	free(buf);
 }
 
 static void add_node_txns(sdata_t *sdata, const json_t *val)
@@ -6721,17 +6709,19 @@ static void add_node_txns(sdata_t *sdata, const json_t *val)
 }
 
 /* Entered with client holding ref count */
-static void node_client_msg(ckpool_t *ckp, json_t *val, const char *buf, stratum_instance_t *client)
+static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *client)
 {
 	json_t *params, *method, *res_val, *id_val, *err_val = NULL;
 	int msg_type = node_msg_type(val);
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	json_params_t *jp;
+	char *buf = NULL;
 	int errnum;
 
 	if (msg_type < 0) {
+		buf = json_dumps(val, 0);
 		LOGERR("Missing client %"PRId64" node method from %s", client->id, buf);
-		return;
+		goto out;
 	}
 	LOGDEBUG("Got client %"PRId64" node method %d:%s", client->id, msg_type, stratum_msgs[msg_type]);
 	id_val = json_object_get(val, "id");
@@ -6762,20 +6752,26 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, const char *buf, stratum
 			parse_authorise_result(ckp, sdata, client, res_val);
 			break;
 		case SM_NONE:
+			buf = json_dumps(val, 0);
 			LOGNOTICE("Unrecognised method from client %"PRId64" :%s",
 				  client->id, buf);
 			break;
 		default:
 			break;
 	}
+out:
+	free(buf);
 }
 
-static void parse_node_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
+static void parse_node_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 {
 	int msg_type = node_msg_type(val);
 
 	if (msg_type < 0) {
+		char *buf = json_dumps(val, 0);
+
 		LOGERR("Missing node method from %s", buf);
+		free(buf);
 		return;
 	}
 	LOGDEBUG("Got node method %d:%s", msg_type, stratum_msgs[msg_type]);
@@ -6849,30 +6845,25 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 	parse_method(ckp, sdata, client, client_id, id_val, method, params);
 }
 
-static void srecv_process(ckpool_t *ckp, char *buf)
+static void srecv_process(ckpool_t *ckp, json_t *val)
 {
+	char address[INET6_ADDRSTRLEN], *buf = NULL;
 	bool noid = false, dropped = false;
-	char address[INET6_ADDRSTRLEN];
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	stratum_instance_t *client;
 	smsg_t *msg;
-	json_t *val;
 	int server;
 
-	val = json_loads(buf, 0, NULL);
-	if (unlikely(!val)) {
-		LOGWARNING("Received unrecognised non-json message: %s", buf);
-		goto out;
-	}
 	msg = ckzalloc(sizeof(smsg_t));
 	msg->json_msg = val;
 	val = json_object_get(msg->json_msg, "client_id");
 	if (unlikely(!val)) {
+		buf = json_dumps(val, JSON_COMPACT);
 		if (ckp->node)
-			parse_node_msg(ckp, sdata, msg->json_msg, buf);
+			parse_node_msg(ckp, sdata, msg->json_msg);
 		else
 			LOGWARNING("Failed to extract client_id from connector json smsg %s", buf);
-		goto out_freemsg;
+		goto out;
 	}
 
 	msg->client_id = json_integer_value(val);
@@ -6880,16 +6871,18 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 
 	val = json_object_get(msg->json_msg, "address");
 	if (unlikely(!val)) {
+		buf = json_dumps(val, JSON_COMPACT);
 		LOGWARNING("Failed to extract address from connector json smsg %s", buf);
-		goto out_freemsg;
+		goto out;
 	}
 	strcpy(address, json_string_value(val));
 	json_object_clear(val);
 
 	val = json_object_get(msg->json_msg, "server");
 	if (unlikely(!val)) {
+		buf = json_dumps(val, JSON_COMPACT);
 		LOGWARNING("Failed to extract server from connector json smsg %s", buf);
-		goto out_freemsg;
+		goto out;
 	}
 	server = json_integer_value(val);
 	json_object_clear(val);
@@ -6912,28 +6905,32 @@ static void srecv_process(ckpool_t *ckp, char *buf)
 		LOGNOTICE("Stratifier skipped dropped instance %"PRId64" message from server %d",
 			  msg->client_id, server);
 		connector_drop_client(ckp, msg->client_id);
-		goto out_freemsg;
+		goto out;
 	}
 	if (unlikely(noid))
 		LOGINFO("Stratifier added instance %"PRId64" server %d", client->id, server);
 
 	if (client->remote)
-		parse_trusted_msg(ckp, sdata, msg->json_msg, buf, client);
+		parse_trusted_msg(ckp, sdata, msg->json_msg, client);
 	else if (ckp->node)
-		node_client_msg(ckp, msg->json_msg, buf, client);
+		node_client_msg(ckp, msg->json_msg, client);
 	else
 		parse_instance_msg(ckp, sdata, msg, client);
 	dec_instance_ref(sdata, client);
-out_freemsg:
-	free_smsg(msg);
 out:
+	free_smsg(msg);
 	free(buf);
+}
+
+void stratifier_add_recv(ckpool_t *ckp, json_t *val)
+{
+	sdata_t *sdata = ckp->sdata;
+
+	ckmsgq_add(sdata->srecvs, val);
 }
 
 static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 {
-	char *s;
-
 	if (unlikely(!msg->json_msg)) {
 		LOGERR("Sent null json msg to stratum_sender");
 		free(msg);
@@ -6943,10 +6940,9 @@ static void ssend_process(ckpool_t *ckp, smsg_t *msg)
 	/* Add client_id to the json message and send it to the
 	 * connector process to be delivered */
 	json_object_set_new_nocheck(msg->json_msg, "client_id", json_integer(msg->client_id));
-	s = json_dumps(msg->json_msg, JSON_COMPACT);
-	send_proc(ckp->connector, s);
-	free(s);
-	free_smsg(msg);
+	connector_add_message(ckp, msg->json_msg);
+	/* The connector will free msg->json_msg */
+	free(msg);
 }
 
 static void discard_json_params(json_params_t *jp)
@@ -6969,7 +6965,7 @@ static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 {
 	json_t *result_val, *json_msg, *err_val = NULL;
 	stratum_instance_t *client;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	int64_t client_id;
 
 	client_id = jp->client_id;
@@ -7020,7 +7016,7 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 {
 	json_t *result_val, *json_msg, *err_val = NULL;
 	stratum_instance_t *client;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	int mindiff, errnum = 0;
 	int64_t client_id;
 
@@ -7122,7 +7118,7 @@ static bool test_and_clear(bool *val, mutex_t *lock)
 
 static void ckdbq_process(ckpool_t *ckp, char *msg)
 {
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	size_t responselen;
 	char *buf = NULL;
 
@@ -7202,7 +7198,7 @@ static void send_transactions(ckpool_t *ckp, json_params_t *jp)
 	const char *msg = json_string_value(jp->method),
 		*params = json_string_value(json_array_get(jp->params, 0));
 	stratum_instance_t *client = NULL;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	json_t *val, *hashes;
 	int64_t job_id = 0;
 	time_t now_t;
@@ -7395,7 +7391,7 @@ static void upstream_workers(ckpool_t *ckp, user_instance_t *user)
 static void *statsupdate(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	pool_stats_t *stats = &sdata->stats;
 
 	pthread_detach(pthread_self());
@@ -7747,7 +7743,7 @@ static void *statsupdate(void *arg)
 static void *ckdb_heartbeat(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 
 	pthread_detach(pthread_self());
 	rename_proc("heartbeat");
@@ -7777,7 +7773,7 @@ static void *ckdb_heartbeat(void *arg)
 static void read_poolstats(ckpool_t *ckp)
 {
 	char *s = alloca(4096), *pstats, *dsps, *sps;
-	sdata_t *sdata = ckp->data;
+	sdata_t *sdata = ckp->sdata;
 	pool_stats_t *stats = &sdata->stats;
 	int tvsec_diff = 0, ret;
 	tv_t now, last;
@@ -7866,27 +7862,25 @@ static void read_poolstats(ckpool_t *ckp)
 	}
 }
 
-int stratifier(proc_instance_t *pi)
+void *stratifier(void *arg)
 {
+	proc_instance_t *pi = (proc_instance_t *)arg;
 	pthread_t pth_blockupdate, pth_statsupdate, pth_heartbeat;
 	ckpool_t *ckp = pi->ckp;
-	int ret = 1, threads;
 	int64_t randomiser;
 	char *buf = NULL;
 	sdata_t *sdata;
+	int threads;
 
+	rename_proc(pi->processname);
 	LOGWARNING("%s stratifier starting", ckp->name);
 	sdata = ckzalloc(sizeof(sdata_t));
-	ckp->data = sdata;
+	ckp->sdata = sdata;
 	sdata->ckp = ckp;
 	sdata->verbose = true;
 
 	/* Wait for the generator to have something for us */
 	do {
-		if (!ping_main(ckp)) {
-			ret = 1;
-			goto out;
-		}
 		if (ckp->proxy)
 			break;
 		buf = send_recv_proc(ckp->generator, "ping");
@@ -7929,10 +7923,6 @@ int stratifier(proc_instance_t *pi)
 	if (!ckp->proxy)
 		sdata->blockchange_id = sdata->workbase_id = randomiser;
 
-	if (!ckp->serverurls) {
-		ckp->serverurl[0] = "127.0.0.1";
-		ckp->serverurls = 1;
-	}
 	cklock_init(&sdata->instance_lock);
 	cksem_init(&sdata->update_sem);
 	cksem_post(&sdata->update_sem);
@@ -7969,7 +7959,7 @@ int stratifier(proc_instance_t *pi)
 
 	LOGWARNING("%s stratifier ready", ckp->name);
 
-	ret = stratum_loop(ckp, pi);
+	stratum_loop(ckp, pi);
 out:
 	if (ckp->proxy) {
 		proxy_t *proxy, *tmpproxy;
@@ -7981,6 +7971,6 @@ out:
 		}
 		mutex_unlock(&sdata->proxy_lock);
 	}
-	dealloc(ckp->data);
-	return process_exit(ckp, pi, ret);
+	dealloc(ckp->sdata);
+	return NULL;
 }
