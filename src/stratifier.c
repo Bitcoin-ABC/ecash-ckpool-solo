@@ -7933,11 +7933,11 @@ void *stratifier(void *arg)
 	 * are CPUs */
 	threads = sysconf(_SC_NPROCESSORS_ONLN) / 2 ? : 1;
 	sdata->sshareq = create_ckmsgqs(ckp, "sprocessor", &sshare_process, threads);
-	sdata->ssends = create_ckmsgq(ckp, "ssender", &ssend_process);
+	sdata->ssends = create_ckmsgqs(ckp, "ssender", &ssend_process, threads);
 	sdata->sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
 	sdata->stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
 	sdata->srecvs = create_ckmsgqs(ckp, "sreceiver", &srecv_process, threads);
-	sdata->ckdbq = create_ckmsgq(ckp, "ckdbqueue", &ckdbq_process);
+	sdata->ckdbq = create_ckmsgqs(ckp, "ckdbqueue", &ckdbq_process, threads);
 	create_pthread(&pth_heartbeat, ckdb_heartbeat, ckp);
 	read_poolstats(ckp);
 
@@ -7955,22 +7955,12 @@ void *stratifier(void *arg)
 	mutex_init(&sdata->share_lock);
 	mutex_init(&sdata->block_lock);
 
-	create_unix_receiver(pi);
-
 	LOGWARNING("%s stratifier ready", ckp->name);
 
 	stratum_loop(ckp, pi);
 out:
-	if (ckp->proxy) {
-		proxy_t *proxy, *tmpproxy;
-
-		mutex_lock(&sdata->proxy_lock);
-		HASH_ITER(hh, sdata->proxies, proxy, tmpproxy) {
-			HASH_DEL(sdata->proxies, proxy);
-			dealloc(proxy);
-		}
-		mutex_unlock(&sdata->proxy_lock);
-	}
-	dealloc(ckp->sdata);
+	/* We should never get here unless there's a fatal error */
+	LOGEMERG("Stratifier failure, shutting down");
+	exit(1);
 	return NULL;
 }

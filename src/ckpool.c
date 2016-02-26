@@ -180,11 +180,12 @@ ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, cons
 
 /* Generic function for adding messages to a ckmsgq linked list and signal the
  * ckmsgq parsing thread(s) to wake up and process it. */
-void ckmsgq_add(ckmsgq_t *ckmsgq, void *data)
+void _ckmsgq_add(ckmsgq_t *ckmsgq, void *data, const char *file, const char *func, const int line)
 {
 	ckmsg_t *msg;
 
 	if (unlikely(!ckmsgq)) {
+		LOGWARNING("Sending messages to no queue from %s %s:%d", file, func, line);
 		/* Discard data if we're unlucky enough to be sending it to
 		 * msg queues not set up during start up */
 		free(data);
@@ -286,7 +287,7 @@ unix_msg_t *get_unix_msg(proc_instance_t *pi)
 	return umsg;
 }
 
-void create_unix_receiver(proc_instance_t *pi)
+static void create_unix_receiver(proc_instance_t *pi)
 {
 	pthread_t pth;
 
@@ -909,7 +910,7 @@ out:
 static void terminate_oldpid(const ckpool_t *ckp, proc_instance_t *pi, const pid_t oldpid)
 {
 	if (!ckp->killold) {
-		quit(1, "Process %s pid %d still exists, start ckpool with -k if you wish to kill it",
+		quit(1, "Process %s pid %d still exists, start ckpool with -H to get a handover or -k if you wish to kill it",
 				pi->processname, oldpid);
 	}
 	LOGNOTICE("Terminating old process %s pid %d", pi->processname, oldpid);
@@ -1499,6 +1500,7 @@ static void prepare_child(ckpool_t *ckp, proc_instance_t *pi, void *process, cha
 	pi->sockname = pi->processname;
 	create_process_unixsock(pi);
 	create_pthread(&pi->pth_process, process, pi);
+	create_unix_receiver(pi);
 }
 
 #ifdef USE_CKDB
@@ -1561,7 +1563,7 @@ static bool send_recv_path(const char *path, const char *msg)
 		LOGWARNING("Received: %s in response to %s request", response, msg);
 		dealloc(response);
 	} else
-		LOGWARNING("Received not response to %s request", msg);
+		LOGWARNING("Received no response to %s request", msg);
 	Close(sockd);
 	return ret;
 }
@@ -1830,6 +1832,7 @@ int main(int argc, char **argv)
 	ckp.main.sockname = strdup("listener");
 	name_process_sockname(&ckp.main.us, &ckp.main);
 	ckp.oldconnfd = ckzalloc(sizeof(int *) * ckp.serverurls);
+	manage_old_instance(&ckp, &ckp.main);
 	if (ckp.handover) {
 		const char *path = ckp.main.us.path;
 
@@ -1878,8 +1881,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (!ckp.handover)
-		manage_old_instance(&ckp, &ckp.main);
 	write_namepid(&ckp.main);
 	open_process_sock(&ckp, &ckp.main, &ckp.main.us);
 	launch_logger(&ckp);
@@ -1896,7 +1897,7 @@ int main(int argc, char **argv)
 		ckp.maxclients = ret * 9 / 10;
 	}
 
-	ckp.ckpapi = create_ckmsgq(&ckp, "api", &ckpool_api);
+	// ckp.ckpapi = create_ckmsgq(&ckp, "api", &ckpool_api);
 	create_pthread(&ckp.pth_listener, listener, &ckp.main);
 
 	handler.sa_handler = &sighandler;

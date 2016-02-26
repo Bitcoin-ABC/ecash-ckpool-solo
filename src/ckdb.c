@@ -1259,10 +1259,10 @@ static void alloc_storage()
 	events_free = k_new_list("Events", sizeof(EVENTS),
 					ALLOC_EVENTS, LIMIT_EVENTS, true);
 	events_store = k_new_store(events_free);
-	events_user_root = new_ktree(NULL, cmp_events_user, events_free);
-	events_ip_root = new_ktree(NULL, cmp_events_ip, events_free);
-	events_ipc_root = new_ktree(NULL, cmp_events_ipc, events_free);
-	events_hash_root = new_ktree(NULL, cmp_events_hash, events_free);
+	events_user_root = new_ktree("EventsUser", cmp_events_user, events_free);
+	events_ip_root = new_ktree("EventsIP", cmp_events_ip, events_free);
+	events_ipc_root = new_ktree("EventsIPC", cmp_events_ipc, events_free);
+	events_hash_root = new_ktree("EventsHash", cmp_events_hash, events_free);
 
 	ovents_free = k_new_list("OKEvents", sizeof(OVENTS),
 					ALLOC_OVENTS, LIMIT_OVENTS, true);

@@ -2787,6 +2787,10 @@ static void *server_watchdog(void *arg)
 	ckpool_t *ckp = (ckpool_t *)arg;
 	gdata_t *gdata = ckp->gdata;
 
+	rename_proc("swatchdog");
+
+	pthread_detach(pthread_self());
+
 	while (42) {
 		server_instance_t *best = NULL;
 		ts_t timer_t;
@@ -2915,7 +2919,6 @@ void *generator(void *arg)
 	gdata = ckzalloc(sizeof(gdata_t));
 	ckp->gdata = gdata;
 	gdata->ckp = ckp;
-	create_unix_receiver(pi);
 
 	if (ckp->proxy) {
 		char *buf = NULL;
@@ -2929,6 +2932,8 @@ void *generator(void *arg)
 		proxy_mode(ckp, pi);
 	} else
 		server_mode(ckp, pi);
-	dealloc(ckp->gdata);
+	/* We should never get here unless there's a fatal error */
+	LOGEMERG("Generator failure, shutting down");
+	exit(1);
 	return NULL;
 }

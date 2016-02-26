@@ -4378,6 +4378,7 @@ bool _ok_ips(bool is_event, char *ip, char *eventname, tv_t *now)
 			}
 			// The OK has expired, so remove it
 			prev_item = prev_in_ktree(ctx);
+			remove_from_ktree(ips_root, i_item);
 			k_unlink_item(ips_store, i_item);
 			if (ips->description) {
 				LIST_MEM_SUB(ips_free, ips->description);
@@ -4418,6 +4419,7 @@ bool banned_ips(char *ip, tv_t *now, bool *is_event)
 			}
 			// The ban has expired, so remove it
 			prev_item = prev_in_ktree(ctx);
+			remove_from_ktree(ips_root, i_item);
 			k_unlink_item(ips_store, i_item);
 			if (ips->description) {
 				LIST_MEM_SUB(ips_free, ips->description);
