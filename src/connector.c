@@ -336,12 +336,12 @@ static int __drop_client(cdata_t *cdata, client_instance_t *client)
 		goto out;
 	client->invalid = true;
 	ret = client->fd;
+	/* Closing the fd will automatically remove it from the epoll list */
 	Close(client->fd);
-	epoll_ctl(cdata->epfd, EPOLL_CTL_DEL, ret, NULL);
 	HASH_DEL(cdata->clients, client);
 	DL_APPEND(cdata->dead_clients, client);
 	/* This is the reference to this client's presence in the
-		* epoll list. */
+	 * epoll list. */
 	__dec_instance_ref(client);
 	cdata->dead_generated++;
 out:
@@ -573,25 +573,19 @@ static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
 
 	client = ref_client_by_id(cdata, id);
 	if (unlikely(!client)) {
-		LOGNOTICE("Failed to find client by id %"PRId64" in receiver!", id);
+		LOGWARNING("Failed to find client by id %"PRId64" in receiver!", id);
 		goto outnoclient;
 	}
-	if (unlikely(client->invalid))
-		goto out;
 	/* We can have both messages and read hang ups so process the
-		* message first. */
+	 * message first. */
 	if (likely(events & EPOLLIN)) {
 		/* Rearm the client for epoll events if we have successfully
 		 * parsed a message from it */
-		if (parse_client_msg(ckp, cdata, client)) {
-			event->data.u64 = id;
-			event->events = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
-			epoll_ctl(cdata->epfd, EPOLL_CTL_MOD, client->fd, event);
-		} else
+		if (unlikely(!parse_client_msg(ckp, cdata, client))) {
 			invalidate_client(ckp, cdata, client);
+			goto out;
+		}
 	}
-	if (unlikely(client->invalid))
-		goto out;
 	if (unlikely(events & EPOLLERR)) {
 		socklen_t errlen = sizeof(int);
 		int error = 0;
@@ -617,6 +611,12 @@ static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
 		invalidate_client(cdata->pi->ckp, cdata, client);
 	}
 out:
+	if (likely(!client->invalid)) {
+		/* Rearm the fd in the epoll list if it's still active */
+		event->data.u64 = id;
+		event->events = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
+		epoll_ctl(cdata->epfd, EPOLL_CTL_MOD, client->fd, event);
+	}
 	dec_instance_ref(cdata, client);
 outnoclient:
 	free(event);
