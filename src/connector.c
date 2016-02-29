@@ -573,7 +573,7 @@ static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
 
 	client = ref_client_by_id(cdata, id);
 	if (unlikely(!client)) {
-		LOGWARNING("Failed to find client by id %"PRId64" in receiver!", id);
+		LOGNOTICE("Failed to find client by id %"PRId64" in receiver!", id);
 		goto outnoclient;
 	}
 	/* We can have both messages and read hang ups so process the
