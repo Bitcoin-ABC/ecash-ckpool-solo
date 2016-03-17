@@ -50,8 +50,8 @@
  * Consider adding row level locking (a per kitem usage count) if needed */
 
 #define DB_VLOCK "1"
-#define DB_VERSION "1.0.4"
-#define CKDB_VERSION DB_VERSION"-1.960"
+#define DB_VERSION "1.0.5"
+#define CKDB_VERSION DB_VERSION"-1.984"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -252,6 +252,7 @@ enum data_type {
 	TYPE_BIGINT,
 	TYPE_INT,
 	TYPE_TV,
+	TYPE_TVDB,
 	TYPE_BTV,
 	TYPE_TVS,
 	TYPE_CTV,
@@ -269,6 +270,7 @@ enum data_type {
 #define TXT_TO_BIGINT(__nam, __fld, __data) txt_to_bigint(__nam, __fld, &(__data), sizeof(__data))
 #define TXT_TO_INT(__nam, __fld, __data) txt_to_int(__nam, __fld, &(__data), sizeof(__data))
 #define TXT_TO_TV(__nam, __fld, __data) txt_to_tv(__nam, __fld, &(__data), sizeof(__data))
+#define TXT_TO_TVDB(__nam, __fld, __data) txt_to_tvdb(__nam, __fld, &(__data), sizeof(__data))
 #define TXT_TO_CTV(__nam, __fld, __data) txt_to_ctv(__nam, __fld, &(__data), sizeof(__data))
 #define TXT_TO_BLOB(__nam, __fld, __data) txt_to_blob(__nam, __fld, &(__data))
 #define TXT_TO_DOUBLE(__nam, __fld, __data) txt_to_double(__nam, __fld, &(__data), sizeof(__data))
@@ -685,6 +687,7 @@ enum cmd_values {
 	CMD_QUERY,
 	CMD_LOCKS,
 	CMD_EVENTS,
+	CMD_HIGH,
 	CMD_END
 };
 
@@ -1673,6 +1676,8 @@ typedef struct shares {
 	int32_t errn;
 	char error[TXT_SML+1];
 	char secondaryuserid[TXT_SML+1];
+	char ntime[TXT_SML+1];
+	double minsdiff;
 	HISTORYDATECONTROLFIELDS;
 	int32_t redo; // non-DB field
 	int32_t oldcount; // non-DB field
@@ -1682,6 +1687,7 @@ typedef struct shares {
 #define LIMIT_SHARES 0
 #define INIT_SHARES(_item) INIT_GENERIC(_item, shares)
 #define DATA_SHARES(_var, _item) DATA_GENERIC(_var, _item, shares, true)
+#define DATA_SHARES_NULL(_var, _item) DATA_GENERIC(_var, _item, shares, false)
 
 extern K_TREE *shares_root;
 extern K_LIST *shares_free;
@@ -1689,6 +1695,13 @@ extern K_STORE *shares_store;
 // shares unexpectedly before the workinfo
 extern K_TREE *shares_early_root;
 extern K_STORE *shares_early_store;
+/* DB stored high sdiff shares N.B. they are duplicated,
+ *  not relinked, since an item can't be in 2 lists
+ * New high shares are placed in both trees then removed from shares_hi_root
+ *  after they are stored in the db */
+extern K_TREE *shares_hi_root;
+extern K_TREE *shares_db_root;
+extern K_STORE *shares_hi_store;
 
 /* Once a share is this old, it can only once more be
     check for it's workinfoid and then be discarded */
@@ -1704,6 +1717,11 @@ extern K_STORE *shares_early_store;
 #define DIFF_VAL(_v) (1.0 - ((double)(_v) / 100.0))
 
 extern double diff_percent;
+
+/* Record shares in the DB >= this
+ * The default of 0 means don't store shares
+ * This is set only via the runtime parameter -D or --minsdiff */
+extern double share_min_sdiff;
 
 // SHAREERRORS shareerrors.id.json={...}
 typedef struct shareerrors {
@@ -1956,6 +1974,11 @@ extern K_LIST *process_pplns_free;
 #define PAYOUTS_REJECT 'R'
 #define PAYOUTS_REJECT_STR "R"
 #define PAYREJECT(_status) ((_status)[0] == PAYOUTS_REJECT)
+
+// UserAtts to hold payouts
+#define HOLD_PAYOUTS "HoldPayouts"
+#define HOLD_ADDRESS "hold"
+#define NONE_ADDRESS "none"
 
 // Default number of shifts (payouts) to display on web
 #define SHIFTS_DEFAULT 99
@@ -2630,6 +2653,7 @@ extern void _txt_to_data(enum data_type typ, char *nam, char *fld, void *data, s
 #define txt_to_bigint(_nam, _fld, _data, _siz) _txt_to_bigint(_nam, _fld, _data, _siz, WHERE_FFL_HERE)
 #define txt_to_int(_nam, _fld, _data, _siz) _txt_to_int(_nam, _fld, _data, _siz, WHERE_FFL_HERE)
 #define txt_to_tv(_nam, _fld, _data, _siz) _txt_to_tv(_nam, _fld, _data, _siz, WHERE_FFL_HERE)
+#define txt_to_tvdb(_nam, _fld, _data, _siz) _txt_to_tvdb(_nam, _fld, _data, _siz, WHERE_FFL_HERE)
 #define txt_to_ctv(_nam, _fld, _data, _siz) _txt_to_ctv(_nam, _fld, _data, _siz, WHERE_FFL_HERE)
 #define txt_to_blob(_nam, _fld, _data) _txt_to_blob(_nam, _fld, _data, WHERE_FFL_HERE)
 #define txt_to_double(_nam, _fld, _data, _siz) _txt_to_double(_nam, _fld, _data, _siz, WHERE_FFL_HERE)
@@ -2639,6 +2663,7 @@ extern void _txt_to_str(char *nam, char *fld, char data[], size_t siz, WHERE_FFL
 extern void _txt_to_bigint(char *nam, char *fld, int64_t *data, size_t siz, WHERE_FFL_ARGS);
 extern void _txt_to_int(char *nam, char *fld, int32_t *data, size_t siz, WHERE_FFL_ARGS);
 extern void _txt_to_tv(char *nam, char *fld, tv_t *data, size_t siz, WHERE_FFL_ARGS);
+extern void _txt_to_tvdb(char *nam, char *fld, tv_t *data, size_t siz, WHERE_FFL_ARGS);
 // Convert msg S,nS to tv_t
 extern void _txt_to_ctv(char *nam, char *fld, tv_t *data, size_t siz, WHERE_FFL_ARGS);
 extern void _txt_to_blob(char *nam, char *fld, char **data, WHERE_FFL_ARGS);
@@ -3029,10 +3054,14 @@ extern int64_t workinfo_add(PGconn *conn, char *workinfoidstr, char *poolinstanc
 				char *code, char *inet, tv_t *cd, bool igndup,
 				K_TREE *trf_root);
 extern bool workinfo_fill(PGconn *conn);
-extern bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername,
-			char *clientid, char *errn, char *enonce1, char *nonce2,
-			char *nonce, char *diff, char *sdiff, char *secondaryuserid,
-			char *by, char *code, char *inet, tv_t *cd, K_TREE *trf_root);
+extern bool shares_add(PGconn *conn, char *workinfoid, char *username,
+			char *workername, char *clientid, char *errn,
+			char *enonce1, char *nonce2, char *nonce, char *diff,
+			char *sdiff, char *secondaryuserid, char *ntime,
+			char *by, char *code, char *inet, tv_t *cd,
+			K_TREE *trf_root);
+extern bool shares_db(PGconn *conn, K_ITEM *s_item);
+extern bool shares_fill(PGconn *conn);
 extern bool shareerrors_add(PGconn *conn, char *workinfoid, char *username,
 				char *workername, char *clientid, char *errn,
 				char *error, char *secondaryuserid, char *by,

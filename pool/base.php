@@ -272,6 +272,31 @@ function safepass($pass)
  return true;
 }
 #
+function bademail($email, $isold = false)
+{
+ if ($email == null || $email == '')
+ {
+	if ($isold === false)
+		return 'Invalid email address';
+	else
+		return 'Invalid email address - you must setup one first';
+ }
+
+ $ok = (stripos($email, '@hotmail.') === false &&
+	stripos($email, '@live.') === false &&
+	stripos($email, '@outlook.') === false);
+
+ if ($ok)
+	return null;
+ else
+ {
+	if ($isold === false)
+		return "Email from hotmail/live/outlook can't be used";
+	else
+		return 'Email from hotmail/live/outlook no longer works<br>You must change it first';
+ }
+}
+#
 function loginStr($str)
 {
  // Anything but . _ / Tab
@@ -538,6 +563,17 @@ function loggedIn()
  list($who, $whoid) = validate();
  // false if not logged in
  return $who;
+}
+#
+function emailcheck($user)
+{
+ $ans = userSettings($user);
+ if ($ans['STATUS'] != 'ok')
+	dbdown(); // Should be no other reason?
+ if (!isset($ans['email']))
+	return 'You need to setup an email address first';
+ else
+	return bademail($ans['email'], true);
 }
 #
 ?>

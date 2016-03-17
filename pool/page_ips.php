@@ -14,12 +14,14 @@ function doips($data, $user)
  $pg .= '<td class=dl>Name</td>';
  $pg .= '<td class=dr>Is?</td>';
  $pg .= '<td class=dr>Lifetime</td>';
+ $pg .= '<td class=dr>Left</td>';
  $pg .= '<td class=dr>Log</td>';
  $pg .= '<td class=dl>Desc</td>';
  $pg .= '<td class=dr>UTC</td>';
  $pg .= "</tr></thead>\n";
  if ($ans['STATUS'] == 'ok')
  {
+	$now = $ans['STAMP'];
 	$pg .= '<tbody>';
 	$count = $ans['rows'];
 	for ($i = 0; $i < $count; $i++)
@@ -37,6 +39,21 @@ function doips($data, $user)
 		$pg .= '<td class=dl>'.$ans['eventname:'.$i].'</td>';
 		$pg .= '<td class=dr>'.$ans['is_event:'.$i].'</td>';
 		$pg .= '<td class=dr>'.$ans['lifetime:'.$i].'</td>';
+		$exp = $ans['lifetime:'.$i];
+		if ($exp == 0)
+			$dxp = '&#x221e;';
+		else
+		{
+			$exp += $ans['createdate:'.$i];
+			if ($exp <= $now)
+				$dxp = 'Exp';
+			else
+			{
+				$exp -= $now;
+				$dxp = $exp . 's';
+			}
+		}
+		$pg .= '<td class=dr>'.$dxp.'</td>';
 		$pg .= '<td class=dr>'.$ans['log:'.$i].'</td>';
 		$pg .= '<td class=dl>'.$ans['description:'.$i].'</td>';
 		$pg .= '<td class=dr>'.gmdate('j/M H:i:s',$ans['createdate:'.$i]).'</td>';

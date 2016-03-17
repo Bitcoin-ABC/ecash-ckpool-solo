@@ -40,6 +40,15 @@ function calctx($ans, $count, $miner_sat, $diffacc_total)
 	$diffacc_user = $ans['diffacc:'.$i];
 	$pay_sat = $ans['amount:'.$i];
 	$payaddress = $ans['payaddress:'.$i];
+	if ($payaddress == 'hold')
+	{
+		$dd = '';
+		if ($pay_sat > 0 && $pay_sat < $dust)
+			$dd = ' (dust)';
+		$ers .= "Hold for '$username'$dd ($pay_sat)<br>";
+		$unpaid += $pay_sat;
+		continue;
+	}
 	if ($payaddress == 'none')
 	{
 		$c0 = substr($username, 0, 1);
@@ -54,7 +63,7 @@ function calctx($ans, $count, $miner_sat, $diffacc_total)
 				$dd = '';
 				if ($pay_sat < $dust)
 					$dd = ' (dust)';
-				$ers .= "No address for '$username'$dd<br>";
+				$ers .= "No address for '$username'$dd ($pay_sat)<br>";
 			}
 			$unpaid += $pay_sat;
 			continue;

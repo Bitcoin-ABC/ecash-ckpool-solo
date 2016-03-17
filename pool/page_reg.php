@@ -141,10 +141,11 @@ function try_reg($info, $page, $menu, $name, $u)
 	$ok = false;
  else
  {
-	if (stripos($mail, 'hotmail') !== false)
+	$res = bademail($mail);
+	if ($res != null)
 	{
 		$ok = false;
-		$data['error'] = "hotmail not allowed";
+		$data['error'] = $res;
 	}
 
 	if (safepass($pass) !== true)

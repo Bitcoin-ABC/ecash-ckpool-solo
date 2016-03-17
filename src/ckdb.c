@@ -10,11 +10,8 @@
 
 #include "ckdb.h"
 
-/* TODO: any tree/list accessed in new threads needs
- *  to ensure all code using those trees/lists use locks
- * This code's lock implementation is equivalent to table level locking
+/* This code's lock implementation is equivalent to table level locking
  * Consider adding row level locking (a per kitem usage count) if needed
- * TODO: verify all tables with multithread access are locked
  */
 
 /* Startup
@@ -432,8 +429,12 @@ K_LIST *shares_free;
 K_STORE *shares_store;
 K_TREE *shares_early_root;
 K_STORE *shares_early_store;
+K_TREE *shares_hi_root;
+K_TREE *shares_db_root;
+K_STORE *shares_hi_store;
 
 double diff_percent = DIFF_VAL(DIFF_PERCENT_DEFAULT);
+double share_min_sdiff = 0;
 
 // SHAREERRORS shareerrors.id.json={...}
 K_TREE *shareerrors_root;
@@ -926,6 +927,8 @@ static bool getdata3()
 	}
 	if (!(ok = markersummary_fill(conn)) || everyone_die)
 		goto sukamudai;
+	if (!(ok = shares_fill(conn)) || everyone_die)
+		goto sukamudai;
 	if (!confirm_sharesummary && !everyone_die)
 		ok = poolstats_fill(conn);
 
@@ -1200,6 +1203,9 @@ static void alloc_storage()
 	shares_early_store = k_new_store(shares_free);
 	shares_root = new_ktree(NULL, cmp_shares, shares_free);
 	shares_early_root = new_ktree("SharesEarly", cmp_shares, shares_free);
+	shares_hi_store = k_new_store(shares_free);
+	shares_hi_root = new_ktree("SharesHi", cmp_shares, shares_free);
+	shares_db_root = new_ktree("SharesDB", cmp_shares, shares_free);
 
 	shareerrors_free = k_new_list("ShareErrors", sizeof(SHAREERRORS),
 					ALLOC_SHAREERRORS, LIMIT_SHAREERRORS,
@@ -1597,6 +1603,8 @@ static void dealloc_storage()
 	FREE_STORE_DATA(sharesummary);
 	FREE_LIST_DATA(sharesummary);
 
+	LOGWARNING("%s() shares ...", __func__);
+
 	if (shareerrors_early_store->count > 0) {
 		LOGERR("%s() *** shareerrors_early count %d ***",
 			__func__, shareerrors_early_store->count);
@@ -1618,6 +1626,10 @@ static void dealloc_storage()
 	FREE_TREE(shareerrors_early);
 	FREE_STORE(shareerrors_early);
 	FREE_ALL(shareerrors);
+
+	FREE_TREE(shares_hi);
+	FREE_TREE(shares_db);
+	FREE_STORE(shares_hi);
 	if (shares_early_store->count > 0) {
 		LOGERR("%s() *** shares_early count %d ***",
 			__func__, shares_early_store->count);
@@ -1650,6 +1662,8 @@ static void dealloc_storage()
 		FREE_STORE_DATA(workinfo);
 		FREE_LIST_DATA(workinfo);
 	}
+
+	LOGWARNING("%s() etc ...", __func__);
 
 	FREE_LISTS(idcontrol);
 	FREE_ALL(accountbalance);
@@ -4432,6 +4446,7 @@ static void *socketer(__maybe_unused void *arg)
 				case CMD_USERINFO:
 				case CMD_LOCKS:
 				case CMD_EVENTS:
+				case CMD_HIGH:
 					msgline->sockd = sockd;
 					sockd = -1;
 					K_WLOCK(workqueue_free);
@@ -4692,6 +4707,7 @@ static void reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_QUERY:
 			case CMD_LOCKS:
 			case CMD_EVENTS:
+			case CMD_HIGH:
 				LOGERR("%s() INVALID message line %"PRIu64
 					" ignored '%.42s...",
 					__func__, count,
@@ -5808,6 +5824,7 @@ static struct option long_options[] = {
 	{ "alert",		required_argument,	0,	'c' },
 	{ "config",		required_argument,	0,	'c' },
 	{ "dbname",		required_argument,	0,	'd' },
+	{ "minsdiff",		required_argument,	0,	'D' },
 	{ "free",		required_argument,	0,	'f' },
 	// generate = enable payout pplns auto generation
 	{ "generate",		no_argument,		0,	'g' },
@@ -5863,7 +5880,7 @@ int main(int argc, char **argv)
 	memset(&ckp, 0, sizeof(ckp));
 	ckp.loglevel = LOG_NOTICE;
 
-	while ((c = getopt_long(argc, argv, "a:c:d:ghi:kl:mM:n:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "a:c:d:D:ghi:kl:mM:n:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
 		switch(c) {
 			case 'a':
 				len = strlen(optarg);
@@ -5881,6 +5898,13 @@ int main(int argc, char **argv)
 				kill = optarg;
 				while (*kill)
 					*(kill++) = ' ';
+				break;
+			case 'D':
+				share_min_sdiff = atof(optarg);
+				if (share_min_sdiff < 0) {
+					quit(1, "Invalid share_min_sdiff '%s' "
+						"must be >= 0", optarg);
+				}
 				break;
 			case 'f':
 				if (strcasecmp(optarg, FREE_MODE_ALL_STR) == 0)

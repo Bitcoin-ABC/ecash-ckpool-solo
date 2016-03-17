@@ -127,8 +127,9 @@ function dosettings($data, $user)
  {
   case 'EMail':
 	$email = getparam('email', false);
-	if (stripos($email, 'hotmail') !== false)
-		$err = 'hotmail not allowed';
+	$res = bademail($email);
+	if ($res != null)
+		$err = $res;
 	else
 	{
 		$pass = getparam('pass', false);
@@ -141,29 +142,41 @@ function dosettings($data, $user)
   case 'Address':
 	if (!isset($data['info']['u_multiaddr']))
 	{
-		$addr = getparam('baddr', false);
-		$addrarr = array(array('addr' => $addr));
-		$pass = getparam('pass', false);
-		$twofa = getparam('2fa', false);
-		$ans = userSettings($user, null, $addrarr, $pass, $twofa);
-		$err = 'Payout address changed';
-		$check = true;
+		$res = emailcheck($user);
+		if ($res != null)
+			$err = $res;
+		else
+		{
+			$addr = getparam('baddr', false);
+			$addrarr = array(array('addr' => $addr));
+			$pass = getparam('pass', false);
+			$twofa = getparam('2fa', false);
+			$ans = userSettings($user, null, $addrarr, $pass, $twofa);
+			$err = 'Payout address changed';
+			$check = true;
+		}
 	}
 	break;
   case 'Password':
-	$oldpass = getparam('oldpass', false);
-	$pass1 = getparam('pass1', false);
-	$pass2 = getparam('pass2', false);
-	$twofa = getparam('2fa', false);
-	if (!safepass($pass1))
-		$err = 'Unsafe password. ' . passrequires();
-	elseif ($pass1 != $pass2)
-		$err = "Passwords don't match";
+	$res = emailcheck($user);
+	if ($res != null)
+		$err = $res;
 	else
 	{
-		$ans = setPass($user, $oldpass, $pass1, $twofa);
-		$err = 'Password changed';
-		$check = true;
+		$oldpass = getparam('oldpass', false);
+		$pass1 = getparam('pass1', false);
+		$pass2 = getparam('pass2', false);
+		$twofa = getparam('2fa', false);
+		if (!safepass($pass1))
+			$err = 'Unsafe password. ' . passrequires();
+		elseif ($pass1 != $pass2)
+			$err = "Passwords don't match";
+		else
+		{
+			$ans = setPass($user, $oldpass, $pass1, $twofa);
+			$err = 'Password changed';
+			$check = true;
+		}
 	}
 	break;
  }

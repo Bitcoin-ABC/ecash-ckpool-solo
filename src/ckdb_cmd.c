@@ -2601,7 +2601,7 @@ wiconf:
 	} else if (strcasecmp(cmd, STR_SHARES) == 0) {
 		K_ITEM *i_workinfoid, *i_username, *i_workername, *i_clientid, *i_errn;
 		K_ITEM *i_enonce1, *i_nonce2, *i_nonce, *i_diff, *i_sdiff;
-		K_ITEM *i_secondaryuserid;
+		K_ITEM *i_secondaryuserid, *i_ntime;
 		bool ok;
 
 		i_nonce = require_name(trf_root, "nonce", 1, NULL, reply, siz);
@@ -2676,6 +2676,10 @@ wiconf:
 		if (!i_secondaryuserid)
 			i_secondaryuserid = &shares_secondaryuserid;
 
+		i_ntime = require_name(trf_root, "ntime", 1, NULL, reply, siz);
+		if (!i_ntime)
+			return strdup(reply);
+
 		ok = shares_add(conn, transfer_data(i_workinfoid),
 				      transfer_data(i_username),
 				      transfer_data(i_workername),
@@ -2687,6 +2691,7 @@ wiconf:
 				      transfer_data(i_diff),
 				      transfer_data(i_sdiff),
 				      transfer_data(i_secondaryuserid),
+				      transfer_data(i_ntime),
 				      by, code, inet, cd, trf_root);
 
 		if (!ok) {
@@ -4756,7 +4761,7 @@ static char *cmd_pplns2(__maybe_unused PGconn *conn, char *cmd, char *id,
 	char *block_extra, *marks_status = EMPTY;
 	size_t siz = sizeof(reply);
 	K_ITEM *i_height;
-	K_ITEM b_look, *b_item, *p_item, *mp_item, *pay_item, *u_item;
+	K_ITEM b_look, *b_item, *p_item, *mp_item, *pay_item, *u_item, *ua_item;
 	K_ITEM *w_item;
 	MININGPAYOUTS *miningpayouts;
 	PAYMENTS *payments;
@@ -4915,6 +4920,9 @@ static char *cmd_pplns2(__maybe_unused PGconn *conn, char *cmd, char *id,
 				goto shazbot;
 			}
 			DATA_USERS(users, u_item);
+			K_RLOCK(useratts_free);
+			ua_item = find_useratts(miningpayouts->userid, HOLD_PAYOUTS);
+			K_RUNLOCK(useratts_free);
 
 			K_RLOCK(payments_free);
 			pay_item = find_first_paypayid(miningpayouts->userid,
@@ -4931,7 +4939,8 @@ static char *cmd_pplns2(__maybe_unused PGconn *conn, char *cmd, char *id,
 						 "amount:%d=%"PRId64"%c"
 						 "diffacc:%d=%.1f%c",
 						 rows, payments->subname, FLDSEP,
-						 rows, payments->payaddress, FLDSEP,
+						 rows, ua_item ? HOLD_ADDRESS :
+						  payments->payaddress, FLDSEP,
 						 rows, payments->amount, FLDSEP,
 						 rows, payments->diffacc, FLDSEP);
 					APPEND_REALLOC(buf, off, len, tmp);
@@ -4949,7 +4958,7 @@ static char *cmd_pplns2(__maybe_unused PGconn *conn, char *cmd, char *id,
 					 "amount:%d=%"PRId64"%c"
 					 "diffacc:%d=%.1f%c",
 					 rows, users->username, FLDSEP,
-					 rows, "none", FLDSEP,
+					 rows, NONE_ADDRESS, FLDSEP,
 					 rows, miningpayouts->amount, FLDSEP,
 					 rows, miningpayouts->diffacc, FLDSEP);
 				APPEND_REALLOC(buf, off, len, tmp);
@@ -7546,48 +7555,51 @@ static char *cmd_locks(__maybe_unused PGconn *conn, char *cmd, char *id,
 	return strdup(reply);
 }
 
-static void event_tree(K_TREE *event_tree, char *list, char *reply, size_t siz,
-			char *buf, size_t *off, size_t *len, int *rows)
+static void event_tree(K_TREE *the_tree, char *list, char *reply, size_t siz,
+			char **buf, size_t *off, size_t *len, int *rows)
 {
 	K_TREE_CTX ctx[1];
 	K_ITEM *e_item;
 	EVENTS *e;
 
-	e_item = first_in_ktree(event_tree, ctx);
+	LOGDEBUG(">%s() tree='%s' list='%s'", __func__, the_tree->name, list);
+	e_item = first_in_ktree(the_tree, ctx);
 	while (e_item) {
 		DATA_EVENTS(e, e_item);
 		if (CURRENT(&(e->expirydate))) {
 			snprintf(reply, siz, "list:%d=%s%c",
 				 *rows, list, FLDSEP);
-			APPEND_REALLOC(buf, *off, *len, reply);
+			APPEND_REALLOC(*buf, *off, *len, reply);
 
 			snprintf(reply, siz, "id:%d=%d%c",
 				 *rows, e->id, FLDSEP);
-			APPEND_REALLOC(buf, *off, *len, reply);
+			APPEND_REALLOC(*buf, *off, *len, reply);
 
 			snprintf(reply, siz, "user:%d=%s%c",
 				 *rows, e->createby, FLDSEP);
-			APPEND_REALLOC(buf, *off, *len, reply);
+			APPEND_REALLOC(*buf, *off, *len, reply);
 
-			if (event_tree == events_ipc_root) {
+			if (the_tree == events_ipc_root) {
 				snprintf(reply, siz, "ipc:%d=%s%c",
 					 *rows, e->ipc, FLDSEP);
-				APPEND_REALLOC(buf, *off, *len, reply);
+				APPEND_REALLOC(*buf, *off, *len, reply);
 			} else {
 				snprintf(reply, siz, "ip:%d=%s%c",
 					 *rows, e->createinet, FLDSEP);
-				APPEND_REALLOC(buf, *off, *len, reply);
+				APPEND_REALLOC(*buf, *off, *len, reply);
 			}
 
-			if (event_tree == events_hash_root) {
+			if (the_tree == events_hash_root) {
 				snprintf(reply, siz, "hash:%d=%.8s%c",
 					 *rows, e->hash, FLDSEP);
-				APPEND_REALLOC(buf, *off, *len, reply);
+				APPEND_REALLOC(*buf, *off, *len, reply);
 			}
 
 			snprintf(reply, siz, CDTRF":%d=%ld%c",
-				 (*rows)++, e->createdate.tv_sec, FLDSEP);
-			APPEND_REALLOC(buf, *off, *len, reply);
+				 *rows, e->createdate.tv_sec, FLDSEP);
+			APPEND_REALLOC(*buf, *off, *len, reply);
+
+			(*rows)++;
 		}
 		e_item = next_in_ktree(ctx);
 	}
@@ -7713,22 +7725,22 @@ static char *cmd_events(__maybe_unused PGconn *conn, char *cmd, char *id,
 		K_RLOCK(events_free);
 		if (all || strcmp(list, "user") == 0) {
 			one = true;
-			event_tree(events_user_root, "user", reply, siz, buf,
+			event_tree(events_user_root, "user", reply, siz, &buf,
 				   &off, &len, &rows);
 		}
 		if (all || strcmp(list, "ip") == 0) {
 			one = true;
-			event_tree(events_ip_root, "ip", reply, siz, buf,
+			event_tree(events_ip_root, "ip", reply, siz, &buf,
 				   &off, &len, &rows);
 		}
 		if (all || strcmp(list, "ipc") == 0) {
 			one = true;
-			event_tree(events_ipc_root, "ipc", reply, siz, buf,
+			event_tree(events_ipc_root, "ipc", reply, siz, &buf,
 				   &off, &len, &rows);
 		}
 		if (all || strcmp(list, "hash") == 0) {
 			one = true;
-			event_tree(events_hash_root, "hash", reply, siz, buf,
+			event_tree(events_hash_root, "hash", reply, siz, &buf,
 				   &off, &len, &rows);
 		}
 		K_RUNLOCK(events_free);
@@ -8031,6 +8043,72 @@ static char *cmd_events(__maybe_unused PGconn *conn, char *cmd, char *id,
 	return buf;
 }
 
+// High Share actions
+static char *cmd_high(PGconn *conn, char *cmd, char *id,
+			__maybe_unused tv_t *now, __maybe_unused char *by,
+			__maybe_unused char *code, __maybe_unused char *inet,
+			__maybe_unused tv_t *cd, K_TREE *trf_root)
+{
+	bool conned = false;
+	K_TREE_CTX ctx[1];
+	K_ITEM *i_action, *s_item = NULL;
+	char *action;
+	char reply[1024] = "";
+	size_t siz = sizeof(reply);
+	char *buf = NULL;
+	int count = 0;
+	bool ok, did;
+
+	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
+
+	i_action = require_name(trf_root, "action", 1, NULL, reply, siz);
+	if (!i_action)
+		return strdup(reply);
+	action = transfer_data(i_action);
+
+	if (strcasecmp(action, "store") == 0) {
+		/* Store the shares_hi_root list in the db now,
+		 * rather than wait for a shift process to do it */
+		if (!conn) {
+			conn = dbconnect();
+			conned = true;
+		}
+		count = 0;
+		do {
+			did = false;
+			K_WLOCK(shares_free);
+			s_item = first_in_ktree(shares_hi_root, ctx);
+			K_WUNLOCK(shares_free);
+			if (s_item) {
+				did = true;
+				ok = shares_db(conn, s_item);
+				if (!ok)
+					break;
+				count++;
+			}
+		} while (did);
+		if (conned)
+			PQfinish(conn);
+		if (count) {
+			LOGWARNING("%s() Stored: %d high shares",
+				   __func__, count);
+		} else
+			LOGWARNING("%s() No high shares to store", __func__);
+
+		if (ok)
+			snprintf(reply, siz, "ok.stored %d", count);
+		else
+			snprintf(reply, siz, "DBERR.stored %d", count);
+		return strdup(reply);
+	} else {
+		snprintf(reply, siz, "unknown action '%s'", action);
+		LOGERR("%s() %s.%s", __func__, id, reply);
+		return strdup(reply);
+	}
+
+	return buf;
+}
+
 /* The socket command format is as follows:
  *  Basic structure:
  *    cmd.ID.fld1=value1 FLDSEP fld2=value2 FLDSEP fld3=...
@@ -8142,5 +8220,6 @@ struct CMDS ckdb_cmds[] = {
 	{ CMD_QUERY,	"query",	false,	false,	cmd_query,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_LOCKS,	"locks",	false,	false,	cmd_locks,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_EVENTS,	"events",	false,	false,	cmd_events,	SEQ_NONE,	ACCESS_SYSTEM },
+	{ CMD_HIGH,	"high",		false,	false,	cmd_high,	SEQ_NONE,	ACCESS_SYSTEM },
 	{ CMD_END,	NULL,		false,	false,	NULL,		SEQ_NONE,	0 }
 };

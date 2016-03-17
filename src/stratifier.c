@@ -4943,7 +4943,53 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	return user;
 }
 
-static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff);
+static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff)
+{
+	stratum_instance_t *client;
+	sdata_t *sdata = ckp->sdata;
+	worker_instance_t *worker;
+	user_instance_t *user;
+
+	/* Find the user first */
+	user = user_by_workername(sdata, workername);
+
+	/* Then find the matching worker user */
+	worker = get_worker(sdata, user, workername);
+
+	if (mindiff < 1) {
+		if (likely(!mindiff)) {
+			worker->mindiff = 0;
+			return;
+		}
+		LOGINFO("Worker %s requested invalid diff %d", worker->workername, mindiff);
+		return;
+	}
+	if (mindiff < ckp->mindiff)
+		mindiff = ckp->mindiff;
+	if (mindiff == worker->mindiff)
+		return;
+	worker->mindiff = mindiff;
+
+	/* Iterate over all the workers from this user to find any with the
+	 * matching worker that are currently live and send them a new diff
+	 * if we can. Otherwise it will only act as a clamp on next share
+	 * submission. */
+	ck_rlock(&sdata->instance_lock);
+	DL_FOREACH(user->clients, client) {
+		if (client->worker_instance != worker)
+			continue;
+		/* Per connection suggest diff overrides worker mindiff ugh */
+		if (mindiff < client->suggest_diff)
+			continue;
+		if (mindiff == client->diff)
+			continue;
+		client->diff_change_job_id = sdata->workbase_id + 1;
+		client->old_diff = client->diff;
+		client->diff = mindiff;
+		stratum_send_diff(sdata, client);
+	}
+	ck_runlock(&sdata->instance_lock);
+}
 
 static void parse_worker_diffs(ckpool_t *ckp, json_t *worker_array)
 {
@@ -5016,7 +5062,6 @@ static int send_recv_auth(stratum_instance_t *client)
 		responselen = strlen(buf);
 	if (likely(responselen > 0)) {
 		char *cmd = NULL, *secondaryuserid = NULL, *response;
-		worker_instance_t *worker = client->worker_instance;
 		json_error_t err_val;
 		json_t *val = NULL;
 		int offset = 0;
@@ -5048,7 +5093,6 @@ static int send_recv_auth(stratum_instance_t *client)
 
 			json_get_string(&secondaryuserid, val, "secondaryuserid");
 			parse_worker_diffs(ckp, worker_array);
-			client->suggest_diff = worker->mindiff;
 			user->auth_time = time(NULL);
 		}
 		if (secondaryuserid && (!safecmp(response, "ok.authorise") ||
@@ -5088,9 +5132,6 @@ static void queue_delayed_auth(stratum_instance_t *client)
 	char cdfield[64];
 	json_t *val;
 	ts_t now;
-
-	/* Read off any cached mindiff from previous auths */
-	client->suggest_diff = client->worker_instance->mindiff;
 
 	ts_realtime(&now);
 	sprintf(cdfield, "%lu,%lu", now.tv_sec, now.tv_nsec);
@@ -5208,9 +5249,7 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 		/* Preauth workers for the first 10 minutes after the user is
 		 * first authorised by ckdb to avoid floods of worker auths.
 		 * *errnum is implied zero already so ret will be set true */
-		if (user->auth_time && time(NULL) - user->auth_time < 600)
-			client->suggest_diff = client->worker_instance->mindiff;
-		else
+		if (!user->auth_time || time(NULL) - user->auth_time > 600)
 			*errnum = send_recv_auth(client);
 		if (!*errnum)
 			ret = true;
@@ -5316,7 +5355,7 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	worker_instance_t *worker = client->worker_instance;
 	double tdiff, bdiff, dsps, drr, network_diff, bias;
 	user_instance_t *user = client->user_instance;
-	int64_t next_blockid, optimal;
+	int64_t next_blockid, optimal, mindiff;
 	tv_t now_t;
 
 	mutex_lock(&ckp_sdata->stats_lock);
@@ -5391,8 +5430,13 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	if (drr > 0.15 && drr < 0.4)
 		return;
 
+	/* Client suggest diff overrides worker mindiff */
+	if (client->suggest_diff)
+		mindiff = client->suggest_diff;
+	else
+		mindiff = worker->mindiff;
 	/* Allow slightly lower diffs when users choose their own mindiff */
-	if (worker->mindiff || client->suggest_diff) {
+	if (mindiff) {
 		if (drr < 0.5)
 			return;
 		optimal = lround(dsps * 2.4);
@@ -5400,18 +5444,20 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 		optimal = lround(dsps * 3.33);
 
 	/* Clamp to mindiff ~ network_diff */
-	if (optimal < ckp->mindiff)
-		optimal = ckp->mindiff;
-	/* Client suggest diff overrides worker mindiff */
-	if (client->suggest_diff) {
-		if (optimal < client->suggest_diff)
-			optimal = client->suggest_diff;
-	} else if (optimal < worker->mindiff)
-		optimal = worker->mindiff;
-	if (ckp->maxdiff && optimal > ckp->maxdiff)
-		optimal = ckp->maxdiff;
-	if (optimal > network_diff)
-		optimal = network_diff;
+
+	/* Set to higher of pool mindiff and optimal */
+	optimal = MAX(optimal, ckp->mindiff);
+
+	/* Set to higher of optimal and user chosen diff */
+	optimal = MAX(optimal, mindiff);
+
+	/* Set to lower of optimal and pool maxdiff */
+	if (ckp->maxdiff)
+		optimal = MIN(optimal, ckp->maxdiff);
+
+	/* Set to lower of optimal and network_diff */
+	optimal = MIN(optimal, network_diff);
+
 	if (client->diff == optimal)
 		return;
 
@@ -5816,8 +5862,8 @@ out_submit:
 out_unlock:
 	ck_runlock(&sdata->workbase_lock);
 
-	/* Accept the lower of new and old diffs until the next update */
-	if (id < client->diff_change_job_id && client->old_diff < client->diff)
+	/* Accept shares of the old diff until the next update */
+	if (id < client->diff_change_job_id)
 		diff = client->old_diff;
 	if (!invalid) {
 		char wdiffsuffix[16];
@@ -6077,55 +6123,13 @@ static json_params_t
 	return jp;
 }
 
-static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff)
-{
-	stratum_instance_t *client;
-	sdata_t *sdata = ckp->sdata;
-	worker_instance_t *worker;
-	user_instance_t *user;
-
-	/* Find the user first */
-	user = user_by_workername(sdata, workername);
-
-	/* Then find the matching worker user */
-	worker = get_worker(sdata, user, workername);
-
-	if (mindiff < 0) {
-		LOGINFO("Worker %s requested invalid diff %d", worker->workername, mindiff);
-		return;
-	}
-	if (mindiff < ckp->mindiff)
-		mindiff = ckp->mindiff;
-	if (mindiff == worker->mindiff)
-		return;
-	worker->mindiff = mindiff;
-
-	/* Iterate over all the workers from this user to find any with the
-	 * matching worker that are currently live and send them a new diff
-	 * if we can. Otherwise it will only act as a clamp on next share
-	 * submission. */
-	ck_rlock(&sdata->instance_lock);
-	DL_FOREACH(user->clients, client) {
-		if (client->worker_instance != worker)
-			continue;
-		/* Per connection suggest diff overrides worker mindiff ugh */
-		if (mindiff < client->suggest_diff)
-			continue;
-		if (mindiff == client->diff)
-			continue;
-		client->diff = mindiff;
-		stratum_send_diff(sdata, client);
-	}
-	ck_runlock(&sdata->instance_lock);
-}
-
 /* Implement support for the diff in the params as well as the originally
  * documented form of placing diff within the method. Needs to be entered with
  * client holding a ref count. */
-static void suggest_diff(stratum_instance_t *client, const char *method, const json_t *params_val)
+static void suggest_diff(ckpool_t *ckp, stratum_instance_t *client, const char *method,
+			 const json_t *params_val)
 {
 	json_t *arr_val = json_array_get(params_val, 0);
-	sdata_t *sdata = client->ckp->sdata;
 	int64_t sdiff;
 
 	if (unlikely(!client_active(client))) {
@@ -6138,16 +6142,18 @@ static void suggest_diff(stratum_instance_t *client, const char *method, const j
 		LOGINFO("Failed to parse suggest_difficulty for client %"PRId64, client->id);
 		return;
 	}
+	/* Clamp suggest diff to global pool mindiff */
+	if (sdiff < ckp->mindiff)
+		sdiff = ckp->mindiff;
 	if (sdiff == client->suggest_diff)
 		return;
 	client->suggest_diff = sdiff;
 	if (client->diff == sdiff)
 		return;
-	if (sdiff < client->ckp->mindiff)
-		client->diff = client->ckp->mindiff;
-	else
-		client->diff = sdiff;
-	stratum_send_diff(sdata, client);
+	client->diff_change_job_id = client->sdata->workbase_id + 1;
+	client->old_diff = client->diff;
+	client->diff = sdiff;
+	stratum_send_diff(ckp->sdata, client);
 }
 
 /* Send diff first when sending the first stratum template after subscribing */
@@ -6362,7 +6368,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	}
 
 	if (cmdmatch(method, "mining.suggest")) {
-		suggest_diff(client, method, params_val);
+		suggest_diff(ckp, client, method, params_val);
 		return;
 	}
 
@@ -7015,10 +7021,10 @@ static stratum_instance_t *preauth_ref_instance_by_id(sdata_t *sdata, const int6
 static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 {
 	json_t *result_val, *json_msg, *err_val = NULL;
-	stratum_instance_t *client;
 	sdata_t *sdata = ckp->sdata;
-	int mindiff, errnum = 0;
-	int64_t client_id;
+	stratum_instance_t *client;
+	int64_t mindiff, client_id;
+	int errnum = 0;
 
 	client_id = jp->client_id;
 
@@ -7048,12 +7054,18 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 	steal_json_id(json_msg, jp);
 	stratum_add_send(sdata, json_msg, client_id, SM_AUTHRESULT);
 
-	if (!json_is_true(result_val) || !client->suggest_diff)
+	if (!json_is_true(result_val))
 		goto out;
 
 	/* Update the client now if they have set a valid mindiff different
-	 * from the startdiff */
-	mindiff = MAX(ckp->mindiff, client->suggest_diff);
+	 * from the startdiff. suggest_diff overrides worker mindiff */
+	if (client->suggest_diff)
+		mindiff = client->suggest_diff;
+	else
+		mindiff = client->worker_instance->mindiff;
+	if (!mindiff)
+		goto out;
+	mindiff = MAX(ckp->mindiff, mindiff);
 	if (mindiff != client->diff) {
 		client->diff = mindiff;
 		stratum_send_diff(sdata, client);

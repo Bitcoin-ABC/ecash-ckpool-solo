@@ -174,8 +174,16 @@ function set_2fa($data, $user, $tfa, $ans, $err, $msg)
 function do2fa($data, $user)
 {
  $mailmode = '';
+ $tfa = null;
  $err = '';
  $msg = '';
+ $res = emailcheck($user);
+ if ($res != null)
+ {
+	$msg = $res;
+	$ans = get2fa($user, '', 0, 0);
+	goto skipo;
+ }
  $setup = getparam('Setup', false);
  if ($setup === 'Setup')
  {
@@ -222,6 +230,7 @@ function do2fa($data, $user)
 		}
 	}
  }
+skipo:
  if ($ans['STATUS'] != 'ok')
 	$err = 'DBERR';
  else
@@ -258,11 +267,9 @@ function do2fa($data, $user)
 		}
 	}
  }
- if (!isset($ans['2fa_status']))
-	$tfa = null;
- else
+ if (isset($ans['2fa_status']))
 	$tfa = $ans['2fa_status'];
- if (isset($ans['2fa_msg']))
+ if ($msg == '' && isset($ans['2fa_msg']))
 	$msg = $ans['2fa_msg'];
 
  $pg = set_2fa($data, $user, $tfa, $ans, $err, $msg);

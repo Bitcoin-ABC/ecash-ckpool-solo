@@ -56,7 +56,7 @@ char *pqerrmsg(PGconn *conn)
 		PQ_GET_FLD(_res, _row, CDDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_TV(CDDB, _fld, (_data)->createdate); \
+		TXT_TO_TVDB(CDDB, _fld, (_data)->createdate); \
 		PQ_GET_FLD(_res, _row, BYDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
@@ -72,7 +72,7 @@ char *pqerrmsg(PGconn *conn)
 		PQ_GET_FLD(_res, _row, EDDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_TV(EDDB, _fld, (_data)->expirydate); \
+		TXT_TO_TVDB(EDDB, _fld, (_data)->expirydate); \
 	} while (0)
 
 #define HISTORYDATEPARAMS(_params, _his_pos, _row) do { \
@@ -89,7 +89,7 @@ char *pqerrmsg(PGconn *conn)
 		PQ_GET_FLD(_res, _row, CDDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_TV(CDDB, _fld, (_data)->createdate); \
+		TXT_TO_TVDB(CDDB, _fld, (_data)->createdate); \
 		PQ_GET_FLD(_res, _row, BYDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
@@ -105,7 +105,7 @@ char *pqerrmsg(PGconn *conn)
 		PQ_GET_FLD(_res, _row, MDDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_TV(MDDB, _fld, (_data)->modifydate); \
+		TXT_TO_TVDB(MDDB, _fld, (_data)->modifydate); \
 		PQ_GET_FLD(_res, _row, MBYDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
@@ -144,7 +144,7 @@ char *pqerrmsg(PGconn *conn)
 		PQ_GET_FLD(_res, _row, CDDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
-		TXT_TO_TV(CDDB, _fld, (_data)->createdate); \
+		TXT_TO_TVDB(CDDB, _fld, (_data)->createdate); \
 		PQ_GET_FLD(_res, _row, BYDB, _fld, _ok); \
 		if (!_ok) \
 			break; \
@@ -185,6 +185,7 @@ char *pqerrmsg(PGconn *conn)
 #define PQPARAM16 PQPARAM8 ",$9,$10,$11,$12,$13,$14,$15,$16"
 #define PQPARAM17 PQPARAM16 ",$17"
 #define PQPARAM18 PQPARAM16 ",$17,$18"
+#define PQPARAM19 PQPARAM16 ",$17,$18,$19"
 #define PQPARAM22 PQPARAM16 ",$17,$18,$19,$20,$21,$22"
 #define PQPARAM23 PQPARAM16 ",$17,$18,$19,$20,$21,$22,$23"
 #define PQPARAM26 PQPARAM22 ",$23,$24,$25,$26"
@@ -856,7 +857,7 @@ bool users_fill(PGconn *conn)
 		PQ_GET_FLD(res, i, "joineddate", field, ok);
 		if (!ok)
 			break;
-		TXT_TO_TV("joineddate", field, row->joineddate);
+		TXT_TO_TVDB("joineddate", field, row->joineddate);
 
 		PQ_GET_FLD(res, i, "passwordhash", field, ok);
 		if (!ok)
@@ -1267,12 +1268,12 @@ bool useratts_fill(PGconn *conn)
 		PQ_GET_FLD(res, i, "attdate", field, ok);
 		if (!ok)
 			break;
-		TXT_TO_TV("attdate", field, row->attdate);
+		TXT_TO_TVDB("attdate", field, row->attdate);
 
 		PQ_GET_FLD(res, i, "attdate2", field, ok);
 		if (!ok)
 			break;
-		TXT_TO_TV("attdate2", field, row->attdate2);
+		TXT_TO_TVDB("attdate2", field, row->attdate2);
 
 		HISTORYDATEFLDS(res, i, row, ok);
 		if (!ok)
@@ -2309,7 +2310,7 @@ bool payments_fill(PGconn *conn)
 			PQ_GET_FLD(res, i, "paydate", field, ok);
 			if (!ok)
 				break;
-			TXT_TO_TV("paydate", field, row->paydate);
+			TXT_TO_TVDB("paydate", field, row->paydate);
 
 			PQ_GET_FLD(res, i, "payaddress", field, ok);
 			if (!ok)
@@ -2957,7 +2958,7 @@ bool optioncontrol_fill(PGconn *conn)
 		PQ_GET_FLD(res, i, "activationdate", field, ok);
 		if (!ok)
 			break;
-		TXT_TO_TV("activationdate", field, row->activationdate);
+		TXT_TO_TVDB("activationdate", field, row->activationdate);
 
 		PQ_GET_FLD(res, i, "activationheight", field, ok);
 		if (!ok)
@@ -3624,18 +3625,22 @@ discard:
 static void shareerrors_process_early(PGconn *conn, int64_t good_wid,
 				      tv_t *good_cd, K_TREE *trf_root);
 
-// Memory (and log file) only
+// DB Shares are stored by by the summariser to ensure the reload is correct
 bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername,
 		char *clientid, char *errn, char *enonce1, char *nonce2,
 		char *nonce, char *diff, char *sdiff, char *secondaryuserid,
-		char *by, char *code, char *inet, tv_t *cd, K_TREE *trf_root)
+		char *ntime, char *by, char *code, char *inet, tv_t *cd,
+		K_TREE *trf_root)
 {
-	K_ITEM *s_item = NULL, *u_item, *wi_item;
+	K_TREE_CTX ctx[1];
+	K_ITEM *s_item = NULL, *s2_item = NULL, *u_item, *wi_item, *tmp_item;
 	char cd_buf[DATE_BUFSIZ];
-	SHARES *shares = NULL;
+	SHARES *shares = NULL, *shares2 = NULL;
+	double sdiff_amt;
 	USERS *users;
 	bool ok = false;
 	char *st = NULL;
+	int errn_int;
 
 	LOGDEBUG("%s(): %s/%s/%s/%s/%ld,%ld",
 		 __func__,
@@ -3643,8 +3648,15 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 		 errn, cd->tv_sec, cd->tv_usec);
 	FREENULL(st);
 
+	TXT_TO_DOUBLE("sdiff", sdiff, sdiff_amt);
+	TXT_TO_INT("errn", errn, errn_int);
+
 	K_WLOCK(shares_free);
 	s_item = k_unlink_head(shares_free);
+	// Don't store duplicates since they will already exist
+	if (errn_int != SE_DUPE && share_min_sdiff > 0 &&
+	    sdiff_amt >= share_min_sdiff)
+		s2_item = k_unlink_head(shares_free);
 	K_WUNLOCK(shares_free);
 
 	DATA_SHARES(shares, s_item);
@@ -3692,8 +3704,16 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 		}
 	}
 
+	STRNCPY(shares->ntime, ntime);
+	shares->minsdiff = share_min_sdiff;
+
 	HISTORYDATEINIT(shares, cd, by, code, inet);
 	HISTORYDATETRANSFER(trf_root, shares);
+
+	if (s2_item) {
+		DATA_SHARES(shares2, s2_item);
+		memcpy(shares2, shares, sizeof(*shares2));
+	}
 
 	wi_item = find_workinfo(shares->workinfoid, NULL);
 	if (!wi_item) {
@@ -3710,6 +3730,19 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 		// They need to be sorted by workinfoid
 		add_to_ktree(shares_early_root, s_item);
 		k_add_head(shares_early_store, s_item);
+		if (s2_item) {
+			// Just ignore duplicates
+			tmp_item = find_in_ktree(shares_db_root, s2_item, ctx);
+			if (tmp_item == NULL) {
+				// Store them in advance - always
+				add_to_ktree(shares_hi_root, s2_item);
+				add_to_ktree(shares_db_root, s2_item);
+				k_add_head(shares_hi_store, s2_item);
+			} else {
+				k_add_head(shares_free, s2_item);
+				s2_item = NULL;
+			}
+		}
 		K_WUNLOCK(shares_free);
 		/* It was all OK except the missing workinfoid
 		 *  and it was queued, so most likely OK */
@@ -3721,6 +3754,18 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 		K_WLOCK(shares_free);
 		add_to_ktree(shares_root, s_item);
 		k_add_head(shares_store, s_item);
+		if (s2_item) {
+			// Just ignore duplicates
+			tmp_item = find_in_ktree(shares_db_root, s2_item, ctx);
+			if (tmp_item == NULL) {
+				add_to_ktree(shares_hi_root, s2_item);
+				add_to_ktree(shares_db_root, s2_item);
+				k_add_head(shares_hi_store, s2_item);
+			} else {
+				k_add_head(shares_free, s2_item);
+				s2_item = NULL;
+			}
+		}
 		K_WUNLOCK(shares_free);
 
 		shares_process_early(conn, wi_item, &(shares->createdate),
@@ -3738,6 +3783,268 @@ tisbad:
 	k_add_head(shares_free, s_item);
 	K_WUNLOCK(shares_free);
 	return false;
+}
+
+bool shares_db(PGconn *conn, K_ITEM *s_item)
+{
+	ExecStatusType rescode;
+	bool conned = false;
+	PGresult *res;
+	SHARES *row;
+	char *ins;
+	char *params[14 + HISTORYDATECOUNT];
+	int n, par = 0;
+	bool ok = false;
+
+	LOGDEBUG("%s(): store", __func__);
+
+	DATA_SHARES(row, s_item);
+
+	par = 0;
+	params[par++] = bigint_to_buf(row->workinfoid, NULL, 0);
+	params[par++] = bigint_to_buf(row->userid, NULL, 0);
+	params[par++] = str_to_buf(row->workername, NULL, 0);
+	params[par++] = int_to_buf(row->clientid, NULL, 0);
+	params[par++] = str_to_buf(row->enonce1, NULL, 0);
+	params[par++] = str_to_buf(row->nonce2, NULL, 0);
+	params[par++] = str_to_buf(row->nonce, NULL, 0);
+	params[par++] = double_to_buf(row->diff, NULL, 0);
+	params[par++] = double_to_buf(row->sdiff, NULL, 0);
+	params[par++] = int_to_buf(row->errn, NULL, 0);
+	params[par++] = str_to_buf(row->error, NULL, 0);
+	params[par++] = str_to_buf(row->secondaryuserid, NULL, 0);
+	params[par++] = str_to_buf(row->ntime, NULL, 0);
+	params[par++] = double_to_buf(row->minsdiff, NULL, 0);
+	HISTORYDATEPARAMS(params, par, row);
+	PARCHK(par, params);
+
+	ins = "insert into shares "
+		"(workinfoid,userid,workername,clientid,enonce1,nonce2,nonce,"
+		"diff,sdiff,errn,error,secondaryuserid,ntime,minsdiff"
+		HISTORYDATECONTROL ") values (" PQPARAM19 ")";
+
+	if (!conn) {
+		conn = dbconnect();
+		conned = true;
+	}
+
+	res = PQexecParams(conn, ins, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_WRITE);
+	rescode = PQresultStatus(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Insert", rescode, conn);
+		goto unparam;
+	}
+
+	ok = true;
+unparam:
+	if (par) {
+		PQclear(res);
+		if (conned)
+			PQfinish(conn);
+		for (n = 0; n < par; n++)
+			free(params[n]);
+	}
+
+	if (ok) {
+		K_WLOCK(shares_free);
+
+		remove_from_ktree(shares_hi_root, s_item);
+
+		K_WUNLOCK(shares_free);
+	}
+
+	return ok;
+}
+
+bool shares_fill(PGconn *conn)
+{
+	ExecStatusType rescode;
+	PGresult *res;
+	K_ITEM *item = NULL;
+	SHARES *row;
+	int n, t, i;
+	char *field;
+	char *sel = NULL;
+	int fields = 14;
+	bool ok = false;
+
+	LOGDEBUG("%s(): select", __func__);
+
+	printf(TICK_PREFIX"sh 0\r");
+	fflush(stdout);
+
+	sel = "declare sh cursor for select "
+		"workinfoid,userid,workername,clientid,enonce1,nonce2,nonce,"
+		"diff,sdiff,errn,error,secondaryuserid,ntime,minsdiff"
+		HISTORYDATECONTROL
+		" from shares";
+
+	res = PQexec(conn, "Begin", CKPQ_READ);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Begin", rescode, conn);
+		return false;
+	}
+
+	res = PQexec(conn, "Lock table shares in access exclusive mode", CKPQ_READ);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Lock", rescode, conn);
+		goto flail;
+	}
+
+	res = PQexec(conn, sel, CKPQ_READ);
+	rescode = PQresultStatus(res);
+	PQclear(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Declare", rescode, conn);
+		goto flail;
+	}
+
+	LOGDEBUG("%s(): fetching ...", __func__);
+
+	res = PQexec(conn, "fetch 1 in sh", CKPQ_READ);
+	rescode = PQresultStatus(res);
+	if (!PGOK(rescode)) {
+		PGLOGERR("Fetch first", rescode, conn);
+		PQclear(res);
+		goto flail;
+	}
+
+	n = PQnfields(res);
+	if (n != (fields + HISTORYDATECOUNT)) {
+		LOGERR("%s(): Invalid field count - should be %d, but is %d",
+			__func__, fields + HISTORYDATECOUNT, n);
+		PQclear(res);
+		goto flail;
+	}
+
+	n = 0;
+	ok = true;
+	K_WLOCK(shares_free);
+	while ((t = PQntuples(res)) > 0) {
+		for (i = 0; i < t; i++) {
+			item = k_unlink_head(shares_free);
+			DATA_SHARES(row, item);
+			bzero(row, sizeof(*row));
+
+			if (everyone_die) {
+				ok = false;
+				break;
+			}
+
+			PQ_GET_FLD(res, i, "workinfoid", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_BIGINT("workinfoid", field, row->workinfoid);
+
+			PQ_GET_FLD(res, i, "userid", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_BIGINT("userid", field, row->userid);
+
+			PQ_GET_FLD(res, i, "workername", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_STR("workername", field, row->workername);
+
+			PQ_GET_FLD(res, i, "clientid", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_INT("clientid", field, row->clientid);
+
+			PQ_GET_FLD(res, i, "enonce1", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_STR("enonce1", field, row->enonce1);
+
+			PQ_GET_FLD(res, i, "nonce2", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_STR("nonce2", field, row->nonce2);
+
+			PQ_GET_FLD(res, i, "nonce", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_STR("nonce", field, row->nonce);
+
+			PQ_GET_FLD(res, i, "diff", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_DOUBLE("diff", field, row->diff);
+
+			PQ_GET_FLD(res, i, "sdiff", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_DOUBLE("sdiff", field, row->sdiff);
+
+			PQ_GET_FLD(res, i, "errn", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_INT("errn", field, row->errn);
+
+			PQ_GET_FLD(res, i, "error", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_STR("error", field, row->error);
+
+			PQ_GET_FLD(res, i, "secondaryuserid", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_STR("secondaryuserid", field, row->secondaryuserid);
+
+			PQ_GET_FLD(res, i, "ntime", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_STR("ntime", field, row->ntime);
+
+			PQ_GET_FLD(res, i, "minsdiff", field, ok);
+			if (!ok)
+				break;
+			TXT_TO_DOUBLE("minsdiff", field, row->sdiff);
+
+			HISTORYDATEFLDS(res, i, row, ok);
+			if (!ok)
+				break;
+
+			add_to_ktree(shares_db_root, item);
+			k_add_head(shares_hi_store, item);
+
+			if (n == 0 || ((n+1) % 100000) == 0) {
+				printf(TICK_PREFIX"sh ");
+				pcom(n+1);
+				putchar('\r');
+				fflush(stdout);
+			}
+			tick();
+			n++;
+		}
+		PQclear(res);
+		res = PQexec(conn, "fetch 9999 in sh", CKPQ_READ);
+		rescode = PQresultStatus(res);
+		if (!PGOK(rescode)) {
+			PGLOGERR("Fetch next", rescode, conn);
+			ok = false;
+			break;
+		}
+	}
+	if (!ok)
+		k_add_head(shares_free, item);
+
+	K_WUNLOCK(shares_free);
+	PQclear(res);
+flail:
+	res = PQexec(conn, "Commit", CKPQ_READ);
+	PQclear(res);
+
+	if (ok) {
+		LOGDEBUG("%s(): built", __func__);
+		LOGWARNING("%s(): fetched %d shares records", __func__, n);
+	}
+
+	return ok;
 }
 
 static bool shareerrors_process(PGconn *conn, SHAREERRORS *shareerrors,
@@ -6364,7 +6671,7 @@ bool payouts_fill(PGconn *conn)
 		PQ_GET_FLD(res, i, "lastshareacc", field, ok);
 		if (!ok)
 			break;
-		TXT_TO_TV("lastshareacc", field, row->lastshareacc);
+		TXT_TO_TVDB("lastshareacc", field, row->lastshareacc);
 
 		PQ_GET_FLD(res, i, "stats", field, ok);
 		if (!ok)
@@ -7581,22 +7888,22 @@ bool markersummary_fill(PGconn *conn)
 			PQ_GET_FLD(res, i, "firstshare", field, ok);
 			if (!ok)
 				break;
-			TXT_TO_TV("firstshare", field, row->firstshare);
+			TXT_TO_TVDB("firstshare", field, row->firstshare);
 
 			PQ_GET_FLD(res, i, "lastshare", field, ok);
 			if (!ok)
 				break;
-			TXT_TO_TV("lastshare", field, row->lastshare);
+			TXT_TO_TVDB("lastshare", field, row->lastshare);
 
 			PQ_GET_FLD(res, i, "firstshareacc", field, ok);
 			if (!ok)
 				break;
-			TXT_TO_TV("firstshareacc", field, row->firstshareacc);
+			TXT_TO_TVDB("firstshareacc", field, row->firstshareacc);
 
 			PQ_GET_FLD(res, i, "lastshareacc", field, ok);
 			if (!ok)
 				break;
-			TXT_TO_TV("lastshareacc", field, row->lastshareacc);
+			TXT_TO_TVDB("lastshareacc", field, row->lastshareacc);
 
 			PQ_GET_FLD(res, i, "lastdiffacc", field, ok);
 			if (!ok)
