@@ -26,7 +26,7 @@ function dockp($data, $user)
 	$ans = repDecode($rep);
 
  $pg .= 'TotalRAM: '.stnum($ans['totalram']).'<br>';
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<thead><tr class=title>';
  $pg .= '<td class=dl>Name</td>';
  $pg .= '<td class=dr>Initial</td>';

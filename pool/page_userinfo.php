@@ -20,7 +20,7 @@ function douserinfo($data, $user)
  $ans = getUserInfo($user);
 
  $pg = '<h1>Block Acclaim</h1>';
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<thead><tr class=title>';
  $pg .= '<td class=dl>User</td>';
  $pg .= '<td class=dr>Blocks</td>';

@@ -34,7 +34,7 @@ static K_ITEM *adminuser(K_TREE *trf_root, char *reply, size_t siz)
 
 static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 			 char *code, char *inet, __maybe_unused tv_t *notcd,
-			 K_TREE *trf_root)
+			 K_TREE *trf_root, __maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -87,7 +87,8 @@ static char *cmd_adduser(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 
 static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 			 tv_t *now, char *by, char *code, char *inet,
-			 __maybe_unused tv_t *cd, K_TREE *trf_root)
+			 __maybe_unused tv_t *cd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_oldhash, *i_newhash, *i_2fa, *u_item;
 	char reply[1024] = "";
@@ -166,7 +167,8 @@ static char *cmd_newpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 static char *cmd_chkpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 			 __maybe_unused tv_t *now, __maybe_unused char *by,
 			 __maybe_unused char *code, __maybe_unused char *inet,
-			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_passwordhash, *i_2fa, *u_item;
 	char reply[1024] = "";
@@ -222,7 +224,8 @@ static char *cmd_chkpass(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 static char *cmd_2fa(__maybe_unused PGconn *conn, char *cmd, char *id,
 		     tv_t *now, char *by, char *code, char *inet,
-		     __maybe_unused tv_t *notcd, K_TREE *trf_root)
+		     __maybe_unused tv_t *notcd, K_TREE *trf_root,
+		     __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_action, *i_entropy, *i_value, *u_item, *u_new;
 	char reply[1024] = "";
@@ -464,7 +467,8 @@ dame:
 static char *cmd_userset(PGconn *conn, char *cmd, char *id,
 			 __maybe_unused tv_t *now, __maybe_unused char *by,
 			 __maybe_unused char *code, __maybe_unused char *inet,
-			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_passwordhash, *i_2fa, *i_rows, *i_address;
 	K_ITEM *i_ratio, *i_payname, *i_email, *u_item, *pa_item, *old_pa_item;
@@ -781,7 +785,7 @@ struckout:
 
 static char *cmd_workerset(PGconn *conn, char *cmd, char *id, tv_t *now,
 			   char *by, char *code, char *inet, tv_t *cd,
-			   K_TREE *trf_root)
+			   K_TREE *trf_root, __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_workername, *i_diffdef, *i_oldworkers;
 	K_ITEM *u_item, *ua_item, *w_item;
@@ -1081,7 +1085,7 @@ static char *cmd_poolstats_do(PGconn *conn, char *cmd, char *id, char *by,
 static char *cmd_poolstats(PGconn *conn, char *cmd, char *id,
 			   __maybe_unused tv_t *notnow, char *by,
 			   char *code, char *inet, tv_t *cd,
-			   K_TREE *trf_root)
+			   K_TREE *trf_root, __maybe_unused bool reload_data)
 {
 	bool igndup = false;
 
@@ -1096,7 +1100,8 @@ static char *cmd_poolstats(PGconn *conn, char *cmd, char *id,
 
 static char *cmd_userstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 			   __maybe_unused tv_t *notnow, char *by, char *code,
-			   char *inet, tv_t *cd, K_TREE *trf_root)
+			   char *inet, tv_t *cd, K_TREE *trf_root,
+			   __maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -1180,7 +1185,8 @@ static char *cmd_userstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 
 static char *cmd_workerstats(__maybe_unused PGconn *conn, char *cmd, char *id,
 			     __maybe_unused tv_t *notnow, char *by, char *code,
-			     char *inet, tv_t *cd, K_TREE *trf_root)
+			     char *inet, tv_t *cd, K_TREE *trf_root,
+			     __maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -1263,7 +1269,8 @@ static char *cmd_blocklist(__maybe_unused PGconn *conn, char *cmd, char *id,
 			   tv_t *now, __maybe_unused char *by,
 			   __maybe_unused char *code, __maybe_unused char *inet,
 			   __maybe_unused tv_t *notcd,
-			   __maybe_unused K_TREE *trf_root)
+			   __maybe_unused K_TREE *trf_root,
+			   __maybe_unused bool reload_data)
 {
 	int ovent = OVENT_OK;
 	K_TREE_CTX ctx[1];
@@ -1525,7 +1532,8 @@ redo:
 
 static char *cmd_blockstatus(PGconn *conn, char *cmd, char *id, tv_t *now,
 			     char *by, char *code, char *inet,
-			     __maybe_unused tv_t *cd, K_TREE *trf_root)
+			     __maybe_unused tv_t *cd, K_TREE *trf_root,
+			     __maybe_unused bool reload_data)
 {
 	K_ITEM *i_height, *i_blockhash, *i_action, *i_info;
 	char reply[1024] = "";
@@ -1682,7 +1690,7 @@ static char *cmd_blockstatus(PGconn *conn, char *cmd, char *id, tv_t *now,
 
 static char *cmd_newid(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 			char *code, char *inet, __maybe_unused tv_t *cd,
-			K_TREE *trf_root)
+			K_TREE *trf_root, __maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -1718,7 +1726,8 @@ static char *cmd_payments(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  __maybe_unused tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
 			  __maybe_unused tv_t *notcd,
-			  __maybe_unused K_TREE *trf_root)
+			  __maybe_unused K_TREE *trf_root,
+			  __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *u_item, *p_item, *p2_item, *po_item;
 	K_TREE_CTX ctx[1];
@@ -2056,7 +2065,8 @@ static char *cmd_percent(char *cmd, char *id, tv_t *now, USERS *users)
 static char *cmd_workers(__maybe_unused PGconn *conn, char *cmd, char *id,
 			 tv_t *now, __maybe_unused char *by,
 			 __maybe_unused char *code, __maybe_unused char *inet,
-			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_stats, *i_percent, w_look, *u_item, *w_item;
 	K_ITEM *ua_item, *us_item, *ws_item;
@@ -2382,7 +2392,8 @@ static char *cmd_allusers(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  __maybe_unused tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
 			  __maybe_unused tv_t *notcd,
-			  __maybe_unused K_TREE *trf_root)
+			  __maybe_unused K_TREE *trf_root,
+			  __maybe_unused bool reload_data)
 {
 	K_STORE *usu_store = k_new_store(userstats_free);
 	K_ITEM *us_item, *usu_item, *u_item;
@@ -2494,7 +2505,8 @@ static char *cmd_allusers(__maybe_unused PGconn *conn, char *cmd, char *id,
 static char *cmd_sharelog(PGconn *conn, char *cmd, char *id,
 				__maybe_unused tv_t *notnow, char *by,
 				char *code, char *inet, tv_t *cd,
-				K_TREE *trf_root)
+				K_TREE *trf_root,
+				__maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -2946,7 +2958,7 @@ static char *cmd_blocks_do(PGconn *conn, char *cmd, int32_t height, char *id,
 static char *cmd_blocks(PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *notnow, char *by,
 			char *code, char *inet, tv_t *cd,
-			K_TREE *trf_root)
+			K_TREE *trf_root, __maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -2969,12 +2981,13 @@ static char *cmd_blocks(PGconn *conn, char *cmd, char *id,
 			igndup = true;
 	}
 
-	return cmd_blocks_do(conn, cmd, height, id, by, code, inet, cd, igndup, trf_root);
+	return cmd_blocks_do(conn, cmd, height, id, by, code, inet, cd, igndup,
+				trf_root);
 }
 
 static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 				char *code, char *inet, tv_t *cd,
-				K_TREE *trf_root)
+				K_TREE *trf_root, bool reload_data)
 {
 	K_ITEM tmp_poolinstance_item;
 	TRANSFER tmp_poolinstance;
@@ -3046,7 +3059,8 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 		u_item = find_users(username);
 		K_RUNLOCK(users_free);
 		if (!u_item) {
-			event = events_add(EVENTID_AUTOACC, trf_root);
+			if (!reload_data)
+				event = events_add(EVENTID_AUTOACC, trf_root);
 			if (event == EVENT_OK) {
 				DATA_OPTIONCONTROL(optioncontrol, oc_item);
 				u_item = users_add(conn, username, EMPTY,
@@ -3067,7 +3081,7 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 				     transfer_data(i_useragent),
 				     transfer_data(i_preauth),
 				     by, code, inet, cd, trf_root, false,
-				     &users, &workers, &event);
+				     &users, &workers, &event, reload_data);
 	}
 
 	if (!ok) {
@@ -3123,14 +3137,15 @@ static char *cmd_auth_do(PGconn *conn, char *cmd, char *id, char *by,
 static char *cmd_auth(PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, char *by,
 			char *code, char *inet, tv_t *cd,
-			K_TREE *trf_root)
+			K_TREE *trf_root, bool reload_data)
 {
-	return cmd_auth_do(conn, cmd, id, by, code, inet, cd, trf_root);
+	return cmd_auth_do(conn, cmd, id, by, code, inet, cd, trf_root,
+				reload_data);
 }
 
 static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 				char *code, char *inet, tv_t *cd,
-				K_TREE *trf_root)
+				K_TREE *trf_root, bool reload_data)
 {
 	K_ITEM tmp_poolinstance_item;
 	TRANSFER tmp_poolinstance;
@@ -3201,7 +3216,7 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 			     transfer_data(i_useragent),
 			     transfer_data(i_preauth),
 			     by, code, inet, cd, trf_root, true,
-			     &users, &workers, &event);
+			     &users, &workers, &event, reload_data);
 
 	if (!ok) {
 		LOGDEBUG("%s() %s.failed.DBE", __func__, id);
@@ -3256,16 +3271,18 @@ static char *cmd_addrauth_do(PGconn *conn, char *cmd, char *id, char *by,
 static char *cmd_addrauth(PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, char *by,
 			char *code, char *inet, tv_t *cd,
-			K_TREE *trf_root)
+			K_TREE *trf_root, bool reload_data)
 {
-	return cmd_addrauth_do(conn, cmd, id, by, code, inet, cd, trf_root);
+	return cmd_addrauth_do(conn, cmd, id, by, code, inet, cd, trf_root,
+				reload_data);
 }
 
 static char *cmd_heartbeat(__maybe_unused PGconn *conn, char *cmd, char *id,
 			   __maybe_unused tv_t *now, __maybe_unused char *by,
 			   __maybe_unused char *code, __maybe_unused char *inet,
 			   __maybe_unused tv_t *cd,
-			   __maybe_unused K_TREE *trf_root)
+			   __maybe_unused K_TREE *trf_root,
+			   __maybe_unused bool reload_data)
 {
 	HEARTBEATQUEUE *heartbeatqueue;
 	K_STORE *hq_store;
@@ -3331,7 +3348,8 @@ pulse:
 static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
-			  __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			  __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			  __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *u_item, *b_item, *p_item, *us_item, look;
 	K_ITEM *ua_item, *pa_item;
@@ -3506,12 +3524,16 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 	int psync = pool_workqueue_store->count;
 	int csync = cmd_workqueue_store->count;
 	int bsync = btc_workqueue_store->count;
+	int qsync = breakqueue_free->total - breakqueue_free->count;
 	snprintf(tmp, sizeof(tmp), "psync=%d%c", psync, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "csync=%d%c", csync, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 	snprintf(tmp, sizeof(tmp), "bsync=%d%c", bsync, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
+	snprintf(tmp, sizeof(tmp), "qsync=%d%c", qsync, FLDSEP);
+	APPEND_REALLOC(buf, off, len, tmp);
+	// qsync isn't part of 'sync'
 	snprintf(tmp, sizeof(tmp), "sync=%d%c", psync + csync + bsync, FLDSEP);
 	APPEND_REALLOC(buf, off, len, tmp);
 
@@ -3622,7 +3644,8 @@ static char *cmd_homepage(__maybe_unused PGconn *conn, char *cmd, char *id,
 static char *cmd_getatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 			 tv_t *now, __maybe_unused char *by,
 			 __maybe_unused char *code, __maybe_unused char *inet,
-			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_attlist, *u_item, *ua_item;
 	char reply[1024] = "";
@@ -3798,7 +3821,8 @@ static void att_to_date(tv_t *date, char *data, tv_t *now)
  *  */
 static char *cmd_setatts(PGconn *conn, char *cmd, char *id,
 			 tv_t *now, char *by, char *code, char *inet,
-			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	ExecStatusType rescode;
 	PGresult *res;
@@ -3967,7 +3991,8 @@ bats:
 static char *cmd_expatts(__maybe_unused PGconn *conn, char *cmd, char *id,
 			 tv_t *now, __maybe_unused char *by,
 			 __maybe_unused char *code, __maybe_unused char *inet,
-			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_attlist, *u_item, *ua_item;
 	char reply[1024] = "";
@@ -4050,7 +4075,8 @@ rats:
 static char *cmd_getopts(__maybe_unused PGconn *conn, char *cmd, char *id,
 			 tv_t *now, __maybe_unused char *by,
 			 __maybe_unused char *code, __maybe_unused char *inet,
-			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	K_ITEM *i_optlist, *oc_item;
 	char reply[1024] = "";
@@ -4128,7 +4154,8 @@ ruts:
  *  See opt_set_date() above */
 static char *cmd_setopts(PGconn *conn, char *cmd, char *id,
 			 tv_t *now, char *by, char *code, char *inet,
-			 __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			 __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	ExecStatusType rescode;
 	PGresult *res;
@@ -4276,9 +4303,10 @@ rollback:
  *  and the breakdown for percent address users,
  *  the totals per user and per payout should still be the same */
 static char *cmd_pplns(__maybe_unused PGconn *conn, char *cmd, char *id,
-			  __maybe_unused tv_t *now, __maybe_unused char *by,
-			  __maybe_unused char *code, __maybe_unused char *inet,
-			  __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			__maybe_unused tv_t *now, __maybe_unused char *by,
+			__maybe_unused char *code, __maybe_unused char *inet,
+			__maybe_unused tv_t *notcd, K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	char reply[1024], tmp[1024], *buf;
 	char *block_extra, *share_status = EMPTY, *marks_status = EMPTY;
@@ -4753,9 +4781,10 @@ shazbot:
 
 // Generated from the payouts, miningpayouts and payments data
 static char *cmd_pplns2(__maybe_unused PGconn *conn, char *cmd, char *id,
-			  __maybe_unused tv_t *now, __maybe_unused char *by,
-			  __maybe_unused char *code, __maybe_unused char *inet,
-			  __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			__maybe_unused tv_t *now, __maybe_unused char *by,
+			__maybe_unused char *code, __maybe_unused char *inet,
+			__maybe_unused tv_t *notcd, K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	char reply[1024], tmp[1024], *buf;
 	char *block_extra, *marks_status = EMPTY;
@@ -5022,7 +5051,8 @@ shazbot:
 
 static char *cmd_payouts(PGconn *conn, char *cmd, char *id, tv_t *now,
 			 char *by, char *code, char *inet,
-			 __maybe_unused tv_t *cd, K_TREE *trf_root)
+			 __maybe_unused tv_t *cd, K_TREE *trf_root,
+			 __maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -5274,7 +5304,8 @@ static char *cmd_mpayouts(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  __maybe_unused tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
 			  __maybe_unused tv_t *notcd,
-			  __maybe_unused K_TREE *trf_root)
+			  __maybe_unused K_TREE *trf_root,
+			  __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *u_item, *mp_item, *po_item;
 	K_TREE_CTX ctx[1];
@@ -5466,7 +5497,8 @@ static int select_list(WM *wm, char *select)
 static char *cmd_shifts(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
-			  __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			  __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			  __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username, *i_select;
 	K_ITEM *u_item, *p_item, *m_item, ms_look, *wm_item, *ms_item, *wi_item;
@@ -5815,7 +5847,8 @@ static char *cmd_dsp(__maybe_unused PGconn *conn, __maybe_unused char *cmd,
 		     char *id, __maybe_unused tv_t *now,
 		     __maybe_unused char *by, __maybe_unused char *code,
 		     __maybe_unused char *inet, __maybe_unused tv_t *notcd,
-		     __maybe_unused K_TREE *trf_root)
+		     __maybe_unused K_TREE *trf_root,
+		     __maybe_unused bool reload_data)
 {
 	__maybe_unused K_ITEM *i_file;
 	__maybe_unused char reply[1024] = "";
@@ -5861,7 +5894,9 @@ static char *cmd_dsp(__maybe_unused PGconn *conn, __maybe_unused char *cmd,
 static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, __maybe_unused char *by,
 			__maybe_unused char *code, __maybe_unused char *inet,
-			__maybe_unused tv_t *notcd, __maybe_unused K_TREE *trf_root)
+			__maybe_unused tv_t *notcd,
+			__maybe_unused K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	char tmp[1024], *buf;
 	const char *name;
@@ -5949,7 +5984,7 @@ static char *cmd_stats(__maybe_unused PGconn *conn, char *cmd, char *id,
 // TODO: add to heartbeat to disable the miner if active and status != ""
 static char *cmd_userstatus(PGconn *conn, char *cmd, char *id, tv_t *now, char *by,
 			    char *code, char *inet, __maybe_unused tv_t *cd,
-			    K_TREE *trf_root)
+			    K_TREE *trf_root, __maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -6016,7 +6051,7 @@ static char *cmd_userstatus(PGconn *conn, char *cmd, char *id, tv_t *now, char *
 static char *cmd_marks(PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, char *by,
 			char *code, char *inet, tv_t *cd,
-			K_TREE *trf_root)
+			K_TREE *trf_root, __maybe_unused bool reload_data)
 {
 	char reply[1024] = "";
 	size_t siz = sizeof(reply);
@@ -6535,7 +6570,8 @@ dame:
 static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
-			  __maybe_unused tv_t *notcd, K_TREE *trf_root)
+			  __maybe_unused tv_t *notcd, K_TREE *trf_root,
+			  __maybe_unused bool reload_data)
 {
 	K_ITEM *i_username;
 	K_ITEM *u_item, *p_item, *m_item, *wm_item, *ms_item, *wi_item;
@@ -6740,17 +6776,25 @@ static char *cmd_pshift(__maybe_unused PGconn *conn, char *cmd, char *id,
 }
 
 /* Show a share status report on the console
- * Currently: sequence status and OoO info */
+ * Currently: sequence status, OoO info and max_sockd_count */
 static char *cmd_shsta(__maybe_unused PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, __maybe_unused char *by,
 			__maybe_unused char *code, __maybe_unused char *inet,
-			__maybe_unused tv_t *notcd, __maybe_unused K_TREE *trf_root)
+			__maybe_unused tv_t *notcd,
+			__maybe_unused K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	char ooo_buf[256];
 	char buf[256];
+	int count;
 
 	LOGWARNING("OoO %s", ooo_status(ooo_buf, sizeof(ooo_buf)));
 	sequence_report(true);
+
+	K_RLOCK(breakqueue_free);
+	count = max_sockd_count;
+	K_RUNLOCK(breakqueue_free);
+	LOGWARNING(" max_sockd_count=%d", count);
 
 	snprintf(buf, sizeof(buf), "ok.%s", cmd);
 	LOGDEBUG("%s.%s", id, buf);
@@ -6761,7 +6805,8 @@ static char *cmd_userinfo(__maybe_unused PGconn *conn, char *cmd, char *id,
 			  __maybe_unused tv_t *now, __maybe_unused char *by,
 			  __maybe_unused char *code, __maybe_unused char *inet,
 			  __maybe_unused tv_t *notcd,
-			  __maybe_unused K_TREE *trf_root)
+			  __maybe_unused K_TREE *trf_root,
+			  __maybe_unused bool reload_data)
 {
 	K_ITEM *ui_item;
 	USERINFO *userinfo;
@@ -6850,7 +6895,8 @@ static char *cmd_userinfo(__maybe_unused PGconn *conn, char *cmd, char *id,
 static char *cmd_btcset(__maybe_unused PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, __maybe_unused char *by,
 			__maybe_unused char *code, __maybe_unused char *inet,
-			__maybe_unused tv_t *notcd, K_TREE *trf_root)
+			__maybe_unused tv_t *notcd, K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	K_ITEM *i_btcserver, *i_userpass;
 	char *btcserver = NULL, *userpass = NULL, *tmp;
@@ -6902,7 +6948,8 @@ static char *cmd_btcset(__maybe_unused PGconn *conn, char *cmd, char *id,
 static char *cmd_query(__maybe_unused PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, __maybe_unused char *by,
 			__maybe_unused char *code, __maybe_unused char *inet,
-			__maybe_unused tv_t *cd, K_TREE *trf_root)
+			__maybe_unused tv_t *cd, K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	K_TREE_CTX ctx[1];
 	char cd_buf[DATE_BUFSIZ];
@@ -7498,7 +7545,8 @@ static char *cmd_locks(__maybe_unused PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, __maybe_unused char *by,
 			__maybe_unused char *code, __maybe_unused char *inet,
 			__maybe_unused tv_t *cd,
-			__maybe_unused K_TREE *trf_root)
+			__maybe_unused K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	bool code_locks = false, code_deadlocks = false;
 	bool was_locks = false, was_deadlocks = false;
@@ -7570,11 +7618,12 @@ static void event_tree(K_TREE *the_tree, char *list, char *reply, size_t siz,
 			snprintf(reply, siz, "list:%d=%s%c",
 				 *rows, list, FLDSEP);
 			APPEND_REALLOC(*buf, *off, *len, reply);
-
 			snprintf(reply, siz, "id:%d=%d%c",
 				 *rows, e->id, FLDSEP);
 			APPEND_REALLOC(*buf, *off, *len, reply);
-
+			snprintf(reply, siz, "idname:%d=%s%c",
+				 *rows, e_limits[e->id].name, FLDSEP);
+			APPEND_REALLOC(*buf, *off, *len, reply);
 			snprintf(reply, siz, "user:%d=%s%c",
 				 *rows, e->createby, FLDSEP);
 			APPEND_REALLOC(*buf, *off, *len, reply);
@@ -7609,11 +7658,13 @@ static void event_tree(K_TREE *the_tree, char *list, char *reply, size_t siz,
 static char *cmd_events(__maybe_unused PGconn *conn, char *cmd, char *id,
 			tv_t *now, __maybe_unused char *by,
 			__maybe_unused char *code, __maybe_unused char *inet,
-			__maybe_unused tv_t *cd, K_TREE *trf_root)
+			__maybe_unused tv_t *cd, K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	K_ITEM *i_action, *i_cmd, *i_list, *i_ip, *i_eventname, *i_lifetime;
-	K_ITEM *i_des, *i_item, *next_item;
+	K_ITEM *i_des, *i_item, *next_item, *o_item;
 	K_TREE_CTX ctx[1];
+	OVENTS *ovents;
 	IPS *ips;
 	char *action, *alert_cmd, *list, *ip, *eventname, *des;
 	char reply[1024] = "";
@@ -7621,7 +7672,7 @@ static char *cmd_events(__maybe_unused PGconn *conn, char *cmd, char *id,
 	char tmp[1024] = "";
 	char *buf = NULL;
 	size_t len, off;
-	int i, rows, oldlife, lifetime;
+	int i, rows, oldlife, lifetime, vid, min;
 
 	LOGDEBUG("%s(): cmd '%s'", __func__, cmd);
 
@@ -8034,6 +8085,50 @@ static char *cmd_events(__maybe_unused PGconn *conn, char *cmd, char *id,
 		APPEND_REALLOC_INIT(buf, off, len);
 		snprintf(tmp, sizeof(tmp), "ok.expired %d", rows);
 		APPEND_REALLOC(buf, off, len, tmp);
+	} else if (strcasecmp(action, "ovents") == 0) {
+		/* List the ovent tree contents
+		 * Output can be large - check web Admin->ckp for tree sizes */
+		bool got;
+		APPEND_REALLOC_INIT(buf, off, len);
+		APPEND_REALLOC(buf, off, len, "ok.");
+		rows = 0;
+		K_RLOCK(ovents_free);
+		o_item = first_in_ktree(ovents_root, ctx);
+		while (o_item) {
+			DATA_OVENTS(ovents, o_item);
+			for (vid = 0; o_limits[vid].name; vid++) {
+				got = false;
+				for (min = 0; min < 60; min++) {
+					if (ovents->count[IDMIN(vid, min)]) {
+						if (!got) {
+							snprintf(reply, siz, "key:%d=%s%c",
+								 rows, ovents->key, FLDSEP);
+							APPEND_REALLOC(buf, off, len, reply);
+							snprintf(reply, siz, "id:%d=%d%c",
+								 rows, vid, FLDSEP);
+							APPEND_REALLOC(buf, off, len, reply);
+							snprintf(reply, siz, "idname:%d=%s%c",
+								 rows, o_limits[vid].name, FLDSEP);
+							APPEND_REALLOC(buf, off, len, reply);
+							snprintf(reply, siz, "hour:%d=%d%c",
+								 rows, ovents->hour, FLDSEP);
+							APPEND_REALLOC(buf, off, len, reply);
+							got = true;
+						}
+						snprintf(reply, siz, "min%02d:%d=%d%c",
+							 min, rows, ovents->count[IDMIN(vid, min)],
+							 FLDSEP);
+						APPEND_REALLOC(buf, off, len, reply);
+					}
+				}
+				if (got)
+					rows++;
+			}
+			o_item = next_in_ktree(ctx);
+		}
+		K_RUNLOCK(ovents_free);
+		snprintf(tmp, sizeof(tmp), "rows=%d", rows);
+		APPEND_REALLOC(buf, off, len, tmp);
 	} else {
 		snprintf(reply, siz, "unknown action '%s'", action);
 		LOGERR("%s() %s.%s", __func__, id, reply);
@@ -8047,7 +8142,8 @@ static char *cmd_events(__maybe_unused PGconn *conn, char *cmd, char *id,
 static char *cmd_high(PGconn *conn, char *cmd, char *id,
 			__maybe_unused tv_t *now, __maybe_unused char *by,
 			__maybe_unused char *code, __maybe_unused char *inet,
-			__maybe_unused tv_t *cd, K_TREE *trf_root)
+			__maybe_unused tv_t *cd, K_TREE *trf_root,
+			__maybe_unused bool reload_data)
 {
 	bool conned = false;
 	K_TREE_CTX ctx[1];

@@ -30,7 +30,8 @@ function dousperf($data, $user)
 
  // This also defines how many worker fields there are
  $cols = array('#0000c0', '#00dd00', '#e06020', '#b020e0');
- $nc = count($cols);
+ $cols2 = array('#2090e0', '#e0c040', '#ff6090', '#90e040');
+ $nc = count($cols)+count($cols2);
 
  $workers = 'all';
  if (isset($_COOKIE['workers']))
@@ -93,9 +94,24 @@ function dousperf($data, $user)
 			$datacols .= ',';
 		$datacols .= $col;
 	}
-
 	$oncl = "wch();location.href=\"".makeURL('usperf')."\"";
 	$pg .= "<button type=button onclick='$oncl'>Update</button></form><div>";
+
+	# the rest of the workers/colours go below the graph
+	$pg2 = '<form>';
+	foreach ($cols2 as $col)
+	{
+		$i++;
+		$pg2 .= " <span class=nb><font color=$col>Worker$i";
+		$pg2 .= "<input type=checkbox id=lin$i checked onclick='godrw(0)'>:</font>";
+		$pg2 .= "<input type=text size=10 id=worker$i$onch> </span>";
+
+		if ($i > 1)
+			$datacols .= ',';
+		$datacols .= $col;
+	}
+	$pg2 .= "<button type=button onclick='$oncl'>Update</button></form>\n";
+
 	foreach ($cbx as $nam => $txt)
 	{
 		$pg .= ' <span class=nb>';
@@ -107,6 +123,7 @@ function dousperf($data, $user)
 	$pg .= '<div id=can0><canvas id=can width=1 height=1>';
 	$pg .= 'A graph will show here if your browser supports html5/canvas';
 	$pg .= "</canvas></div>\n";
+	$pg .= $pg2;
 	$data = str_replace(array("\\","'"), array("\\\\","\\'"), $ans['DATA']);
 	$data .= $fld_sep . 'cols' . $val_sep . $datacols;
 	$pg .= "<script type='text/javascript'>\n";

@@ -143,7 +143,7 @@ function dopercent($data, $user)
 {
  $pg = '<h1>Address Percents</h1>';
 
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
 
  $totshare = 0;
  $totdiff = 0;

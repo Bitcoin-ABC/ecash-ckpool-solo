@@ -28,9 +28,9 @@
  *  with an ok.queued reply to ckpool, to be processed after the reload
  *  completes and just process authorise messages immediately while the
  *  reload runs
- * We start the ckpool message queue after loading
- *  the users, idcontrol and workers DB tables, before loading the
- *  much larger DB tables so that ckdb is effectively ready for messages
+ * However, we start the ckpool message queue after loading
+ *  the optioncontrol, users, workers and useratts DB tables, before loading
+ *  the much larger DB tables, so that ckdb is effectively ready for messages
  *  almost immediately
  * The first ckpool message allows us to know where ckpool is up to
  *  in the CCLs - see reload_from() for how this is handled
@@ -47,8 +47,10 @@
  *	complete='a' (or 'y') and were deleted from RAM
  *	If there are none with complete='n' but are others in the DB,
  *	then the newest firstshare is used
+ *  DB shares: no current processing done with the shares_hi tree inside
+ *	CKDB. DB load gets the past 1 day to resolve duplicates
  *  RAM shareerrors: as above
- *  DB+RAM sharesummary: created from shares, so as above
+ *  RAM sharesummary: created from shares, so as above
  *	Some shares after this may have been summarised to other
  *	sharesummary complete='n', but for any such sharesummary
  *	we reset it back to the first share found and it will
@@ -112,6 +114,15 @@ static bool logger_using_data;
 static bool plistener_using_data;
 static bool clistener_using_data;
 static bool blistener_using_data;
+static bool breakdown_using_data;
+
+// -B to override calculated value
+static int breakdown_threads = -1;
+static int reload_breakdown_count = 0;
+static int cmd_breakdown_count = 0;
+/* Lock for access to *breakdown_count
+ * Any change to/from 0 will update breakdown_using_data */
+static cklock_t breakdown_lock;
 
 char *EMPTY = "";
 const char *nullstr = "(null)";
@@ -128,6 +139,7 @@ static char *status_chars = "|/-\\";
 
 static char *restorefrom;
 
+static bool ignore_seq = false;
 bool genpayout_auto;
 bool markersummary_auto;
 
@@ -331,13 +343,31 @@ K_STORE *logqueue_store;
 K_LIST *msgline_free;
 K_STORE *msgline_store;
 
+// BREAKQUEUE
+K_LIST *breakqueue_free;
+K_STORE *reload_breakqueue_store;
+K_STORE *reload_done_breakqueue_store;
+K_STORE *cmd_breakqueue_store;
+K_STORE *cmd_done_breakqueue_store;
+// Locked access with breakqueue_free
+static int reload_processing;
+static int cmd_processing;
+static int sockd_count;
+int max_sockd_count;
+
 // WORKQUEUE
 K_LIST *workqueue_free;
+// pool0 is all pool data during the reload
+K_STORE *pool0_workqueue_store;
 K_STORE *pool_workqueue_store;
 K_STORE *cmd_workqueue_store;
 K_STORE *btc_workqueue_store;
 mutex_t wq_waitlock;
 pthread_cond_t wq_waitcond;
+// this counter ensures we don't switch early from pool0 to pool
+static int pool0_left;
+static int pool0_tot;
+static int pool0_discarded;
 
 // HEARTBEATQUEUE
 K_LIST *heartbeatqueue_free;
@@ -435,6 +465,7 @@ K_STORE *shares_hi_store;
 
 double diff_percent = DIFF_VAL(DIFF_PERCENT_DEFAULT);
 double share_min_sdiff = 0;
+int64_t shares_begin = -1;
 
 // SHAREERRORS shareerrors.id.json={...}
 K_TREE *shareerrors_root;
@@ -593,7 +624,8 @@ K_TREE *markersummary_pool_root;
 K_STORE *markersummary_pool_store;
 
 // The markerid load start for markersummary
-char *mark_start = NULL;
+char mark_start_type = '\0';
+int64_t mark_start = -1;
 
 // WORKMARKERS
 K_TREE *workmarkers_root;
@@ -812,6 +844,17 @@ static void check_createdate_ccl(char *cmd, tv_t *cd)
 	STRNCPY(last_cmd, cmd);
 }
 
+void _ckdb_unix_msg(int sockd, const char *msg, WHERE_FFL_ARGS)
+{
+	bool ok;
+
+	ok = _send_unix_msg(sockd, msg, UNIX_WRITE_TIMEOUT, WHERE_FFL_PASS);
+	if (!ok) {
+		LOGWARNING(" msg was %.42s%s", msg ? : nullstr,
+						msg ? "..." : EMPTY);
+	}
+}
+
 static uint64_t ticks;
 static time_t last_tick;
 
@@ -913,8 +956,12 @@ static bool getdata3()
 		if (!(ok = miningpayouts_fill(conn)) || everyone_die)
 			goto sukamudai;
 	}
+	PQfinish(conn);
+	conn = dbconnect();
 	if (!(ok = workinfo_fill(conn)) || everyone_die)
 		goto sukamudai;
+	PQfinish(conn);
+	conn = dbconnect();
 	if (!(ok = marks_fill(conn)) || everyone_die)
 		goto sukamudai;
 	/* must be after workinfo */
@@ -925,8 +972,12 @@ static bool getdata3()
 		if (!(ok = payouts_fill(conn)) || everyone_die)
 			goto sukamudai;
 	}
+	PQfinish(conn);
+	conn = dbconnect();
 	if (!(ok = markersummary_fill(conn)) || everyone_die)
 		goto sukamudai;
+	PQfinish(conn);
+	conn = dbconnect();
 	if (!(ok = shares_fill(conn)) || everyone_die)
 		goto sukamudai;
 	if (!confirm_sharesummary && !everyone_die)
@@ -1122,6 +1173,7 @@ static void alloc_storage()
 
 	workqueue_free = k_new_list("WorkQueue", sizeof(WORKQUEUE),
 					ALLOC_WORKQUEUE, LIMIT_WORKQUEUE, true);
+	pool0_workqueue_store = k_new_store(workqueue_free);
 	pool_workqueue_store = k_new_store(workqueue_free);
 	cmd_workqueue_store = k_new_store(workqueue_free);
 	btc_workqueue_store = k_new_store(workqueue_free);
@@ -1204,8 +1256,8 @@ static void alloc_storage()
 	shares_root = new_ktree(NULL, cmp_shares, shares_free);
 	shares_early_root = new_ktree("SharesEarly", cmp_shares, shares_free);
 	shares_hi_store = k_new_store(shares_free);
-	shares_hi_root = new_ktree("SharesHi", cmp_shares, shares_free);
-	shares_db_root = new_ktree("SharesDB", cmp_shares, shares_free);
+	shares_hi_root = new_ktree("SharesHi", cmp_shares_db, shares_free);
+	shares_db_root = new_ktree("SharesDB", cmp_shares_db, shares_free);
 
 	shareerrors_free = k_new_list("ShareErrors", sizeof(SHAREERRORS),
 					ALLOC_SHAREERRORS, LIMIT_SHAREERRORS,
@@ -1688,10 +1740,18 @@ static void dealloc_storage()
 
 	FREE_LIST(transfer);
 	FREE_LISTS(heartbeatqueue);
+	// TODO: msgline
+	FREE_STORE(pool0_workqueue);
 	FREE_STORE(pool_workqueue);
 	FREE_STORE(cmd_workqueue);
 	FREE_STORE(btc_workqueue);
 	FREE_LIST(workqueue);
+	// TODO: sockets/buf/msgline
+	FREE_STORE(cmd_done_breakqueue);
+	FREE_STORE(cmd_breakqueue);
+	FREE_STORE(reload_done_breakqueue);
+	FREE_STORE(reload_breakqueue);
+	FREE_LIST(breakqueue);
 	FREE_LISTS(msgline);
 
 	if (free_mode != FREE_MODE_ALL)
@@ -1727,6 +1787,9 @@ static bool setup_data()
 	mutex_init(&wq_waitlock);
 	cond_init(&wq_waitcond);
 
+	LOGWARNING("%sSequence processing is %s",
+		   ignore_seq ? "ALERT: " : "",
+		   ignore_seq ? "Off" : "On");
 	LOGWARNING("%sStartup payout generation state is %s",
 		   genpayout_auto ? "" : "WARNING: ",
 		   genpayout_auto ? "On" : "Off");
@@ -2680,6 +2743,15 @@ static enum cmd_values process_seq(MSGLINE *msgline)
 	bool dupall, dupcmd;
 	char *st = NULL;
 
+	if (ignore_seq)
+		return ckdb_cmds[msgline->which_cmds].cmd_val;
+
+	/* If non-seqall data was in a CCL reload file,
+	 *  it can't be processed by update_seq(), so don't */
+	if (msgline->n_seqall == 0 && msgline->n_seqstt == 0 &&
+	    msgline->n_seqpid == 0)
+		return ckdb_cmds[msgline->which_cmds].cmd_val;
+
 	dupall = update_seq(SEQ_ALL, msgline->n_seqall, msgline->n_seqstt,
 			    msgline->n_seqpid, SEQALL, &(msgline->now),
 			    &(msgline->cd), msgline->code,
@@ -3095,7 +3167,8 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 		if (confirm_check_createdate)
 			check_createdate_ccl(msgline->cmd, &(msgline->cd));
 		if (seqall) {
-			setup_seq(seqall, msgline);
+			if (!ignore_seq)
+				setup_seq(seqall, msgline);
 			free(cmdptr);
 			return ckdb_cmds[msgline->which_cmds].cmd_val;
 		} else {
@@ -3142,6 +3215,137 @@ nogood:
 	}
 	free(cmdptr);
 	return CMD_REPLY;
+}
+
+static void *breaker(void *arg)
+{
+	K_ITEM *bq_item = NULL;
+	BREAKQUEUE *bq = NULL;
+	char buf[128];
+	int thr, zeros;
+	bool reload, was_zero, msg = false;
+	int queue_sleep, queue_limit, count;
+
+	pthread_detach(pthread_self());
+
+	// Is this a reload thread or a cmd thread?
+	reload = *(bool *)(arg);
+	if (reload) {
+		queue_limit = RELOAD_QUEUE_LIMIT;
+		queue_sleep = RELOAD_QUEUE_SLEEP;
+	} else {
+		queue_limit = CMD_QUEUE_LIMIT;
+		queue_sleep = CMD_QUEUE_SLEEP;
+	}
+
+	ck_wlock(&breakdown_lock);
+	if (reload)
+		thr = ++reload_breakdown_count;
+	else
+		thr = ++cmd_breakdown_count;
+	breakdown_using_data = true;
+	ck_wunlock(&breakdown_lock);
+
+	if (breakdown_threads < 10)
+		zeros = 1;
+	else
+		zeros = (int)log10(breakdown_threads) + 1;
+
+	snprintf(buf, sizeof(buf), "db_%c%0*d%s",
+		 reload ? 'r' : 'c', zeros, thr, __func__);
+	LOCK_INIT(buf);
+	rename_proc(buf);
+
+	if (reload) {
+		/* reload has to wait for the reload to start, however, also
+		 * check for startup_complete in case we missed the reload */
+		while (!everyone_die && !reloading && !startup_complete)
+			cksleep_ms(queue_sleep);
+	}
+
+	while (!everyone_die) {
+		K_WLOCK(breakqueue_free);
+		bq_item = NULL;
+		was_zero = false;
+		if (reload)
+			count = reload_done_breakqueue_store->count;
+		else
+			count = cmd_done_breakqueue_store->count;
+
+		// Don't unlink if we are above the limit
+		if (count <= queue_limit) {
+			if (reload)
+				bq_item = k_unlink_head(reload_breakqueue_store);
+			else
+				bq_item = k_unlink_head(cmd_breakqueue_store);
+			if (!bq_item)
+				was_zero = true;
+		}
+		K_WUNLOCK(breakqueue_free);
+
+		if (!bq_item) {
+			// Is the queue empty and the reload completed?
+			if (was_zero && reload && !reloading)
+				break;
+
+			cksleep_ms(queue_sleep);
+			continue;
+		}
+
+		DATA_BREAKQUEUE(bq, bq_item);
+
+		if (reload) {
+			bool matched = false;
+			ck_wlock(&fpm_lock);
+			if (first_pool_message &&
+			    strcmp(first_pool_message, bq->buf) == 0) {
+				matched = true;
+				FREENULL(first_pool_message);
+			}
+			ck_wunlock(&fpm_lock);
+			if (matched) {
+				LOGERR("%s() reload ckpool queue match at line %"PRIu64,
+					__func__, bq->count);
+			}
+		}
+
+		bq->cmdnum = breakdown(&(bq->ml_item), bq->buf, &(bq->now), bq->seqentryflags);
+		K_WLOCK(breakqueue_free);
+		if (reload)
+			k_add_tail(reload_done_breakqueue_store, bq_item);
+		else
+			k_add_tail(cmd_done_breakqueue_store, bq_item);
+
+		if (breakqueue_free->count == breakqueue_free->total &&
+		    breakqueue_free->total >= ALLOC_BREAKQUEUE * CULL_BREAKQUEUE)
+			k_cull_list(breakqueue_free);
+		K_WUNLOCK(breakqueue_free);
+	}
+
+	// Get it now while the lock still exists, in case we need it
+	K_RLOCK(breakqueue_free);
+	// Not 100% exact since it could still increase, but close enough
+	count = max_sockd_count;
+	K_RUNLOCK(breakqueue_free);
+
+	ck_wlock(&breakdown_lock);
+	if (reload)
+		reload_breakdown_count--;
+	else
+		cmd_breakdown_count--;
+
+	if ((reload_breakdown_count + cmd_breakdown_count) < 1) {
+		breakdown_using_data = false;
+		msg = true;
+	}
+	ck_wunlock(&breakdown_lock);
+
+	if (msg) {
+		LOGWARNING("%s() threads shut down - max_sockd_count=%d",
+			   __func__, count);
+	}
+
+	return NULL;
 }
 
 static void check_blocks()
@@ -4144,14 +4348,17 @@ static void process_sockd(PGconn *conn, K_ITEM *wq_item)
 						  workqueue->code,
 						  workqueue->inet,
 						  &(msgline->cd),
-						  msgline->trf_root);
+						  msgline->trf_root, false);
 	siz = strlen(ans) + strlen(msgline->id) + 32;
 	rep = malloc(siz);
 	snprintf(rep, siz, "%s.%ld.%s",
 		 msgline->id,
 		 msgline->now.tv_sec, ans);
-	send_unix_msg(msgline->sockd, rep);
+	ckdb_unix_msg(msgline->sockd, rep);
 	close(msgline->sockd);
+	K_WLOCK(breakqueue_free);
+	sockd_count--;
+	K_WUNLOCK(breakqueue_free);
 	FREENULL(ans);
 	FREENULL(rep);
 
@@ -4166,6 +4373,8 @@ static void process_sockd(PGconn *conn, K_ITEM *wq_item)
 	    workqueue_free->total >= ALLOC_WORKQUEUE * CULL_WORKQUEUE)
 		k_cull_list(workqueue_free);
 	K_WUNLOCK(workqueue_free);
+
+	tick();
 }
 
 static void *clistener(__maybe_unused void *arg)
@@ -4173,6 +4382,8 @@ static void *clistener(__maybe_unused void *arg)
 	PGconn *conn = NULL;
 	K_ITEM *wq_item;
 	time_t now;
+
+	pthread_detach(pthread_self());
 
 	LOCK_INIT("db_clistener");
 	rename_proc("db_clistener");
@@ -4194,10 +4405,9 @@ static void *clistener(__maybe_unused void *arg)
 			now = time(NULL);
 		}
 
-		if (wq_item) {
+		if (wq_item)
 			process_sockd(conn, wq_item);
-			tick();
-		} else
+		else
 			cksleep_ms(42);
 	}
 
@@ -4215,12 +4425,13 @@ static void *blistener(__maybe_unused void *arg)
 	K_ITEM *wq_item;
 	time_t now;
 
+	pthread_detach(pthread_self());
+
 	LOCK_INIT("db_blistener");
 	rename_proc("db_blistener");
 
 	blistener_using_data = true;
 
-	conn = dbconnect();
 	now = time(NULL);
 
 	while (!everyone_die) {
@@ -4235,10 +4446,9 @@ static void *blistener(__maybe_unused void *arg)
 			now = time(NULL);
 		}
 
-		if (wq_item) {
+		if (wq_item)
 			process_sockd(conn, wq_item);
-			tick();
-		} else 
+		else 
 			cksleep_ms(142);
 	}
 
@@ -4250,22 +4460,359 @@ static void *blistener(__maybe_unused void *arg)
 	return NULL;
 }
 
-static void *socketer(__maybe_unused void *arg)
+static void *process_socket(void *arg)
 {
 	proc_instance_t *pi = (proc_instance_t *)arg;
-	pthread_t clis_pt, blis_pt;
-	unixsock_t *us = &pi->us;
-	char *end, *ans = NULL, *rep = NULL, *buf = NULL, *tmp;
-	enum cmd_values cmdnum;
-	int sockd;
-	K_ITEM *wq_item = NULL, *ml_item = NULL;
-	WORKQUEUE *workqueue;
-	MSGLINE *msgline;
-	char reply[1024+1];
-	size_t siz;
-	tv_t now;
-	bool want_first, replied, btc;
+	K_ITEM *bq_item = NULL, *wq_item = NULL;
+	WORKQUEUE *workqueue = NULL;
+	BREAKQUEUE *bq = NULL;
+	MSGLINE *msgline = NULL;
+	bool want_first, replied, btc, dec_sockd;
 	int loglevel, oldloglevel;
+	char reply[1024+1];
+	char *ans = NULL, *rep = NULL, *tmp;
+	size_t siz;
+
+	pthread_detach(pthread_self());
+
+	LOCK_INIT("db_procsock");
+	rename_proc("db_procsock");
+
+	want_first = true;
+	while (!everyone_die) {
+		K_WLOCK(breakqueue_free);
+		bq_item = k_unlink_head(cmd_done_breakqueue_store);
+		if (bq_item)
+			cmd_processing++;
+		K_WUNLOCK(breakqueue_free);
+
+		if (!bq_item) {
+			cksleep_ms(24);
+			continue;
+		}
+
+		DATA_BREAKQUEUE(bq, bq_item);
+		DATA_MSGLINE(msgline, bq->ml_item);
+		replied = btc = false;
+		switch (bq->cmdnum) {
+			case CMD_REPLY:
+				snprintf(reply, sizeof(reply),
+					 "%s.%ld.?.",
+					 msgline->id,
+					 bq->now.tv_sec);
+				ckdb_unix_msg(bq->sockd, reply);
+				break;
+			case CMD_ALERTEVENT:
+			case CMD_ALERTOVENT:
+				snprintf(reply, sizeof(reply),
+					 "%s.%ld.failed.ERR",
+					 msgline->id,
+					 bq->now.tv_sec);
+				if (bq->cmdnum == CMD_ALERTEVENT)
+					tmp = reply_event(EVENTID_NONE, reply);
+				else
+					tmp = reply_ovent(OVENTID_NONE, reply);
+				ckdb_unix_msg(bq->sockd, tmp);
+				FREENULL(tmp);
+				break;
+			case CMD_TERMINATE:
+				LOGWARNING("Listener received"
+					   " terminate message,"
+					   " terminating ckdb");
+				snprintf(reply, sizeof(reply),
+					 "%s.%ld.ok.exiting",
+					 msgline->id,
+					 bq->now.tv_sec);
+				ckdb_unix_msg(bq->sockd, reply);
+				everyone_die = true;
+				break;
+			case CMD_PING:
+				LOGDEBUG("Listener received ping"
+					 " request");
+				snprintf(reply, sizeof(reply),
+					 "%s.%ld.ok.pong",
+					 msgline->id,
+					 bq->now.tv_sec);
+				ckdb_unix_msg(bq->sockd, reply);
+				break;
+			case CMD_VERSION:
+				LOGDEBUG("Listener received"
+					 " version request");
+				snprintf(reply, sizeof(reply),
+					 "%s.%ld.ok.CKDB V%s",
+					 msgline->id,
+					 bq->now.tv_sec,
+					 CKDB_VERSION);
+				ckdb_unix_msg(bq->sockd, reply);
+				break;
+			case CMD_LOGLEVEL:
+				if (!*(msgline->id)) {
+					LOGDEBUG("Listener received"
+						 " loglevel, currently %d",
+						 pi->ckp->loglevel);
+					snprintf(reply, sizeof(reply),
+						 "%s.%ld.ok.loglevel"
+						 " currently %d",
+						 msgline->id,
+						 bq->now.tv_sec,
+						 pi->ckp->loglevel);
+				} else {
+					oldloglevel = pi->ckp->loglevel;
+					loglevel = atoi(msgline->id);
+					LOGDEBUG("Listener received loglevel"
+						 " %d currently %d A",
+						 loglevel, oldloglevel);
+					if (loglevel < LOG_EMERG ||
+					    loglevel > LOG_DEBUG) {
+						snprintf(reply, sizeof(reply),
+							 "%s.%ld.ERR.invalid"
+							 " loglevel %d"
+							 " - currently %d",
+							 msgline->id,
+							 bq->now.tv_sec,
+							 loglevel,
+							 oldloglevel);
+					} else {
+						pi->ckp->loglevel = loglevel;
+						snprintf(reply, sizeof(reply),
+							 "%s.%ld.ok.loglevel"
+							 " now %d - was %d",
+							 msgline->id,
+							 bq->now.tv_sec,
+							 pi->ckp->loglevel,
+							 oldloglevel);
+					}
+					// Do this twice since the loglevel may have changed
+					LOGDEBUG("Listener received loglevel"
+						 " %d currently %d B",
+						 loglevel, oldloglevel);
+				}
+				ckdb_unix_msg(bq->sockd, reply);
+				break;
+			case CMD_FLUSH:
+				LOGDEBUG("Listener received"
+					 " flush request");
+				snprintf(reply, sizeof(reply),
+					 "%s.%ld.ok.splash",
+					 msgline->id, bq->now.tv_sec);
+				ckdb_unix_msg(bq->sockd, reply);
+				fflush(stdout);
+				fflush(stderr);
+				if (global_ckp && global_ckp->logfd)
+					fflush(global_ckp->logfp);
+				break;
+			case CMD_USERSET:
+			case CMD_BTCSET:
+				btc = true;
+			case CMD_CHKPASS:
+			case CMD_2FA:
+			case CMD_ADDUSER:
+			case CMD_NEWPASS:
+			case CMD_WORKERSET:
+			case CMD_GETATTS:
+			case CMD_SETATTS:
+			case CMD_EXPATTS:
+			case CMD_GETOPTS:
+			case CMD_SETOPTS:
+			case CMD_BLOCKLIST:
+			case CMD_NEWID:
+			case CMD_STATS:
+			case CMD_USERSTATUS:
+			case CMD_SHSTA:
+			case CMD_USERINFO:
+			case CMD_LOCKS:
+			case CMD_EVENTS:
+			case CMD_HIGH:
+				msgline->sockd = bq->sockd;
+				bq->sockd = -1;
+				K_WLOCK(workqueue_free);
+				wq_item = k_unlink_head(workqueue_free);
+				DATA_WORKQUEUE(workqueue, wq_item);
+				workqueue->msgline_item = bq->ml_item;
+				workqueue->by = by_default;
+				workqueue->code =  (char *)__func__;
+				workqueue->inet = inet_default;
+				if (btc)
+					k_add_tail(btc_workqueue_store, wq_item);
+				else
+					k_add_tail(cmd_workqueue_store, wq_item);
+				K_WUNLOCK(workqueue_free);
+				wq_item = bq->ml_item = NULL;
+				break;
+			// Process, but reject (loading) until startup_complete
+			case CMD_HOMEPAGE:
+			case CMD_ALLUSERS:
+			case CMD_WORKERS:
+			case CMD_PAYMENTS:
+			case CMD_PPLNS:
+			case CMD_PPLNS2:
+			case CMD_PAYOUTS:
+			case CMD_MPAYOUTS:
+			case CMD_SHIFTS:
+			case CMD_PSHIFT:
+			case CMD_DSP:
+			case CMD_BLOCKSTATUS:
+			case CMD_MARKS:
+			case CMD_QUERY:
+				if (!startup_complete) {
+					snprintf(reply, sizeof(reply),
+						 "%s.%ld.loading.%s",
+						 msgline->id,
+						 bq->now.tv_sec,
+						 msgline->cmd);
+					ckdb_unix_msg(bq->sockd, reply);
+				} else {
+					msgline->sockd = bq->sockd;
+					bq->sockd = -1;
+					K_WLOCK(workqueue_free);
+					wq_item = k_unlink_head(workqueue_free);
+					DATA_WORKQUEUE(workqueue, wq_item);
+					workqueue->msgline_item = bq->ml_item;
+					workqueue->by = by_default;
+					workqueue->code =  (char *)__func__;
+					workqueue->inet = inet_default;
+					if (btc)
+						k_add_tail(btc_workqueue_store, wq_item);
+					else
+						k_add_tail(cmd_workqueue_store, wq_item);
+					K_WUNLOCK(workqueue_free);
+					wq_item = bq->ml_item = NULL;
+				}
+				break;
+			// Always process immediately:
+			case CMD_AUTH:
+			case CMD_ADDRAUTH:
+			case CMD_HEARTBEAT:
+				// First message from the pool
+				if (want_first) {
+					want_first = false;
+					ck_wlock(&fpm_lock);
+					first_pool_message = strdup(bq->buf);
+					ck_wunlock(&fpm_lock);
+				}
+				DATA_MSGLINE(msgline, bq->ml_item);
+				ans = ckdb_cmds[msgline->which_cmds].func(NULL,
+						msgline->cmd,
+						msgline->id,
+						&(msgline->now),
+						by_default,
+						(char *)__func__,
+						inet_default,
+						&(msgline->cd),
+						msgline->trf_root, false);
+				siz = strlen(ans) + strlen(msgline->id) + 32;
+				rep = malloc(siz);
+				snprintf(rep, siz, "%s.%ld.%s",
+					 msgline->id,
+					 bq->now.tv_sec, ans);
+				ckdb_unix_msg(bq->sockd, rep);
+				FREENULL(ans);
+				FREENULL(rep);
+				replied = true;
+			// Always queue (ok.queued)
+			case CMD_SHARELOG:
+			case CMD_POOLSTAT:
+			case CMD_USERSTAT:
+			case CMD_WORKERSTAT:
+			case CMD_BLOCK:
+				if (!replied) {
+					// First message from the pool
+					if (want_first) {
+						want_first = false;
+						ck_wlock(&fpm_lock);
+						first_pool_message = strdup(bq->buf);
+						ck_wunlock(&fpm_lock);
+					}
+					snprintf(reply, sizeof(reply),
+						 "%s.%ld.ok.queued",
+						 msgline->id,
+						 bq->now.tv_sec);
+					ckdb_unix_msg(bq->sockd, reply);
+				}
+
+				K_WLOCK(workqueue_free);
+				wq_item = k_unlink_head(workqueue_free);
+				DATA_WORKQUEUE(workqueue, wq_item);
+				workqueue->msgline_item = bq->ml_item;
+				workqueue->by = by_default;
+				workqueue->code =  (char *)__func__;
+				workqueue->inet = inet_default;
+				if (bq->seqentryflags == SE_SOCKET)
+					k_add_tail(pool_workqueue_store, wq_item);
+				else {
+					k_add_tail(pool0_workqueue_store, wq_item);
+					/* Stop the reload queue from growing too big
+					 * Use a size that 'should be big enough' */
+					if (reloading && pool0_workqueue_store->count > 250000) {
+						K_ITEM *wq2_item = k_unlink_head(pool0_workqueue_store);
+						pool0_discarded++;
+						pool0_left--;
+						K_WUNLOCK(workqueue_free);
+						WORKQUEUE *wq;
+						DATA_WORKQUEUE(wq, wq2_item);
+						K_ITEM *ml_item = wq->msgline_item;
+						free_msgline_data(ml_item, true, false);
+						K_WLOCK(msgline_free);
+						k_add_head(msgline_free, ml_item);
+						K_WUNLOCK(msgline_free);
+						K_WLOCK(workqueue_free);
+						k_add_head(workqueue_free, wq2_item);
+					}
+				}
+				K_WUNLOCK(workqueue_free);
+				wq_item = bq->ml_item = NULL;
+				mutex_lock(&wq_waitlock);
+				pthread_cond_signal(&wq_waitcond);
+				mutex_unlock(&wq_waitlock);
+				break;
+			// Code error
+			default:
+				LOGEMERG("%s() CODE ERROR unhandled"
+					 " message %d %.32s...",
+					 __func__, bq->cmdnum, bq->buf);
+				snprintf(reply, sizeof(reply),
+					 "%s.%ld.failed.code",
+					 msgline->id,
+					 bq->now.tv_sec);
+				ckdb_unix_msg(bq->sockd, reply);
+				break;
+		}
+		if (bq->sockd >= 0) {
+			close(bq->sockd);
+			dec_sockd = true;
+		} else
+			dec_sockd = false;
+
+		if (bq->ml_item) {
+			free_msgline_data(bq->ml_item, true, true);
+			K_WLOCK(msgline_free);
+			k_add_head(msgline_free, bq->ml_item);
+			K_WUNLOCK(msgline_free);
+			bq->ml_item = NULL;
+		}
+		free(bq->buf);
+
+		K_WLOCK(breakqueue_free);
+		if (dec_sockd)
+			sockd_count--;
+		cmd_processing--;
+		k_add_head(breakqueue_free, bq_item);
+		K_WUNLOCK(breakqueue_free);
+	}
+
+	return NULL;
+}
+
+static void *socketer(void *arg)
+{
+	proc_instance_t *pi = (proc_instance_t *)arg;
+	pthread_t clis_pt, blis_pt, proc_pt;
+	unixsock_t *us = &pi->us;
+	char *end, *buf = NULL;
+	K_ITEM *bq_item = NULL;
+	BREAKQUEUE *bq = NULL;
+	int sockd;
+	tv_t now;
 
 	pthread_detach(pthread_self());
 
@@ -4282,19 +4829,16 @@ static void *socketer(__maybe_unused void *arg)
 		create_pthread(&clis_pt, clistener, NULL);
 
 		create_pthread(&blis_pt, blistener, NULL);
+
+		create_pthread(&proc_pt, process_socket, arg);
 	}
 
-	want_first = true;
 	while (!everyone_die) {
-		if (buf)
-			dealloc(buf);
 		sockd = accept(us->sockd, NULL, NULL);
 		if (sockd < 0) {
 			LOGERR("%s() Failed to accept on socket", __func__);
 			break;
 		}
-
-		cmdnum = CMD_UNSET;
 
 		buf = recv_unix_msg_tmo2(sockd, RECV_UNIX_TIMEOUT1, RECV_UNIX_TIMEOUT2);
 		// Once we've read the message
@@ -4309,358 +4853,90 @@ static void *socketer(__maybe_unused void *arg)
 			// An empty message wont get a reply
 			if (!buf)
 				LOGWARNING("%s() Failed to get message", __func__);
-			else
+			else {
 				LOGWARNING("%s() Empty message", __func__);
+				free(buf);
+			}
 		} else {
 			int seqentryflags = SE_SOCKET;
-			if (!reload_queue_complete)
+			if (!reload_queue_complete) {
 				seqentryflags = SE_EARLYSOCK;
-			cmdnum = breakdown(&ml_item, buf, &now, seqentryflags);
-			DATA_MSGLINE(msgline, ml_item);
-			replied = btc = false;
-			switch (cmdnum) {
-				case CMD_REPLY:
-					snprintf(reply, sizeof(reply),
-						 "%s.%ld.?.",
-						 msgline->id,
-						 now.tv_sec);
-					send_unix_msg(sockd, reply);
-					break;
-				case CMD_ALERTEVENT:
-				case CMD_ALERTOVENT:
-					snprintf(reply, sizeof(reply),
-						 "%s.%ld.failed.ERR",
-						 msgline->id,
-						 now.tv_sec);
-					if (cmdnum == CMD_ALERTEVENT)
-						tmp = reply_event(EVENTID_NONE, reply);
-					else
-						tmp = reply_ovent(OVENTID_NONE, reply);
-					send_unix_msg(sockd, tmp);
-					FREENULL(tmp);
-					break;
-				case CMD_TERMINATE:
-					LOGWARNING("Listener received"
-						   " terminate message,"
-						   " terminating ckdb");
-					snprintf(reply, sizeof(reply),
-						 "%s.%ld.ok.exiting",
-						 msgline->id,
-						 now.tv_sec);
-					send_unix_msg(sockd, reply);
-					everyone_die = true;
-					break;
-				case CMD_PING:
-					LOGDEBUG("Listener received ping"
-						 " request");
-					snprintf(reply, sizeof(reply),
-						 "%s.%ld.ok.pong",
-						 msgline->id,
-						 now.tv_sec);
-					send_unix_msg(sockd, reply);
-					break;
-				case CMD_VERSION:
-					LOGDEBUG("Listener received"
-						 " version request");
-					snprintf(reply, sizeof(reply),
-						 "%s.%ld.ok.CKDB V%s",
-						 msgline->id,
-						 now.tv_sec,
-						 CKDB_VERSION);
-					send_unix_msg(sockd, reply);
-					break;
-				case CMD_LOGLEVEL:
-					if (!*(msgline->id)) {
-						LOGDEBUG("Listener received"
-							 " loglevel, currently %d",
-							 pi->ckp->loglevel);
-						snprintf(reply, sizeof(reply),
-							 "%s.%ld.ok.loglevel"
-							 " currently %d",
-							 msgline->id,
-							 now.tv_sec,
-							 pi->ckp->loglevel);
-					} else {
-						oldloglevel = pi->ckp->loglevel;
-						loglevel = atoi(msgline->id);
-						LOGDEBUG("Listener received loglevel"
-							 " %d currently %d A",
-							 loglevel, oldloglevel);
-						if (loglevel < LOG_EMERG ||
-						    loglevel > LOG_DEBUG) {
-							snprintf(reply, sizeof(reply),
-								 "%s.%ld.ERR.invalid"
-								 " loglevel %d"
-								 " - currently %d",
-								 msgline->id,
-								 now.tv_sec,
-								 loglevel,
-								 oldloglevel);
-						} else {
-							pi->ckp->loglevel = loglevel;
-							snprintf(reply, sizeof(reply),
-								 "%s.%ld.ok.loglevel"
-								 " now %d - was %d",
-								 msgline->id,
-								 now.tv_sec,
-								 pi->ckp->loglevel,
-								 oldloglevel);
-						}
-						// Do this twice since the loglevel may have changed
-						LOGDEBUG("Listener received loglevel"
-							 " %d currently %d B",
-							 loglevel, oldloglevel);
-					}
-					send_unix_msg(sockd, reply);
-					break;
-				case CMD_FLUSH:
-					LOGDEBUG("Listener received"
-						 " flush request");
-					snprintf(reply, sizeof(reply),
-						 "%s.%ld.ok.splash",
-						 msgline->id, now.tv_sec);
-					send_unix_msg(sockd, reply);
-					fflush(stdout);
-					fflush(stderr);
-					if (global_ckp && global_ckp->logfd)
-						fflush(global_ckp->logfp);
-					break;
-				case CMD_USERSET:
-				case CMD_BTCSET:
-					btc = true;
-				case CMD_CHKPASS:
-				case CMD_2FA:
-				case CMD_ADDUSER:
-				case CMD_NEWPASS:
-				case CMD_WORKERSET:
-				case CMD_GETATTS:
-				case CMD_SETATTS:
-				case CMD_EXPATTS:
-				case CMD_GETOPTS:
-				case CMD_SETOPTS:
-				case CMD_BLOCKLIST:
-				case CMD_NEWID:
-				case CMD_STATS:
-				case CMD_USERSTATUS:
-				case CMD_SHSTA:
-				case CMD_USERINFO:
-				case CMD_LOCKS:
-				case CMD_EVENTS:
-				case CMD_HIGH:
-					msgline->sockd = sockd;
-					sockd = -1;
-					K_WLOCK(workqueue_free);
-					wq_item = k_unlink_head(workqueue_free);
-					DATA_WORKQUEUE(workqueue, wq_item);
-					workqueue->msgline_item = ml_item;
-					workqueue->by = by_default;
-					workqueue->code =  (char *)__func__;
-					workqueue->inet = inet_default;
-					if (btc)
-						k_add_tail(btc_workqueue_store, wq_item);
-					else
-						k_add_tail(cmd_workqueue_store, wq_item);
-					K_WUNLOCK(workqueue_free);
-					wq_item = ml_item = NULL;
-					break;
-				// Process, but reject (loading) until startup_complete
-				case CMD_HOMEPAGE:
-				case CMD_ALLUSERS:
-				case CMD_WORKERS:
-				case CMD_PAYMENTS:
-				case CMD_PPLNS:
-				case CMD_PPLNS2:
-				case CMD_PAYOUTS:
-				case CMD_MPAYOUTS:
-				case CMD_SHIFTS:
-				case CMD_PSHIFT:
-				case CMD_DSP:
-				case CMD_BLOCKSTATUS:
-				case CMD_MARKS:
-				case CMD_QUERY:
-					if (!startup_complete) {
-						snprintf(reply, sizeof(reply),
-							 "%s.%ld.loading.%s",
-							 msgline->id,
-							 now.tv_sec,
-							 msgline->cmd);
-						send_unix_msg(sockd, reply);
-					} else {
-						msgline->sockd = sockd;
-						sockd = -1;
-						K_WLOCK(workqueue_free);
-						wq_item = k_unlink_head(workqueue_free);
-						DATA_WORKQUEUE(workqueue, wq_item);
-						workqueue->msgline_item = ml_item;
-						workqueue->by = by_default;
-						workqueue->code =  (char *)__func__;
-						workqueue->inet = inet_default;
-						if (btc)
-							k_add_tail(btc_workqueue_store, wq_item);
-						else
-							k_add_tail(cmd_workqueue_store, wq_item);
-						K_WUNLOCK(workqueue_free);
-						wq_item = ml_item = NULL;
-					}
-					break;
-				// Always process immediately:
-				case CMD_AUTH:
-				case CMD_ADDRAUTH:
-				case CMD_HEARTBEAT:
-					// First message from the pool
-					if (want_first) {
-						want_first = false;
-						ck_wlock(&fpm_lock);
-						first_pool_message = strdup(buf);
-						ck_wunlock(&fpm_lock);
-					}
-					DATA_MSGLINE(msgline, ml_item);
-					ans = ckdb_cmds[msgline->which_cmds].func(NULL,
-							msgline->cmd,
-							msgline->id,
-							&(msgline->now),
-							by_default,
-							(char *)__func__,
-							inet_default,
-							&(msgline->cd),
-							msgline->trf_root);
-					siz = strlen(ans) + strlen(msgline->id) + 32;
-					rep = malloc(siz);
-					snprintf(rep, siz, "%s.%ld.%s",
-						 msgline->id,
-						 now.tv_sec, ans);
-					send_unix_msg(sockd, rep);
-					FREENULL(ans);
-					replied = true;
-				// Always queue (ok.queued)
-				case CMD_SHARELOG:
-				case CMD_POOLSTAT:
-				case CMD_USERSTAT:
-				case CMD_WORKERSTAT:
-				case CMD_BLOCK:
-					if (!replied) {
-						// First message from the pool
-						if (want_first) {
-							want_first = false;
-							ck_wlock(&fpm_lock);
-							first_pool_message = strdup(buf);
-							ck_wunlock(&fpm_lock);
-						}
-						snprintf(reply, sizeof(reply),
-							 "%s.%ld.ok.queued",
-							 msgline->id,
-							 now.tv_sec);
-						send_unix_msg(sockd, reply);
-					}
-
-					K_WLOCK(workqueue_free);
-					wq_item = k_unlink_head(workqueue_free);
-					DATA_WORKQUEUE(workqueue, wq_item);
-					workqueue->msgline_item = ml_item;
-					workqueue->by = by_default;
-					workqueue->code =  (char *)__func__;
-					workqueue->inet = inet_default;
-					k_add_tail(pool_workqueue_store, wq_item);
-					/* Stop the reload queue from growing too big
-					 * Use a size that should be big enough */
-					if (reloading && pool_workqueue_store->count > 250000) {
-						K_ITEM *wq2_item = k_unlink_head(pool_workqueue_store);
-						K_WUNLOCK(workqueue_free);
-						WORKQUEUE *wq;
-						DATA_WORKQUEUE(wq, wq2_item);
-						K_ITEM *ml_item = wq->msgline_item;
-						free_msgline_data(ml_item, true, false);
-						K_WLOCK(msgline_free);
-						k_add_head(msgline_free, ml_item);
-						K_WUNLOCK(msgline_free);
-						K_WLOCK(workqueue_free);
-						k_add_head(workqueue_free, wq2_item);
-					}
-					K_WUNLOCK(workqueue_free);
-					wq_item = ml_item = NULL;
-					mutex_lock(&wq_waitlock);
-					pthread_cond_signal(&wq_waitcond);
-					mutex_unlock(&wq_waitlock);
-					break;
-				// Code error
-				default:
-					LOGEMERG("%s() CODE ERROR unhandled"
-						 " message %d %.32s...",
-						 __func__, cmdnum, buf);
-					snprintf(reply, sizeof(reply),
-						 "%s.%ld.failed.code",
-						 msgline->id,
-						 now.tv_sec);
-					send_unix_msg(sockd, reply);
-					break;
+				K_WLOCK(workqueue_free);
+				pool0_tot++;
+				pool0_left++;
+				K_WUNLOCK(workqueue_free);
 			}
-		}
-		if (sockd >= 0)
-			close(sockd);
 
-		if (ml_item) {
-			free_msgline_data(ml_item, true, true);
-			K_WLOCK(msgline_free);
-			k_add_head(msgline_free, ml_item);
-			K_WUNLOCK(msgline_free);
-			ml_item = NULL;
+			// Don't limit the speed filling up cmd_breakqueue_store
+			K_WLOCK(breakqueue_free);
+			bq_item = k_unlink_head(breakqueue_free);
+			// keep the lock since none of these should be slow
+			DATA_BREAKQUEUE(bq, bq_item);
+			bq->buf = buf;
+			copy_tv(&(bq->now), &now);
+			bq->seqentryflags = seqentryflags;
+			bq->sockd = sockd;
+			if (max_sockd_count < ++sockd_count)
+				max_sockd_count = sockd_count;
+			k_add_tail(cmd_breakqueue_store, bq_item);
+			K_WUNLOCK(breakqueue_free);
 		}
-
-		tick();
 	}
 
 	socketer_using_data = false;
 
-	if (buf)
-		dealloc(buf);
 	close_unix_socket(us->sockd, us->path);
+
+	// Since the socket is dead ...
+	everyone_die = true;
 
 	return NULL;
 }
 
-static void reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
+static void *process_reload(__maybe_unused void *arg)
 {
+	PGconn *conn = NULL;
+	MSGLINE *msgline = NULL;
+	K_ITEM *bq_item = NULL;
+	BREAKQUEUE *bq = NULL;
 	enum cmd_values cmdnum;
-	char *end, *ans, *st = NULL;
-	MSGLINE *msgline;
-	K_ITEM *ml_item;
-	tv_t now;
-	bool matched;
+	char *ans, *st = NULL;
+	time_t now;
 
-	// Once we've read the message
-	setnow(&now);
-	if (buf) {
-		end = buf + strlen(buf) - 1;
-		// strip trailing \n and \r
-		while (end >= buf && (*end == '\n' || *end == '\r'))
-			*(end--) = '\0';
-	}
-	if (!buf || !*buf) {
-		if (!buf) {
-			LOGERR("%s() NULL message line %"PRIu64,
-				__func__, count);
-		} else {
-			LOGERR("%s() Empty message line %"PRIu64,
-				__func__, count);
-		}
-	} else {
-		matched = false;
-		ck_wlock(&fpm_lock);
-		if (first_pool_message &&
-		    strcmp(first_pool_message, buf) == 0) {
-			matched = true;
-			FREENULL(first_pool_message);
-		}
-		ck_wunlock(&fpm_lock);
-		if (matched) {
-			LOGERR("%s() reload ckpool queue match at line %"PRIu64,
-				__func__, count);
+	pthread_detach(pthread_self());
+
+	LOCK_INIT("db_procreload");
+	rename_proc("db_procreload");
+
+	conn = dbconnect();
+	now = time(NULL);
+
+	while (!everyone_die) {
+		K_WLOCK(breakqueue_free);
+		bq_item = k_unlink_head(reload_done_breakqueue_store);
+		if (bq_item)
+			reload_processing++;
+		K_WUNLOCK(breakqueue_free);
+
+		if (!bq_item) {
+			// Finished reloading?
+			if (!reloading)
+				break;
+
+			cksleep_ms(24);
+			continue;
 		}
 
-		// ml_item is set for all but CMD_REPLY
-		cmdnum = breakdown(&ml_item, buf, &now, SE_RELOAD);
-		DATA_MSGLINE(msgline, ml_item);
-		switch (cmdnum) {
+		// Don't keep a connection for more than ~10s ... of processing
+		if ((time(NULL) - now) > 10) {
+			PQfinish(conn);
+			conn = dbconnect();
+			now = time(NULL);
+		}
+
+		DATA_BREAKQUEUE(bq, bq_item);
+		DATA_MSGLINE(msgline, bq->ml_item);
+		switch (bq->cmdnum) {
 			// Ignore
 			case CMD_REPLY:
 			case CMD_ALERTEVENT:
@@ -4710,7 +4986,7 @@ static void reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 			case CMD_HIGH:
 				LOGERR("%s() INVALID message line %"PRIu64
 					" ignored '%.42s...",
-					__func__, count,
+					__func__, bq->count,
 					st = safe_text(msgline->msg));
 				FREENULL(st);
 				break;
@@ -4735,7 +5011,7 @@ static void reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 							(char *)__func__,
 							inet_default,
 							&(msgline->cd),
-							msgline->trf_root);
+							msgline->trf_root, true);
 					FREENULL(ans);
 				}
 				break;
@@ -4743,23 +5019,85 @@ static void reload_line(PGconn *conn, char *filename, uint64_t count, char *buf)
 				// Force this switch to be updated if new cmds are added
 				quithere(1, "%s line %"PRIu64" '%s' - not "
 					 "handled by reload",
-					 filename, count,
+					 bq->filename, bq->count,
 					 st = safe_text_nonull(msgline->cmd));
 				// Won't get here ...
 				FREENULL(st);
 				break;
 		}
 
-		if (ml_item) {
-			free_msgline_data(ml_item, true, true);
+		if (bq->ml_item) {
+			free_msgline_data(bq->ml_item, true, true);
 			K_WLOCK(msgline_free);
-			k_add_head(msgline_free, ml_item);
+			k_add_head(msgline_free, bq->ml_item);
 			K_WUNLOCK(msgline_free);
-			ml_item = NULL;
+			bq->ml_item = NULL;
 		}
+		free(bq->buf);
+
+		K_WLOCK(breakqueue_free);
+		reload_processing--;
+		k_add_head(breakqueue_free, bq_item);
+		K_WUNLOCK(breakqueue_free);
+
+		tick();
 	}
 
-	tick();
+	PQfinish(conn);
+
+	return NULL;
+}
+
+static void reload_line(char *filename, char *buf, uint64_t count)
+{
+	K_ITEM *bq_item = NULL;
+	BREAKQUEUE *bq = NULL;
+	int qcount;
+	char *end;
+	tv_t now;
+
+	// Once we've read the message
+	setnow(&now);
+	if (buf) {
+		end = buf + strlen(buf) - 1;
+		// strip trailing \n and \r
+		while (end >= buf && (*end == '\n' || *end == '\r'))
+			*(end--) = '\0';
+	}
+	if (!buf || !*buf) {
+		if (!buf) {
+			LOGERR("%s() NULL message line %"PRIu64,
+				__func__, count);
+		} else {
+			LOGERR("%s() Empty message line %"PRIu64,
+				__func__, count);
+		}
+	} else {
+		K_WLOCK(breakqueue_free);
+		bq_item = k_unlink_head(breakqueue_free);
+		K_WUNLOCK(breakqueue_free);
+
+		// release the lock since strdup could be slow, but rarely
+		DATA_BREAKQUEUE(bq, bq_item);
+		bq->buf = strdup(buf);
+		copy_tv(&(bq->now), &now);
+		bq->seqentryflags = SE_RELOAD;
+		bq->sockd = -1;
+		bq->count = count;
+		bq->filename = filename;
+
+		K_WLOCK(breakqueue_free);
+		k_add_tail(reload_breakqueue_store, bq_item);
+		qcount = reload_breakqueue_store->count;
+		K_WUNLOCK(breakqueue_free);
+
+		while (qcount > RELOAD_QUEUE_LIMIT) {
+			cksleep_ms(RELOAD_QUEUE_SLEEP);
+			K_RLOCK(breakqueue_free);
+			qcount = reload_breakqueue_store->count;
+			K_RUNLOCK(breakqueue_free);
+		}
+	}
 }
 
 // 10Mb for now - transactiontree can be large
@@ -4824,7 +5162,8 @@ static bool logopen(char **filename, FILE **fp, bool *apipe)
 					 errn, buf);
 			} else {
 				*apipe = true;
-				free(*filename);
+				/* Don't free the old filename since
+				 *  process_reload() could still access it */
 				*filename = name;
 				return true;
 			}
@@ -4846,12 +5185,12 @@ static bool logopen(char **filename, FILE **fp, bool *apipe)
  *	if ckdb aborts at the beginning of the reload, then start again */
 static bool reload_from(tv_t *start)
 {
-	PGconn *conn = NULL;
+	// proc_pt could exit after this returns
+	static pthread_t proc_pt;
 	char buf[DATE_BUFSIZ+1], run[DATE_BUFSIZ+1];
 	size_t rflen = strlen(restorefrom);
 	char *missingfirst = NULL, *missinglast = NULL, *st = NULL;
-	int missing_count;
-	int processing;
+	int missing_count, processing, counter;
 	bool finished = false, ret = true, ok, apipe = false;
 	char *filename = NULL;
 	uint64_t count, total;
@@ -4859,6 +5198,7 @@ static bool reload_from(tv_t *start)
 	double diff;
 	FILE *fp = NULL;
 	int file_N_limit;
+	time_t tick_time, tmp_time;
 
 	reload_buf = malloc(MAX_READ);
 	if (!reload_buf)
@@ -4888,10 +5228,11 @@ static bool reload_from(tv_t *start)
 	LOGQUE(reload_buf, true);
 	LOGQUE(reload_buf, false);
 
-	conn = dbconnect();
+	create_pthread(&proc_pt, process_reload, NULL);
 
 	total = 0;
 	processing = 0;
+	tick_time = time(NULL);
 	while (!everyone_die && !finished) {
 		LOGWARNING("%s(): processing %s", __func__, filename);
 		processing++;
@@ -4904,7 +5245,32 @@ static bool reload_from(tv_t *start)
 		 *  order messages in the log file */
 		while (!everyone_die && 
 			logline(reload_buf, MAX_READ, fp, filename)) {
-				reload_line(conn, filename, ++count, reload_buf);
+				reload_line(filename, reload_buf, ++count);
+
+			tmp_time = time(NULL);
+			// Report stats every 15s
+			if ((tmp_time - tick_time) > 14) {
+				int relq, relqd, cmdq, cmdqd, mx, pool0q;
+				K_RLOCK(breakqueue_free);
+				relq = reload_breakqueue_store->count +
+					reload_processing;
+				relqd = reload_done_breakqueue_store->count;
+				cmdq = cmd_breakqueue_store->count +
+					cmd_processing;
+				cmdqd = cmd_done_breakqueue_store->count;
+				mx = max_sockd_count;
+				K_RUNLOCK(breakqueue_free);
+				K_RLOCK(workqueue_free);
+				pool0q = pool0_workqueue_store->count;
+				// pool_workqueue_store should be zero
+				K_RUNLOCK(workqueue_free);
+				printf(TICK_PREFIX"reload %"PRIu64"/%d/%d"
+					" ckp %d/%d/%d (%d)  \r",
+					total+count, relq, relqd,
+					cmdq, cmdqd, pool0q, mx);
+				fflush(stdout);
+				tick_time = tmp_time;
+			}
 		}
 
 		LOGWARNING("%s(): %sread %"PRIu64" line%s from %s",
@@ -4922,7 +5288,8 @@ static bool reload_from(tv_t *start)
 			}
 		} else
 			fclose(fp);
-		free(filename);
+		/* Don't free the old filename since
+		 *  process_reload() could access use it */
 		if (everyone_die)
 			break;
 		reload_timestamp.tv_sec += ROLL_S;
@@ -4979,7 +5346,15 @@ static bool reload_from(tv_t *start)
 		}
 	}
 
-	PQfinish(conn);
+	while (!everyone_die) {
+		K_RLOCK(breakqueue_free);
+		counter = reload_done_breakqueue_store->count +
+			  reload_breakqueue_store->count + reload_processing;
+		K_RUNLOCK(breakqueue_free);
+		if (counter == 0)
+			break;
+		cksleep_ms(142);
+	}
 
 	setnow(&now);
 	diff = tvdiff(&now, &begin);
@@ -5044,7 +5419,7 @@ static void process_queued(PGconn *conn, K_ITEM *wq_item)
 					workqueue->code,
 					workqueue->inet,
 					&(msgline->cd),
-					msgline->trf_root);
+					msgline->trf_root, false);
 			FREENULL(ans);
 			break;
 	}
@@ -5083,17 +5458,20 @@ static void *listener(void *arg)
 	pthread_t sock_pt;
 	pthread_t summ_pt;
 	pthread_t mark_pt;
+	pthread_t break_pt;
 	K_ITEM *wq_item;
 	time_t now;
-	int wqcount, wqgot;
+	int bq, bqp, bqd, wq0count, wqcount, wqgot;
 	char ooo_buf[256];
 	tv_t wq_stt, wq_fin;
 	double min, sec;
-	int left;
 	SEQSET *seqset = NULL;
 	SEQDATA *seqdata;
 	K_ITEM *ss_item;
-	int i;
+	int cpus, i;
+	bool reloader, cmder, pool0;
+
+	pthread_detach(pthread_self());
 
 	LOCK_INIT("db_plistener");
 	rename_proc("db_plistener");
@@ -5102,9 +5480,29 @@ static void *listener(void *arg)
 					ALLOC_LOGQUEUE, LIMIT_LOGQUEUE, true);
 	logqueue_store = k_new_store(logqueue_free);
 
+	breakqueue_free = k_new_list("BreakQueue", sizeof(BREAKQUEUE),
+					ALLOC_BREAKQUEUE, LIMIT_BREAKQUEUE, true);
+	reload_breakqueue_store = k_new_store(breakqueue_free);
+	reload_done_breakqueue_store = k_new_store(breakqueue_free);
+	cmd_breakqueue_store = k_new_store(breakqueue_free);
+	cmd_done_breakqueue_store = k_new_store(breakqueue_free);
+
 #if LOCK_CHECK
 	DLPRIO(logqueue, 94);
+	DLPRIO(breakqueue, PRIO_TERMINAL);
 #endif
+	if (breakdown_threads <= 0) {
+		cpus = sysconf(_SC_NPROCESSORS_ONLN) ? : 1;
+		breakdown_threads = (int)(cpus / 3) ? : 1;
+	}
+	LOGWARNING("%s(): creating %d*2 breaker threads ...",
+		   __func__, breakdown_threads);
+	reloader = true;
+	for (i = 0; i < breakdown_threads; i++)
+		create_pthread(&break_pt, breaker, &reloader);
+	cmder = false;
+	for (i = 0; i < breakdown_threads; i++)
+		create_pthread(&break_pt, breaker, &cmder);
 
 	create_pthread(&log_pt, logger, NULL);
 
@@ -5126,13 +5524,22 @@ static void *listener(void *arg)
 
 	if (!everyone_die) {
 		K_RLOCK(workqueue_free);
+		wq0count = pool0_workqueue_store->count;
 		wqcount = pool_workqueue_store->count;
+		K_RLOCK(breakqueue_free);
+		bq = cmd_breakqueue_store->count;
+		bqp = cmd_processing;
+		bqd = cmd_done_breakqueue_store->count;
+		K_RUNLOCK(breakqueue_free);
 		K_RUNLOCK(workqueue_free);
 
-		LOGWARNING("reload shares OoO %s", ooo_status(ooo_buf, sizeof(ooo_buf)));
+		LOGWARNING("reload shares OoO %s",
+			   ooo_status(ooo_buf, sizeof(ooo_buf)));
 		sequence_report(true);
 
-		LOGWARNING("%s(): ckdb ready, queue %d", __func__, wqcount);
+		LOGWARNING("%s(): ckdb ready, pool queue %d (%d/%d/%d/%d/%d)",
+			   __func__, bq+bqp+bqd+wq0count+wqcount,
+			   bq, bqp, bqd, wq0count, wqcount);
 
 		/* Until startup_complete, the values should be ignored
 		 * Setting them to 'now' means that they won't time out
@@ -5154,14 +5561,26 @@ static void *listener(void *arg)
 		wqgot = 0;
 	}
 
-	// Process queued work
+	/* Process queued work - ensure pool0 is emptied first,
+	 *  even if there is pending pool0 data being processed by breaker() */
+	pool0 = true;
 	while (!everyone_die) {
+		wq_item = NULL;
 		K_WLOCK(workqueue_free);
-		wq_item = k_unlink_head(pool_workqueue_store);
-		left = pool_workqueue_store->count;
+		if (pool0) {
+			if (pool0_left == 0)
+				pool0 = false;
+			else {
+				wq_item = k_unlink_head(pool0_workqueue_store);
+				if (wq_item)
+					pool0_left--;
+			}
+		}
+		if (!pool0)
+			wq_item = k_unlink_head(pool_workqueue_store);
 		K_WUNLOCK(workqueue_free);
 
-		if (left == 0 && wq_stt.tv_sec != 0L)
+		if (!pool0 && wq_stt.tv_sec != 0L)
 			setnow(&wq_fin);
 
 		/* Don't keep a connection for more than ~10s or ~10000 items
@@ -5179,11 +5598,11 @@ static void *listener(void *arg)
 			tick();
 		}
 
-		if (left == 0 && wq_stt.tv_sec != 0L) {
+		if (!pool0 && wq_stt.tv_sec != 0L) {
 			sec = tvdiff(&wq_fin, &wq_stt);
 			min = floor(sec / 60.0);
 			sec -= min * 60.0;
-			LOGWARNING("reload queue completed %.0fm %.3fs", min, sec);
+			LOGWARNING("pool queue completed %.0fm %.3fs", min, sec);
 			// Used as the flag to display the message once
 			wq_stt.tv_sec = 0L;
 			reload_queue_complete = true;
@@ -5821,7 +6240,11 @@ static void check_restore_dir(char *name)
 
 static struct option long_options[] = {
 	// script to call when alerts happen
-	{ "alert",		required_argument,	0,	'c' },
+	{ "alert",		required_argument,	0,	'a' },
+	// workinfoid to start shares_fill() default is 1 day
+	{ "shares-begin",	required_argument,	0,	'b' },
+	// override calculated value
+	{ "breakdown-threads",	required_argument,	0,	'B' },
 	{ "config",		required_argument,	0,	'c' },
 	{ "dbname",		required_argument,	0,	'd' },
 	{ "minsdiff",		required_argument,	0,	'D' },
@@ -5830,6 +6253,9 @@ static struct option long_options[] = {
 	{ "generate",		no_argument,		0,	'g' },
 	{ "help",		no_argument,		0,	'h' },
 	{ "pool-instance",	required_argument,	0,	'i' },
+	// only use 'I' for reloading lots of known valid data via CKDB,
+	// DON'T use when connected to ckpool
+	{ "ignore-seq",		required_argument,	0,	'I' },
 	{ "killold",		no_argument,		0,	'k' },
 	{ "loglevel",		required_argument,	0,	'l' },
 	// marker = enable mark/workmarker/markersummary auto generation
@@ -5880,7 +6306,7 @@ int main(int argc, char **argv)
 	memset(&ckp, 0, sizeof(ckp));
 	ckp.loglevel = LOG_NOTICE;
 
-	while ((c = getopt_long(argc, argv, "a:c:d:D:ghi:kl:mM:n:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "a:b:B:c:d:D:ghi:Ikl:mM:n:p:P:r:R:s:S:t:u:U:vw:yY:", long_options, &i)) != -1) {
 		switch(c) {
 			case 'a':
 				len = strlen(optarg);
@@ -5889,6 +6315,29 @@ int main(int argc, char **argv)
 						" limit %d",
 						(int)len, MAX_ALERT_CMD);
 				ckdb_alert_cmd = strdup(optarg);
+				break;
+			case 'b':
+				{
+					int64_t beg = atoll(optarg);
+					if (beg < 0) {
+						quit(1, "Invalid shares begin "
+						     "%"PRId64" - must be >= 0",
+						     beg);
+					}
+					shares_begin = beg;
+				}
+				break;
+			case 'B':
+				{
+					int bt = atoi(optarg);
+					if (bt < 1) {
+						quit(1, "Invalid breakdown "
+						     "thread count %d "
+						     "- must be > 0",
+						     bt);
+					}
+					breakdown_threads = bt;
+				}
 				break;
 			case 'c':
 				ckp.config = strdup(optarg);
@@ -5921,14 +6370,6 @@ int main(int argc, char **argv)
 						optarg);
 				}
 				break;
-			/* WARNING - enabling -i will require a DB data update
-			 *  if you've used ckdb before 1.920
-			 * All (old) marks and workmarkers in the DB will need
-			 *  to have poolinstance set to the given -i value
-			 *  since they will be blank */
-			case 'i':
-				poolinstance = (const char *)strdup(optarg);
-				break;
 			case 'g':
 				genpayout_auto = true;
 				break;
@@ -5949,6 +6390,17 @@ int main(int argc, char **argv)
 						printf("-%c | --%s\n", jopt->val, jopt->name);
 				}
 				exit(0);
+			/* WARNING - enabling -i will require a DB data update
+			 *  if you've used ckdb before 1.920
+			 * All (old) marks and workmarkers in the DB will need
+			 *  to have poolinstance set to the given -i value
+			 *  since they will be blank */
+			case 'i':
+				poolinstance = (const char *)strdup(optarg);
+				break;
+			case 'I':
+				ignore_seq = true;
+				break;
 			case 'k':
 				ckp.killold = true;
 				break;
@@ -5963,7 +6415,29 @@ int main(int argc, char **argv)
 				markersummary_auto = true;
 				break;
 			case 'M':
-				mark_start = strdup(optarg);
+				{
+					bool ok = true;
+					switch (optarg[0]) {
+						case 'D': // Days * mark_start
+							mark_start_type = 'D';
+							mark_start = atoll(optarg+1);
+							break;
+						case 'S': // Shifts * mark_start
+							mark_start_type = 'S';
+							mark_start = atoll(optarg+1);
+							break;
+						case 'M': // Markerid = mark_start
+							mark_start_type = 'M';
+							mark_start = atoll(optarg+1);
+							break;
+						default:
+							ok = false;
+							break;
+					}
+					if (!ok || mark_start <= 0)
+						quit(1, "Invalid -M must be D, S or"
+							" M followed by a number>0");
+				}
 				break;
 			case 'n':
 				ckp.name = strdup(optarg);
@@ -6116,6 +6590,7 @@ int main(int argc, char **argv)
 	ckp.main.ckp = &ckp;
 	ckp.main.processname = strdup("main");
 
+	cklock_init(&breakdown_lock);
 	cklock_init(&last_lock);
 	cklock_init(&btc_lock);
 	cklock_init(&poolinstance_lock);
@@ -6163,11 +6638,12 @@ int main(int argc, char **argv)
 	time_t start, trigger, curr;
 	char *msg = NULL;
 
+	everyone_die = true;
 	trigger = start = time(NULL);
 	while (socketer_using_data || summariser_using_data ||
 		logger_using_data || plistener_using_data ||
 		clistener_using_data || blistener_using_data ||
-		marker_using_data) {
+		marker_using_data || breakdown_using_data) {
 		msg = NULL;
 		curr = time(NULL);
 		if (curr - start > 4) {
@@ -6179,7 +6655,7 @@ int main(int argc, char **argv)
 		}
 		if (msg) {
 			trigger = curr;
-			printf("%s %ds due to%s%s%s%s%s%s%s\n",
+			printf("%s %ds due to%s%s%s%s%s%s%s%s\n",
 				msg, (int)(curr - start),
 				socketer_using_data ? " socketer" : EMPTY,
 				summariser_using_data ? " summariser" : EMPTY,
@@ -6187,7 +6663,8 @@ int main(int argc, char **argv)
 				plistener_using_data ? " plistener" : EMPTY,
 				clistener_using_data ? " clistener" : EMPTY,
 				blistener_using_data ? " blistener" : EMPTY,
-				marker_using_data ? " marker" : EMPTY);
+				marker_using_data ? " marker" : EMPTY,
+				breakdown_using_data ? " breakdown" : EMPTY);
 			fflush(stdout);
 		}
 		sleep(1);

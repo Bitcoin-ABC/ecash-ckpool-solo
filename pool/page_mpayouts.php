@@ -11,7 +11,7 @@ function dompayouts($data, $user)
  $pg .= makeLink('payments');
  $pg .= "Payments</a> page for the payments you've been sent.<br><br>";
 
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<thead><tr class=title>';
  $pg .= '<td class=dr>Block</td>';
  $pg .= '<td class=dr>Block UTC</td>';

@@ -231,7 +231,7 @@ Block: <input type=text name=blk size=10 value='$blkuse'>
 		$pg .= str_replace(' ', '&nbsp;', $msg)."</span><br>\n";
 	}
 
-	$pg .= "<br><table callpadding=0 cellspacing=0 border=0>\n";
+	$pg .= "<br><table cellpadding=0 cellspacing=0 border=0>\n";
 	$pg .= '<tr class=title>';
 	$pg .= '<td class=dl>Name</td>';
 	$pg .= '<td class=dr>Value</td>';

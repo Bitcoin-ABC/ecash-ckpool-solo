@@ -90,7 +90,7 @@ function doblocks($data, $user)
 	if ($ans['STATUS'] == 'ok' and isset($ans['s_rows']) and $ans['s_rows'] > 0)
 	{
 		$pg .= '<h1>Block Statistics</h1>';
-		$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+		$pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
 		$pg .= "<thead><tr class=title>";
 		$pg .= "<td class=dl>Description</td>";
 		$pg .= "<td class=dr>Time</td>";
@@ -169,7 +169,7 @@ function doblocks($data, $user)
 	$pg .= "&nbsp;Red&nbsp;</span>&nbsp;";
 	$pg .= 'is bad luck. Higher Diff% and brighter red is worse luck.<br><br>';
 
-	$pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+	$pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
 	$pg .= "<thead><tr class=title>";
 	$pg .= "<td class=dr>#</td>";
 	$pg .= "<td class=dl>Height</td>";

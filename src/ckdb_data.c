@@ -2333,6 +2333,38 @@ cmp_t cmp_shares(K_ITEM *a, K_ITEM *b)
 	return c;
 }
 
+/* order by workinfoid asc,userid asc,workername asc,enonce1 asc,nonce2 asc,
+ *	nonce asc,expirydate desc
+ * i.e. match the DB table index so duplicates are ignored and all new shares_db
+ *	can always go in the DB */
+cmp_t cmp_shares_db(K_ITEM *a, K_ITEM *b)
+{
+	SHARES *sa, *sb;
+	DATA_SHARES(sa, a);
+	DATA_SHARES(sb, b);
+	cmp_t c = CMP_BIGINT(sa->workinfoid, sb->workinfoid);
+	if (c == 0) {
+		c = CMP_BIGINT(sa->userid, sb->userid);
+		if (c == 0) {
+			c = CMP_STR(sa->workername, sb->workername);
+			if (c == 0) {
+				c = CMP_STR(sa->enonce1, sb->enonce1);
+				if (c == 0) {
+					c = CMP_STR(sa->nonce2, sb->nonce2);
+					if (c == 0) {
+						c = CMP_STR(sa->nonce, sb->nonce);
+						if (c == 0) {
+							c = CMP_TV(sb->expirydate,
+								   sa->expirydate);
+						}
+					}
+				}
+			}
+		}
+	}
+	return c;
+}
+
 // order by workinfoid asc,userid asc,createdate asc,nonce asc,expirydate desc
 cmp_t cmp_shareerrors(K_ITEM *a, K_ITEM *b)
 {

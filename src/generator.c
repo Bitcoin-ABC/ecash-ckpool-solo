@@ -2356,7 +2356,7 @@ static void add_userproxy(ckpool_t *ckp, gdata_t *gdata, const int userid,
 	proxy_instance_t *proxy;
 	char *newurl = strdup(url);
 	char *newauth = strdup(auth);
-	char *newpass = strdup(pass);
+	char *newpass = strdup(pass ? pass : "");
 	int id;
 
 	mutex_lock(&gdata->lock);

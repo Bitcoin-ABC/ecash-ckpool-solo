@@ -6,7 +6,7 @@ function doips($data, $user)
 
  $ans = eventCmd($user, array('action' => 'ips'));
 
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<thead><tr class=title>';
  $pg .= '<td class=dr>#</td>';
  $pg .= '<td class=dl>Group</td>';

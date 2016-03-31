@@ -50,7 +50,8 @@ function settings($data, $user, $email, $addr, $err)
   $pg .= makeForm('settings');
   $pg .= '<table cellpadding=5 cellspacing=0 border=0>';
   $pg .= '<tr class=dc><td class=dr colspan=2>';
-  $pg .= 'To change your payout address, enter a new address and your password';
+  $pg .= 'To change your payout address, enter a new address and your password.<br>';
+  $pg .= 'A payout address can only ever be set to one account';
   $pg .= '</td></tr>';
   $pg .= '<tr class=dc><td class=dr>';
   $pg .= 'BTC Address:';

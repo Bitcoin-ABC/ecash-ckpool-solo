@@ -8,7 +8,7 @@ function addrmgtuser($data, $user, $err)
 	$pg .= "<span class=err>$err<br><br></span>";
 
  $pg .= makeForm('addrmgt');
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<thead><tr class=title>';
  $pg .= '<td class=dc>#</td>';
  $pg .= '<td class=dl>Address</td>';

@@ -7,7 +7,7 @@ function worktable()
 {a=c.getAttribute('data-hid');if(a){if(b){c.className=a}else{c.className='hid'}}}}}";
  $pg .= "</script>\n";
  $pg .= "Show Details for Invalids: <input type=checkbox onclick='wkdet(\"wkt\",this)'><br>";
- $pg .= "<table id=wkt callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table id=wkt cellpadding=0 cellspacing=0 border=0>\n";
  return $pg;
 }
 #

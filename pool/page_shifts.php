@@ -5,7 +5,7 @@ function doshifts($data, $user)
  $ans = getShifts($user);
 
  $pg = "Click <a href='#payoutmark'>here</a> to jump to the start of the last payout<br><br>";
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<thead><tr class=title>';
  $pg .= '<td class=dl>Shift</td>';
  $pg .= '<td class=dl>Start UTC</td>';

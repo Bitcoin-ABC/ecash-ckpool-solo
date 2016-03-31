@@ -3625,7 +3625,7 @@ discard:
 static void shareerrors_process_early(PGconn *conn, int64_t good_wid,
 				      tv_t *good_cd, K_TREE *trf_root);
 
-// DB Shares are stored by by the summariser to ensure the reload is correct
+// DB Shares are stored by the summariser to ensure the reload is correct
 bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername,
 		char *clientid, char *errn, char *enonce1, char *nonce2,
 		char *nonce, char *diff, char *sdiff, char *secondaryuserid,
@@ -3640,7 +3640,6 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 	USERS *users;
 	bool ok = false;
 	char *st = NULL;
-	int errn_int;
 
 	LOGDEBUG("%s(): %s/%s/%s/%s/%ld,%ld",
 		 __func__,
@@ -3649,13 +3648,10 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 	FREENULL(st);
 
 	TXT_TO_DOUBLE("sdiff", sdiff, sdiff_amt);
-	TXT_TO_INT("errn", errn, errn_int);
 
 	K_WLOCK(shares_free);
 	s_item = k_unlink_head(shares_free);
-	// Don't store duplicates since they will already exist
-	if (errn_int != SE_DUPE && share_min_sdiff > 0 &&
-	    sdiff_amt >= share_min_sdiff)
+	if (share_min_sdiff > 0 && sdiff_amt >= share_min_sdiff)
 		s2_item = k_unlink_head(shares_free);
 	K_WUNLOCK(shares_free);
 
@@ -3731,7 +3727,9 @@ bool shares_add(PGconn *conn, char *workinfoid, char *username, char *workername
 		add_to_ktree(shares_early_root, s_item);
 		k_add_head(shares_early_store, s_item);
 		if (s2_item) {
-			// Just ignore duplicates
+			/* Just ignore duplicates - this matches the DB index
+			   N.B. a duplicate share doesn't have to be SE_DUPE,
+				two shares can be SE_NONE and SE_STALE */
 			tmp_item = find_in_ktree(shares_db_root, s2_item, ctx);
 			if (tmp_item == NULL) {
 				// Store them in advance - always
@@ -3860,15 +3858,50 @@ bool shares_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
 	PGresult *res;
-	K_ITEM *item = NULL;
+	K_TREE_CTX ctx[1];
+	K_ITEM *item = NULL, *wi_item;
+	WORKINFO *workinfo = NULL;
 	SHARES *row;
 	int n, t, i;
 	char *field;
 	char *sel = NULL;
-	int fields = 14;
+	char *params[1];
+	int fields = 14, par = 0;
 	bool ok = false;
+	int64_t workinfoid;
+	tv_t old;
 
 	LOGDEBUG("%s(): select", __func__);
+
+	if (shares_begin >= 0)
+		workinfoid = shares_begin;
+	else {
+		/* Workinfo is already loaded
+		 * CKDB doesn't currently use shares_db in processing,
+		 *  but make sure we have enough to avoid loading duplicates
+		 * 1 day should be more than enough for normal running,
+		 *  however, if more than 1 day is needed,
+		 *  use -b to set the shares_begin workinfoid */
+		setnow(&old);
+		old.tv_sec -= 60 * 60 * 24; // 1 day
+		K_RLOCK(workinfo_free);
+		wi_item = last_in_ktree(workinfo_root, ctx);
+		while (wi_item) {
+			DATA_WORKINFO(workinfo, wi_item);
+			if (!tv_newer(&old, &(workinfo->createdate)))
+				break;
+			wi_item = prev_in_ktree(ctx);
+		}
+		if (wi_item)
+			workinfoid = workinfo->workinfoid;
+		else {
+			// none old enough, so just load from them all
+			workinfoid = 0;
+		}
+		K_RUNLOCK(workinfo_free);
+	}
+
+	LOGWARNING("%s(): loading from workinfoid>=%"PRId64, __func__, workinfoid);
 
 	printf(TICK_PREFIX"sh 0\r");
 	fflush(stdout);
@@ -3877,7 +3910,10 @@ bool shares_fill(PGconn *conn)
 		"workinfoid,userid,workername,clientid,enonce1,nonce2,nonce,"
 		"diff,sdiff,errn,error,secondaryuserid,ntime,minsdiff"
 		HISTORYDATECONTROL
-		" from shares";
+		" from shares where workinfoid>=$1";
+	par = 0;
+	params[par++] = bigint_to_buf(workinfoid, NULL, 0);
+	PARCHK(par, params);
 
 	res = PQexec(conn, "Begin", CKPQ_READ);
 	rescode = PQresultStatus(res);
@@ -3895,7 +3931,7 @@ bool shares_fill(PGconn *conn)
 		goto flail;
 	}
 
-	res = PQexec(conn, sel, CKPQ_READ);
+	res = PQexecParams(conn, sel, par, NULL, (const char **)params, NULL, NULL, 0, CKPQ_READ);
 	rescode = PQresultStatus(res);
 	PQclear(res);
 	if (!PGOK(rescode)) {
@@ -7064,7 +7100,7 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 		char *useragent, char *preauth, char *by, char *code,
 		char *inet, tv_t *cd, K_TREE *trf_root,
 		bool addressuser, USERS **users, WORKERS **workers,
-		int *event)
+		int *event, bool reload_data)
 {
 	K_TREE_CTX ctx[1];
 	K_ITEM *a_item, *u_item, *w_item;
@@ -7095,7 +7131,8 @@ bool auths_add(PGconn *conn, char *poolinstance, char *username,
 				 __func__,
 				 st = safe_text_nonull(username));
 			FREENULL(st);
-			*event = events_add(EVENTID_INVAUTH, trf_root);
+			if (!reload_data)
+				*event = events_add(EVENTID_INVAUTH, trf_root);
 		}
 		if (!u_item)
 			goto unitem;
@@ -7719,16 +7756,85 @@ bool markersummary_fill(PGconn *conn)
 {
 	ExecStatusType rescode;
 	PGresult *res;
-	K_ITEM *item = NULL, *p_item;
+	K_ITEM *item = NULL, *p_item, *wm_item = NULL;
+	K_TREE_CTX ctx[1];
+	char cd_buf[DATE_BUFSIZ];
+	char *cd = NULL, *what = NULL;
 	int n, t, i, p_n;
 	MARKERSUMMARY *row, *p_row;
+	WORKMARKERS *workmarkers;
 	char *params[1];
 	char *field;
 	char *sel;
 	int fields = 20, par = 0;
+	int64_t ms = 0, amt = 0;
 	bool ok = false;
+	tv_t old;
 
 	LOGDEBUG("%s(): select", __func__);
+
+	if (mark_start < 0)
+		mark_start = 0;
+	else {
+		amt = ms = mark_start;
+		switch (mark_start_type) {
+			case 'D': // mark_start days
+				setnow(&old);
+				old.tv_sec -= 60 * 60 * 24 * ms;
+				K_RLOCK(workmarkers_free);
+				wm_item = last_in_ktree(workmarkers_root, ctx);
+				while (wm_item) {
+					// Newest processed workmarker <= old
+					DATA_WORKMARKERS(workmarkers, wm_item);
+					if (CURRENT(&(workmarkers->expirydate)) &&
+					    WMPROCESSED(workmarkers->status) &&
+					    !tv_newer(&old, &(workmarkers->createdate)))
+						break;
+					wm_item = prev_in_ktree(ctx);
+				}
+				if (!wm_item)
+					mark_start = 0;
+				else {
+					mark_start = workmarkers->markerid;
+					tv_to_buf(&(workmarkers->createdate),
+						  cd_buf, sizeof(cd_buf));
+					cd = cd_buf;
+					what = "days";
+				}
+				K_RUNLOCK(workmarkers_free);
+				break;
+			case 'S': // mark_start shifts (workmarkers)
+				K_RLOCK(workmarkers_free);
+				wm_item = last_in_ktree(workmarkers_root, ctx);
+				while (wm_item) {
+					DATA_WORKMARKERS(workmarkers, wm_item);
+					if (CURRENT(&(workmarkers->expirydate)) &&
+					    WMPROCESSED(workmarkers->status)) {
+						ms--;
+						if (ms <= 0)
+							break;
+					}
+					wm_item = prev_in_ktree(ctx);
+				}
+				if (!wm_item)
+					mark_start = 0;
+				else {
+					mark_start = workmarkers->markerid;
+					tv_to_buf(&(workmarkers->createdate),
+						  cd_buf, sizeof(cd_buf));
+					cd = cd_buf;
+					what = "shifts";
+				}
+				K_RUNLOCK(workmarkers_free);
+				break;
+			case 'M': // markerid = mark_start
+				break;
+			default:
+				/* Not possible unless ckdb.c is different
+				 *  in which case it will just use mark_start */
+				break;
+		}
+	}
 
 	// TODO: limit how far back
 	sel = "declare ws cursor for select "
@@ -7738,14 +7844,16 @@ bool markersummary_fill(PGconn *conn)
 		"lastshareacc,lastdiffacc"
 		MODIFYDATECONTROL
 		" from markersummary where markerid>=$1";
+
 	par = 0;
-	if (mark_start)
-		params[par++] = mark_start;
-	else
-		params[par++] = "0";
+	params[par++] = bigint_to_buf(mark_start, NULL, 0);
 	PARCHK(par, params);
 
 	LOGWARNING("%s(): loading from markerid>=%s", __func__, params[0]);
+	if (cd) {
+		LOGWARNING(" ... %s = %s >= %"PRId64" %s",
+			   params[0], cd, amt, what);
+	}
 
 	printf(TICK_PREFIX"ms 0\r");
 	fflush(stdout);
@@ -7979,6 +8087,10 @@ bool markersummary_fill(PGconn *conn)
 flail:
 	res = PQexec(conn, "Commit", CKPQ_READ);
 	PQclear(res);
+
+	for (i = 0; i < par; i++)
+		free(params[i]);
+	par = 0;
 
 	if (ok) {
 		LOGDEBUG("%s(): built", __func__);

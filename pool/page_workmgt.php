@@ -23,7 +23,7 @@ function workmgtuser($data, $user, $err)
  }
 
  $pg .= makeForm('workmgt');
- $pg .= "<table callpadding=0 cellspacing=0 border=0>\n";
+ $pg .= "<table cellpadding=0 cellspacing=0 border=0>\n";
  $pg .= '<tr class=title>';
  $pg .= '<td class=dl>Worker Name</td>';
  $pg .= '<td class=dr>Minimum Diff</td>';

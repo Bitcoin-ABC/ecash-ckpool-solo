@@ -25,7 +25,7 @@ function getPage()
 	return '';
 
  $vals = explode('&', trim($names[1]));
- if ($count($vals) < 1)
+ if (count($vals) < 1)
 	return '';
 
  return trim($vals[0]);

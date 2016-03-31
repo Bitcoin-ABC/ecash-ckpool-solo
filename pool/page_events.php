@@ -20,7 +20,7 @@ What: <input type=text name=what size=10 value='$wh'>
 	$other = array('event_limits_hash_lifetime',
 			'ovent_limits_ipc_factor');
 
-	$pg .= "<br><br><table callpadding=0 cellspacing=0 border=0>\n";
+	$pg .= "<br><br><table cellpadding=0 cellspacing=0 border=0>\n";
 	$pg .= '<thead><tr class=title>';
 	$pg .= '<td class=dr>#</td>';
 	$pg .= '<td class=dl>Name</td>';
@@ -60,7 +60,7 @@ What: <input type=text name=what size=10 value='$wh'>
 			'ip_hi_time_limit' => 'IPHiLim',
 			'lifetime' => 'Life');
 
-	$pg .= "<br><br><table callpadding=0 cellspacing=0 border=0>\n";
+	$pg .= "<br><br><table cellpadding=0 cellspacing=0 border=0>\n";
 	$pg .= '<thead><tr class=title>';
 	$pg .= '<td class=dr>#</td>';
 	$pg .= '<td class=dl>Name</td>';
@@ -103,12 +103,13 @@ What: <input type=text name=what size=10 value='$wh'>
  {
 	$ans = eventCmd($user, array('action' => 'events', 'list' => $wh));
 
-	$pg .= "<br><br><table callpadding=0 cellspacing=0 border=0>\n";
+	$pg .= "<br><br><table cellpadding=0 cellspacing=0 border=0>\n";
 	$pg .= '<thead><tr class=title>';
 	$pg .= '<td class=dr>#</td>';
 	$pg .= '<td class=dl>List</td>';
 	$pg .= '<td class=dr>ID</td>';
-	$pg .= '<td class=dr>User</td>';
+	$pg .= '<td class=dl>IDName</td>';
+	$pg .= '<td class=dl>User</td>';
 	$pg .= '<td class=dr>IP</td>';
 	$pg .= '<td class=dr>IPc</td>';
 	$pg .= '<td class=dr>Hash</td>';
@@ -131,11 +132,65 @@ What: <input type=text name=what size=10 value='$wh'>
 			$pg .= "<td class=dr>$j</td>";
 			$pg .= '<td class=dl>'.$ans['list:'.$i].'</td>';
 			$pg .= '<td class=dr>'.$ans['id:'.$i].'</td>';
-			$pg .= '<td class=dr>'.$ans['user:'.$i].'</td>';
+			$pg .= '<td class=dl>'.$ans['idname:'.$i].'</td>';
+			$pg .= '<td class=dl>'.$ans['user:'.$i].'</td>';
 			$pg .= '<td class=dr>'.isans($ans, 'ip:'.$i).'</td>';
 			$pg .= '<td class=dr>'.isans($ans, 'ipc:'.$i).'</td>';
 			$pg .= '<td class=dr>'.isans($ans, 'hash:'.$i).'</td>';
 			$pg .= '<td class=dr>'.gmdate('j/M H:i:s',$ans['createdate:'.$i]).'</td>';
+			$pg .= "</tr>\n";
+		}
+		$pg .= '</tbody>';
+	}
+ }
+
+ if ($wh == 'ovents')
+ {
+	$ans = eventCmd($user, array('action' => 'ovents'));
+
+	$pg .= "<br><br><table cellpadding=0 cellspacing=0 border=0>\n";
+	$pg .= '<thead><tr class=title>';
+	$pg .= '<td class=dr>#</td>';
+	$pg .= '<td class=dl>Key</td>';
+	$pg .= '<td class=dr>ID</td>';
+	$pg .= '<td class=dl>IDName</td>';
+	$pg .= '<td class=dr>Hour UTC</td>';
+	$pg .= '<td class=dl>Count</td>';
+	$pg .= "</tr></thead>\n";
+
+	if ($ans['STATUS'] == 'ok')
+	{
+		$pg .= '<tbody>';
+		$count = $ans['rows'];
+		for ($i = 0; $i < $count; $i++)
+		{
+			if (($i % 2) == 0)
+				$row = 'even';
+			else
+				$row = 'odd';
+
+			$j = $i+1;
+			$pg .= "<tr class=$row>";
+			$pg .= "<td class=dr>$j</td>";
+			$pg .= '<td class=dl>'.$ans['key:'.$i].'</td>';
+			$pg .= '<td class=dr>'.$ans['id:'.$i].'</td>';
+			$pg .= '<td class=dl>'.$ans['idname:'.$i].'</td>';
+			$pg .= '<td class=dr>'.gmdate('j/M H:i:s',$ans['hour:'.$i]*3600).'</td>';
+			$co = '';
+			for ($k = 0; $k < 60; $k++)
+			{
+				if ($k < 10)
+					$min = '0' . $k;
+				else
+					$min = $k;
+				if (isset($ans["min$min:$i"]))
+				{
+					if ($co != '')
+						$co .= ' ';
+					$co .= "$min=".$ans["min$min:$i"];
+				}
+			}
+			$pg .= "<td class=dl>$co</td>";
 			$pg .= "</tr>\n";
 		}
 		$pg .= '</tbody>';
