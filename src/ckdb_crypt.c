@@ -1,5 +1,5 @@
 /*
- * Copyright 2015 Andrew Smith
+ * Copyright 2015-2016 Andrew Smith
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -36,7 +36,7 @@ char *_tob32(USERS *users, unsigned char *bin, size_t len, char *name,
 	if (osiz != olen) {
 		LOGEMERG("%s() of '%s' data for '%s' invalid olen=%d != osiz=%d"
 			 WHERE_FFL,
-			 __func__, name, st = safe_text_nonull(users->username),
+			 __func__, name, st = safe_text_nonull(users->in_username),
 			 (int)olen, (int)osiz, WHERE_FFL_PASS);
 		FREENULL(st);
 		olen = osiz;
@@ -59,7 +59,7 @@ char *_tob32(USERS *users, unsigned char *bin, size_t len, char *name,
 				 "ch=%d, i=%d j=%d bits=%d bin=0x%s len=%d "
 				 "olen=%d" WHERE_FFL,
 				 __func__, name,
-				 st = safe_text_nonull(users->username),
+				 st = safe_text_nonull(users->in_username),
 				 ch, i, j, bits, binstr, (int)len, (int)olen,
 				 WHERE_FFL_PASS);
 			FREENULL(st);
@@ -150,7 +150,7 @@ bool check_2fa(USERS *users, int32_t value)
 		LOGERR("%s() invalid key for '%s/%s "
 			"len(%d) != %d",
 			__func__,
-			st = safe_text_nonull(users->username),
+			st = safe_text_nonull(users->in_username),
 			USER_TOTPAUTH_NAME, (int)binlen,
 			TOTPAUTH_KEYSIZE);
 		FREENULL(st);
@@ -160,7 +160,7 @@ bool check_2fa(USERS *users, int32_t value)
 		tim[i] = (now >> 8 * ((sizeof(int64_t) - 1) - i)) & 0xff;
 
 	LOGDEBUG("%s() '%s/%s tim=%"PRId64"=%s key=%s=%s", __func__,
-		 st = safe_text_nonull(users->username),
+		 st = safe_text_nonull(users->in_username),
 		 USER_TOTPAUTH_NAME, now,
 		 tmp1 = (char *)bin2hex(&tim, sizeof(tim)),
 		 tmp2 = (char *)bin2hex(bin, TOTPAUTH_KEYSIZE),
@@ -180,7 +180,7 @@ bool check_2fa(USERS *users, int32_t value)
 	HMAC_Final(&ctx, hash, &reslen);
 
 	LOGDEBUG("%s() '%s/%s hash=%s", __func__,
-		 st = safe_text_nonull(users->username),
+		 st = safe_text_nonull(users->in_username),
 		 USER_TOTPAUTH_NAME,
 		 tmp1 = (char *)bin2hex(hash, SHA256_DIGEST_LENGTH));
 	FREENULL(tmp1);
@@ -195,7 +195,7 @@ bool check_2fa(USERS *users, int32_t value)
 
 	LOGDEBUG("%s() '%s/%s offset=%d otp=%"PRId32" value=%"PRId32
 		 " lastvalue=%"PRId32,
-		 __func__, st = safe_text_nonull(users->username),
+		 __func__, st = safe_text_nonull(users->in_username),
 		 USER_TOTPAUTH_NAME, offset, otp, value, users->lastvalue);
 	FREENULL(st);
 	FREENULL(hash);

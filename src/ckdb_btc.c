@@ -1,5 +1,5 @@
 /*
- * Copyright 2014 Andrew Smith
+ * Copyright 2014-2016 Andrew Smith
  * Copyright 2014 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -304,7 +304,73 @@ bool btc_valid_address(char *addr)
 	return valid;
 }
 
-// Check for orphan or update confirm count
+// Check orphan, returns true only if all OK and not an orphan
+bool btc_orphancheck(BLOCKS *blocks)
+{
+	char hash[TXT_BIG+1];
+	char *blockhash;
+	size_t len;
+	tv_t now;
+	bool ok;
+
+	LOGDEBUG("%s() checking %d %s",
+		 __func__, blocks->height, blocks->blockhash);
+
+	if (blocks->ignore)
+		return false;
+
+	len = strlen(blocks->blockhash);
+	if (len != SHA256SIZHEX) {
+		LOGERR("%s() invalid blockhash size %d (%d) for block %d",
+			__func__, (int)len, SHA256SIZHEX, blocks->height);
+
+		/* So we don't keep repeating the message
+		 * This should never happen */
+		blocks->ignore = true;
+
+		return false;
+	}
+
+	dbhash2btchash(blocks->blockhash, hash, sizeof(hash));
+
+	blockhash = btc_blockhash(blocks->height);
+	// Something's amiss - let it try again later
+	if (!blockhash)
+		return false;
+
+	if (strlen(blockhash) != SHA256SIZHEX) {
+		free(blockhash);
+		return false;
+	}
+
+	if (strcmp(blockhash, hash) != 0) {
+		LOGERR("%s() flagging block %d as %s pool=%s btc=%s",
+			__func__, blocks->height,
+			blocks_confirmed(BLOCKS_ORPHAN_STR),
+			hash, blockhash);
+
+		setnow(&now);
+
+		ok = blocks_add(NULL, blocks->height,
+				      blocks->blockhash,
+				      BLOCKS_ORPHAN_STR, EMPTY,
+				      EMPTY, EMPTY, NULL, EMPTY,
+				      EMPTY, EMPTY, EMPTY, EMPTY,
+				      by_default, (char *)__func__, inet_default,
+				      &now, false, id_default, NULL);
+
+		if (!ok)
+			blocks->ignore = true;
+
+		free(blockhash);
+		return false;
+	}
+
+	free(blockhash);
+	return true;
+}
+
+// Check to update confirm count
 void btc_blockstatus(BLOCKS *blocks)
 {
 	char hash[TXT_BIG+1];
@@ -314,11 +380,8 @@ void btc_blockstatus(BLOCKS *blocks)
 	tv_t now;
 	bool ok;
 
-	setnow(&now);
-
 	LOGDEBUG("%s() checking %d %s",
-		 __func__,
-		 blocks->height, blocks->blockhash);
+		 __func__, blocks->height, blocks->blockhash);
 
 	// Caller must check this to avoid resending it every time
 	if (blocks->ignore) {
@@ -346,23 +409,8 @@ void btc_blockstatus(BLOCKS *blocks)
 	if (!blockhash)
 		return;
 
-	if (strcmp(blockhash, hash) != 0) {
-		LOGERR("%s() flagging block %d as %s pool=%s btc=%s",
-			__func__, blocks->height,
-			blocks_confirmed(BLOCKS_ORPHAN_STR),
-			hash, blockhash);
-
-		ok = blocks_add(NULL, blocks->height,
-				      blocks->blockhash,
-				      BLOCKS_ORPHAN_STR, EMPTY,
-				      EMPTY, EMPTY, EMPTY, EMPTY,
-				      EMPTY, EMPTY, EMPTY, EMPTY,
-				      by_default, (char *)__func__, inet_default,
-				      &now, false, id_default, NULL);
-
-		if (!ok)
-			blocks->ignore = true;
-
+	if (strlen(blockhash) != SHA256SIZHEX) {
+		free(blockhash);
 		return;
 	}
 
@@ -373,10 +421,12 @@ void btc_blockstatus(BLOCKS *blocks)
 			blocks_confirmed(BLOCKS_42_STR),
 			confirms, BLOCKS_42_VALUE);
 
+		setnow(&now);
+
 		ok = blocks_add(NULL, blocks->height,
 				      blocks->blockhash,
 				      BLOCKS_42_STR, EMPTY,
-				      EMPTY, EMPTY, EMPTY, EMPTY,
+				      EMPTY, EMPTY, NULL, EMPTY,
 				      EMPTY, EMPTY, EMPTY, EMPTY,
 				      by_default, (char *)__func__, inet_default,
 				      &now, false, id_default, NULL);
@@ -384,4 +434,5 @@ void btc_blockstatus(BLOCKS *blocks)
 		if (!ok)
 			blocks->ignore = true;
 	}
+	free(blockhash);
 }

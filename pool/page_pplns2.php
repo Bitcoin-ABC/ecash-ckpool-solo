@@ -51,10 +51,8 @@ function calctx($ans, $count, $miner_sat, $diffacc_total)
 	}
 	if ($payaddress == 'none')
 	{
-		$c0 = substr($username, 0, 1);
 		$parts = explode('.', $username);
-		$len = strlen($parts[0]);
-		if (($c0 == '1' || $c0 == '3') && $len > 26 && $len < 37)
+		if (btcaddr($parts[0]) === true)
 			$payaddress = $parts[0];
 		else
 		{

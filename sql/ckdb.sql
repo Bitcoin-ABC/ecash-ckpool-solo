@@ -192,7 +192,7 @@ CREATE TABLE workinfo (
 );
 
 
-CREATE TABLE shares ( -- only shares with sdiff >= minsdiff are stored in the DB
+CREATE TABLE shares ( -- only shares with sdiff >= -D minsdiff are stored in the DB
     workinfoid bigint NOT NULL,
     userid bigint NOT NULL,
     workername character varying(256) NOT NULL,
@@ -207,6 +207,8 @@ CREATE TABLE shares ( -- only shares with sdiff >= minsdiff are stored in the DB
     secondaryuserid character varying(64) NOT NULL,
     ntime character varying(64) NOT NULL,
     minsdiff float NOT NULL,
+    agent character varying(128) DEFAULT ''::character varying NOT NULL,
+    address character varying(128) DEFAULT ''::character varying NOT NULL,
     createdate timestamp with time zone NOT NULL,
     createby character varying(64) DEFAULT ''::character varying NOT NULL,
     createcode character varying(128) DEFAULT ''::character varying NOT NULL,
@@ -230,40 +232,6 @@ CREATE TABLE shareerrors ( -- not stored in the db - only in log files
     createinet character varying(128) DEFAULT ''::character varying NOT NULL,
     expirydate timestamp with time zone DEFAULT '6666-06-06 06:06:06+00',
     PRIMARY KEY (workinfoid, userid, workername, clientid, createdate, expirydate)
-);
-
-
-CREATE TABLE sharesummary ( -- per workinfo for each user+worker
-    userid bigint NOT NULL,
-    workername character varying(256) NOT NULL,
-    workinfoid bigint NOT NULL,
-    diffacc float NOT NULL,
-    diffsta float NOT NULL,
-    diffdup float NOT NULL,
-    diffhi float NOT NULL,
-    diffrej float NOT NULL,
-    shareacc float NOT NULL,
-    sharesta float NOT NULL,
-    sharedup float NOT NULL,
-    sharehi float NOT NULL,
-    sharerej float NOT NULL,
-    sharecount bigint NOT NULL,
-    errorcount bigint NOT NULL,
-    firstshare timestamp with time zone NOT NULL,
-    lastshare timestamp with time zone NOT NULL,
-    firstshareacc timestamp with time zone NOT NULL,
-    lastshareacc timestamp with time zone NOT NULL,
-    lastdiffacc float NOT NULL,
-    complete char NOT NULL,
-    createdate timestamp with time zone NOT NULL,
-    createby character varying(64) NOT NULL,
-    createcode character varying(128) NOT NULL,
-    createinet character varying(128) NOT NULL,
-    modifydate timestamp with time zone NOT NULL,
-    modifyby character varying(64) NOT NULL,
-    modifycode character varying(128) NOT NULL,
-    modifyinet character varying(128) NOT NULL,
-    PRIMARY KEY (workinfoid, userid, workername)
 );
 
 
@@ -329,6 +297,36 @@ CREATE TABLE markersummary ( -- sum of sharesummary for a workinfo range
     modifycode character varying(128) NOT NULL,
     modifyinet character varying(128) NOT NULL,
     PRIMARY KEY (markerid, userid, workername)
+);
+
+
+-- this is optionally filled, for statistical analysis - see code
+CREATE TABLE keysummary (
+    markerid bigint NOT NULL,
+    keytype char NOT NULL,
+    key character varying(128) NOT NULL,
+    diffacc float NOT NULL,
+    diffsta float NOT NULL,
+    diffdup float NOT NULL,
+    diffhi float NOT NULL,
+    diffrej float NOT NULL,
+    shareacc float NOT NULL,
+    sharesta float NOT NULL,
+    sharedup float NOT NULL,
+    sharehi float NOT NULL,
+    sharerej float NOT NULL,
+    sharecount bigint NOT NULL,
+    errorcount bigint NOT NULL,
+    firstshare timestamp with time zone NOT NULL,
+    lastshare timestamp with time zone NOT NULL,
+    firstshareacc timestamp with time zone NOT NULL,
+    lastshareacc timestamp with time zone NOT NULL,
+    lastdiffacc float NOT NULL,
+    createdate timestamp with time zone NOT NULL,
+    createby character varying(64) NOT NULL,
+    createcode character varying(128) NOT NULL,
+    createinet character varying(128) NOT NULL,
+    PRIMARY KEY (markerid, keytype, key)
 );
 
 
@@ -472,4 +470,4 @@ CREATE TABLE version (
     PRIMARY KEY (vlock)
 );
 
-insert into version (vlock,version) values (1,'1.0.5');
+insert into version (vlock,version) values (1,'1.0.7');

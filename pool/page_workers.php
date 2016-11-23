@@ -49,7 +49,6 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
  $pg = '';
  if ($ans['STATUS'] == 'ok')
  {
-	$pg .= '<tbody>';
 	if (isset($ans['blockacc']))
 		$blockacc = $ans['blockacc'];
 	if (isset($ans['blockreward']))
@@ -203,7 +202,6 @@ function workuser($data, $user, &$offset, &$totshare, &$totdiff,
 
 		$offset++;
 	}
-	$pg .= '</tbody>';
  }
  return $pg;
 }
@@ -262,9 +260,11 @@ function doworker($data, $user)
  $instances = 0;
 
  $pg .= worktitle($data, $user);
+ $pg .= '<tbody>';
  $pg .= workuser($data, $user, $offset, $totshare, $totdiff, $totshrate,
 			$totinvalid, $totrate, $blockacc, $blockreward,
 			false, true, true, $title, $instances);
+ $pg .= '</tbody>';
  $pg .= worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
 			$totrate, $blockacc, $blockreward, $instances);
 

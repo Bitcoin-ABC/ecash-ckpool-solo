@@ -81,7 +81,7 @@ function doshifts($data, $user)
 		$pg .= '<td class=dr>'.$ans['rewards:'.$i].'</td>';
 		$ppsr = (float)$ans['ppsrewarded:'.$i];
 		if ($ppsr > 0)
-			$ppsd = sprintf('%.5f', $ppsr);
+			$ppsd = sprintf('%.5f', $ppsr*1000.0);
 		else
 			$ppsd = '0';
 		$pg .= "<td class=dr>$ppsd</td>";
@@ -96,7 +96,7 @@ function doshifts($data, $user)
 	$pg .= '</tbody>';
  }
  $pg .= "</table>\n";
- $pg .= "<span class=st1>*</span> The Rewarded value unit is satoshis per 1diff share<br>";
+ $pg .= "<span class=st1>*</span> The Rewarded value unit is satoshis per 1000diff share<br>";
 
  return $pg;
 }

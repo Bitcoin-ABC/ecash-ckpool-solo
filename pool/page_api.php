@@ -15,6 +15,9 @@ function show_api($info, $page, $menu, $name, $user)
  $u = getparam('username', true);
  if (nutem($u))
 	no_api();
+ $u = deworker($u);
+ if (nutem($u))
+	no_api();
  $api = getparam('api', true);
  if (nutem($api))
 	no_api();

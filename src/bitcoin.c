@@ -16,6 +16,18 @@
 #include "bitcoin.h"
 
 static const char *b58chars = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+static char* understood_rules[] = {"segwit"};
+
+static bool check_required_rule(const char* rule)
+{
+	unsigned int i;
+
+	for (i = 0; i < sizeof(understood_rules) / sizeof(understood_rules[0]); i++) {
+		if (safecmp(understood_rules[i], rule) == 0)
+			return true;
+	}
+	return false;
+}
 
 /* Take a bitcoin address and do some sanity checks on it, then send it to
  * bitcoind to see if it's a valid address */
@@ -79,23 +91,26 @@ out:
 	return ret;
 }
 
-static const char *gbt_req = "{\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"]}]}\n";
+static const char *gbt_req = "{\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"], \"rules\" : [\"segwit\"]}]}\n";
 
 /* Request getblocktemplate from bitcoind already connected with a connsock_t
  * and then summarise the information to the most efficient set of data
  * required to assemble a mining template, storing it in a gbtbase_t structure */
 bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 {
-	json_t *txn_array, *coinbase_aux, *res_val, *val;
+	json_t *txn_array, *rules_array, *coinbase_aux, *res_val, *val;
 	const char *previousblockhash;
+	const char *witnessdata_check;
 	char hash_swap[32], tmp[32];
 	uint64_t coinbasevalue;
 	const char *target;
 	const char *flags;
 	const char *bits;
+	const char *rule;
 	int version;
 	int curtime;
 	int height;
+	int i;
 	bool ret = false;
 
 	val = json_rpc_call(cs, gbt_req);
@@ -109,6 +124,19 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 		goto out;
 	}
 
+	rules_array = json_object_get(res_val, "rules");
+	if (rules_array) {
+		int rule_count =  json_array_size(rules_array);
+
+		for (i = 0; i < rule_count; i++) {
+			rule = json_string_value(json_array_get(rules_array, i));
+			if (rule && *rule++ == '!' && !check_required_rule(rule)) {
+				LOGERR("Required rule not understood: %s", rule);
+				goto out;
+			}
+		}
+	}
+
 	previousblockhash = json_string_value(json_object_get(res_val, "previousblockhash"));
 	target = json_string_value(json_object_get(res_val, "target"));
 	txn_array = json_object_get(res_val, "transactions");
@@ -117,6 +145,7 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 	bits = json_string_value(json_object_get(res_val, "bits"));
 	height = json_integer_value(json_object_get(res_val, "height"));
 	coinbasevalue = json_integer_value(json_object_get(res_val, "coinbasevalue"));
+	witnessdata_check = json_string_value(json_object_get(res_val, "default_witness_commitment"));
 	coinbase_aux = json_object_get(res_val, "coinbaseaux");
 	flags = json_string_value(json_object_get(coinbase_aux, "flags"));
 
@@ -165,6 +194,14 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 	json_object_set_new_nocheck(gbt->json, "flags", json_string_nocheck(gbt->flags));
 
 	json_object_set_new_nocheck(gbt->json, "transactions", json_deep_copy(txn_array));
+
+	json_object_set_new_nocheck(gbt->json, "rules", json_deep_copy(rules_array));
+
+	// Bitcoind includes the default commitment, though it's not part of the
+	// BIP145 spec. As long as transactions aren't being filtered, it's useful
+	// To check against this during segwit's deployment.
+	json_object_set_new_nocheck(gbt->json, "default_witness_commitment", json_string_nocheck(witnessdata_check ? witnessdata_check : ""));
+
 	ret = true;
 
 out:
@@ -316,4 +353,22 @@ retry:
 out:
 	json_decref(val);
 	return ret;
+}
+
+void submit_txn(connsock_t *cs, char *params)
+{
+	char *rpc_req;
+	json_t *val;
+	int len;
+
+	if (unlikely(!cs->alive))
+		return;
+
+	len = strlen(params) + 64;
+	rpc_req = ckalloc(len);
+	sprintf(rpc_req, "{\"method\": \"sendrawtransaction\", \"params\": [\"%s\"]}\n", params);
+	val = json_rpc_call(cs, rpc_req);
+	dealloc(rpc_req);
+	/* We don't really care about the result */
+	json_decref(val);
 }

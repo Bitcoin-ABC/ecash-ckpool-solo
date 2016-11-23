@@ -1,5 +1,5 @@
 /*
- * Copyright 1995-2015 Andrew Smith
+ * Copyright 1995-2016 Andrew Smith
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -9,8 +9,8 @@
 
 #include "ktree.h"
 
-static const int dbg = 0;
-#define DBG	if (dbg != 0) printf
+//static const int dbg = 0;
+//#define DBG	if (dbg != 0) printf
 
 #define FAIL(fmt, ...) do \
 	{ \
@@ -182,8 +182,6 @@ void _dsp_ktree(K_TREE *tree, char *filename, char *msg, KTREE_FFL_ARGS)
 	if (!(tree->master->dsp_func))
 		FAIL("NULLDSP NULL dsp_func in %s", tree->master->name);
 
-	_TREE_READ(tree, true, file, func, line);
-
 	now_t = time(NULL);
 	localtime_r(&now_t, &tm);
 	snprintf(stamp, sizeof(stamp),
@@ -210,12 +208,16 @@ void _dsp_ktree(K_TREE *tree, char *filename, char *msg, KTREE_FFL_ARGS)
 
 	if (tree->root->isNil == No)
 	{
+		K_RLOCK(tree->master);
+
 		item = first_in_ktree(tree, ctx);
 		while (item)
 		{
 			tree->master->dsp_func(item, stream);
 			item = next_in_ktree(ctx);
 		}
+		K_RUNLOCK(tree->master);
+
 		fprintf(stream, "End\n\n");
 	}
 	else
@@ -1097,4 +1099,6 @@ void _free_ktree(K_TREE *tree, void (*free_funct)(void *), KTREE_FFL_ARGS)
 
 	tree->node_store = k_free_store(tree->node_store);
 	tree->node_free = k_free_list(tree->node_free);
+
+	free(tree);
 }

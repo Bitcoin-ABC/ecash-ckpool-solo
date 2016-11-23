@@ -142,6 +142,7 @@ What: <input type=text name=what size=10 value='$wh'>
 		}
 		$pg .= '</tbody>';
 	}
+	$pg .= "</table>\n";
  }
 
  if ($wh == 'ovents')
@@ -195,6 +196,7 @@ What: <input type=text name=what size=10 value='$wh'>
 		}
 		$pg .= '</tbody>';
 	}
+	$pg .= "</table>\n";
  }
 
  return $pg;

@@ -113,6 +113,8 @@ struct workbase {
 	int txns;
 	char *txn_data;
 	char *txn_hashes;
+	char witnessdata[80]; //null-terminated ascii
+	bool insert_witness;
 	int merkles;
 	char merklehash[16][68];
 	char merklebin[16][32];
@@ -262,6 +264,9 @@ struct stratum_instance {
 	stratum_instance_t *next;
 	stratum_instance_t *prev;
 
+	/* Descriptive of ID number and passthrough if any */
+	char identity[128];
+
 	/* Reference count for when this instance is used outside of the
 	 * instance_lock */
 	int ref;
@@ -381,6 +386,7 @@ struct proxy_base {
 	proxy_t *subproxies; /* Hashlist of subproxies sorted by subid */
 	sdata_t *sdata; /* Unique stratifer data for each subproxy */
 	bool dead;
+	bool deleted;
 };
 
 typedef struct session session_t;
@@ -590,6 +596,8 @@ static void info_msg_entries(char_entry_t **entries)
 	}
 }
 
+static const int witnessdata_size = 36; // commitment header + hash
+
 static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 {
 	uint64_t *u64, g64, d64 = 0;
@@ -667,9 +675,9 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 	if (ckp->donvalid) {
 		d64 = g64 / 100; // 1% donation
 		g64 -= d64; // To guarantee integers add up to the original coinbasevalue
-		wb->coinb2bin[wb->coinb2len++] = 2; // 2 transactions
+		wb->coinb2bin[wb->coinb2len++] = 2 + wb->insert_witness;
 	} else
-		wb->coinb2bin[wb->coinb2len++] = 1; // 2 transactions
+		wb->coinb2bin[wb->coinb2len++] = 1 + wb->insert_witness;
 
 	u64 = (uint64_t *)&wb->coinb2bin[wb->coinb2len];
 	*u64 = htole64(g64);
@@ -679,6 +687,19 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 
 	wb->coinb3len = 0;
 	wb->coinb3bin = ckzalloc(256);
+
+	if (wb->insert_witness) {
+		// 0 value
+		wb->coinb2len += 8;
+
+		wb->coinb2bin[wb->coinb2len++] = witnessdata_size + 2; // total scriptPubKey size
+		wb->coinb2bin[wb->coinb2len++] = 0x6a; // OP_RETURN
+		wb->coinb2bin[wb->coinb2len++] = witnessdata_size;
+
+		hex2bin(&wb->coinb2bin[wb->coinb2len], wb->witnessdata, witnessdata_size);
+		wb->coinb2len += witnessdata_size;
+	}
+
 	if (ckp->donvalid) {
 		u64 = (uint64_t *)wb->coinb3bin;
 		*u64 = htole64(d64);
@@ -829,40 +850,41 @@ out:
 static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char *file,
 		       const char *func, const int line)
 {
-	static time_t time_counter;
 	sdata_t *sdata = ckp->sdata;
+	static time_t time_counter;
 	static int counter = 0;
 	char *json_msg;
-	time_t now_t;
-	char ch;
 
 	if (unlikely(!val)) {
 		LOGWARNING("Invalid json sent to ckdbq_add from %s %s:%d", file, func, line);
 		return;
 	}
 
-	now_t = time(NULL);
-	if (now_t != time_counter) {
-		double sdiff = sdata->stats.accounted_diff_shares;
-		pool_stats_t *stats = &sdata->stats;
-		char hashrate[16];
+	if (!ckp->quiet) {
+		time_t now_t = time(NULL);
 
-		/* Rate limit to 1 update per second */
-		time_counter = now_t;
-		suffix_string(stats->dsps1 * nonces, hashrate, 16, 3);
-		ch = status_chars[(counter++) & 0x3];
-		if (likely(sdata->current_workbase)) {
-			double bdiff = sdiff / sdata->current_workbase->network_diff * 100;
+		if (now_t != time_counter) {
+			double sdiff = sdata->stats.accounted_diff_shares;
+			pool_stats_t *stats = &sdata->stats;
+			char hashrate[16], ch;
 
-			fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares  %.1f%% diff",
-				ch, hashrate, stats->sps1, stats->users, stats->workers,
-				sdiff, bdiff);
-		} else {
-			fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares",
-				ch, hashrate, stats->sps1, stats->users, stats->workers,
-				sdiff);
+			/* Rate limit to 1 update per second */
+			time_counter = now_t;
+			suffix_string(stats->dsps1 * nonces, hashrate, 16, 3);
+			ch = status_chars[(counter++) & 0x3];
+			if (likely(sdata->current_workbase)) {
+				double bdiff = sdiff / sdata->current_workbase->network_diff * 100;
+
+				fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares  %.1f%% diff",
+					ch, hashrate, stats->sps1, stats->users, stats->workers,
+					sdiff, bdiff);
+			} else {
+				fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares",
+					ch, hashrate, stats->sps1, stats->users, stats->workers,
+					sdiff);
+			}
+			fflush(stdout);
 		}
-		fflush(stdout);
 	}
 
 	if (CKP_STANDALONE(ckp))
@@ -1333,36 +1355,30 @@ static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t
 		memset(wb->txn_hashes, 0x20, wb->txns * 65); // Spaces
 
 		for (i = 0; i < wb->txns; i++) {
+			const char *txid, *hash;
 			char binswap[32];
-			const char *hash;
 
 			arr_val = json_array_get(txn_array, i);
+
+			// Post-segwit, txid returns the tx hash without witness data
+			txid = json_string_value(json_object_get(arr_val, "txid"));
 			hash = json_string_value(json_object_get(arr_val, "hash"));
+			if (!txid)
+				txid = hash;
+			if (unlikely(!txid)) {
+				LOGERR("Missing txid for transaction in wb_merkle_bins");
+				return;
+			}
 			txn = json_string_value(json_object_get(arr_val, "data"));
 			add_txn(ckp, sdata, &txns, hash, txn);
 			len = strlen(txn);
 			memcpy(wb->txn_data + ofs, txn, len);
 			ofs += len;
-#if 0
-			/* In case we ever want to be a gbt poolproxy */
-			if (!hash) {
-				char *txn_bin;
-				int txn_len;
-
-				txn_len = len / 2;
-				txn_bin = ckalloc(txn_len);
-				hex2bin(txn_bin, txn, txn_len);
-				/* This is needed for pooled mining since only
-				 * transaction data and not hashes are sent */
-				gen_hash(txn_bin, hashbin + 32 + 32 * i, txn_len);
-				continue;
-			}
-#endif
-			if (!hex2bin(binswap, hash, 32)) {
+			if (!hex2bin(binswap, txid, 32)) {
 				LOGERR("Failed to hex2bin hash in gbt_merkle_bins");
 				return;
 			}
-			memcpy(wb->txn_hashes + i * 65, hash, 64);
+			memcpy(wb->txn_hashes + i * 65, txid, 64);
 			bswap_256(hashbin + 32 + 32 * i, binswap);
 		}
 	} else
@@ -1425,16 +1441,69 @@ static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t
 		LOGINFO("Stratifier added %d transactions and purged %d", added, purged);
 }
 
+static const unsigned char witness_nonce[32] = {0};
+static const int witness_nonce_size = sizeof(witness_nonce);
+static const unsigned char witness_header[] = {0xaa, 0x21, 0xa9, 0xed};
+static const int witness_header_size = sizeof(witness_header);
+
+static void gbt_witness_data(workbase_t *wb, json_t *txn_array)
+{
+	int i, binlen, txncount = json_array_size(txn_array);
+	const char* hash;
+	json_t *arr_val;
+	uchar *hashbin;
+
+	binlen = txncount * 32 + 32;
+	hashbin = alloca(binlen + 32);
+	memset(hashbin, 0, 32);
+
+	for (i = 0; i < txncount; i++) {
+		char binswap[32];
+
+		arr_val = json_array_get(txn_array, i);
+		hash = json_string_value(json_object_get(arr_val, "hash"));
+		if (unlikely(!hash)) {
+			LOGERR("Hash missing for transaction");
+			return;
+		}
+		if (!hex2bin(binswap, hash, 32)) {
+			LOGERR("Failed to hex2bin hash in gbt_witness_data");
+			return;
+		}
+		bswap_256(hashbin + 32 + 32 * i, binswap);
+	}
+
+	// Build merkle root (copied from libblkmaker)
+	for (txncount++ ; txncount > 1 ; txncount /= 2) {
+		if (txncount % 2) {
+			// Odd number, duplicate the last
+			memcpy(hashbin + 32 * txncount, hashbin + 32 * (txncount - 1), 32);
+			txncount++;
+		}
+		for (i = 0; i < txncount; i += 2) {
+			// We overlap input and output here, on the first pair
+			gen_hash(hashbin + 32 * i, hashbin + 32 * (i / 2), 64);
+		}
+	}
+
+	memcpy(hashbin + 32, &witness_nonce, witness_nonce_size);
+	gen_hash(hashbin, hashbin + witness_header_size, 32 + witness_nonce_size);
+	memcpy(hashbin, witness_header, witness_header_size);
+	__bin2hex(wb->witnessdata, hashbin, 32 + witness_header_size);
+	wb->insert_witness = true;
+}
+
 /* This function assumes it will only receive a valid json gbt base template
  * since checking should have been done earlier, and creates the base template
  * for generating work templates. */
 static void *do_update(void *arg)
 {
 	struct update_req *ur = (struct update_req *)arg;
-	int prio = ur->prio, retries = 0;
+	json_t *val, *txn_array, *rules_array;
+	const char* witnessdata_check, *rule;
+	int i, prio = ur->prio, retries = 0;
 	ckpool_t *ckp = ur->ckp;
 	sdata_t *sdata = ckp->sdata;
-	json_t *val, *txn_array;
 	bool new_block = false;
 	bool ret = false;
 	workbase_t *wb;
@@ -1489,6 +1558,31 @@ retry:
 	json_strdup(&wb->flags, val, "flags");
 	txn_array = json_object_get(val, "transactions");
 	wb_merkle_bins(ckp, sdata, wb, txn_array);
+
+	wb->insert_witness = false;
+	memset(wb->witnessdata, 0, sizeof(wb->witnessdata));
+	rules_array = json_object_get(val, "rules");
+
+	if (rules_array) {
+		int rule_count = json_array_size(rules_array);
+
+		for (i = 0; i < rule_count; i++) {
+			rule = json_string_value(json_array_get(rules_array, i));
+			if (!rule)
+				continue;
+			if (*rule == '!')
+				rule++;
+			if (safecmp(rule, "segwit")) {
+				witnessdata_check = json_string_value(json_object_get(val, "default_witness_commitment"));
+				gbt_witness_data(wb, txn_array);
+				// Verify against the pre-calculated value if it exists. Skip the size/OP_RETURN bytes.
+				if (wb->insert_witness && witnessdata_check[0] && safecmp(witnessdata_check + 4, wb->witnessdata) != 0)
+					LOGERR("Witness from btcd: %s. Calculated Witness: %s", witnessdata_check + 4, wb->witnessdata);
+				break;
+			}
+		}
+	}
+
 	json_decref(val);
 	generate_coinbase(ckp, wb);
 
@@ -2106,19 +2200,25 @@ static int64_t prio_sort(proxy_t *a, proxy_t *b)
 	return (a->priority - b->priority);
 }
 
+/* Masked increment */
+static int64_t masked_inc(int64_t value, int64_t mask)
+{
+	value &= ~mask;
+	value++;
+	value |= mask;
+	return value;
+}
+
 /* Priority values can be sparse, they do not need to be sequential */
 static void __set_proxy_prio(sdata_t *sdata, proxy_t *proxy, int64_t priority)
 {
 	proxy_t *tmpa, *tmpb, *exists = NULL;
-	int64_t next_prio = 0;
+	int64_t mask, next_prio = 0;
 
 	/* Encode the userid as the high bits in priority */
-	if (!proxy->global) {
-		int64_t high_bits = proxy->userid;
-
-		high_bits <<= 32;
-		priority |= high_bits;
-	}
+	mask = proxy->userid;
+	mask <<= 32;
+	priority |= mask;
 
 	/* See if the priority is already in use */
 	HASH_ITER(hh, sdata->proxies, tmpa, tmpb) {
@@ -2126,7 +2226,7 @@ static void __set_proxy_prio(sdata_t *sdata, proxy_t *proxy, int64_t priority)
 			break;
 		if (tmpa->priority == priority) {
 			exists = tmpa;
-			next_prio = exists->priority + 1;
+			next_prio = masked_inc(priority, mask);
 			break;
 		}
 	}
@@ -2134,7 +2234,7 @@ static void __set_proxy_prio(sdata_t *sdata, proxy_t *proxy, int64_t priority)
 	HASH_ITER(hh, exists, tmpa, tmpb) {
 		if (tmpa->priority > next_prio)
 			break;
-		tmpa->priority++;
+		tmpa->priority = masked_inc(tmpa->priority, mask);
 		next_prio++;
 	}
 	proxy->priority = priority;
@@ -2154,8 +2254,11 @@ static proxy_t *__generate_proxy(sdata_t *sdata, const int id)
 	HASH_ADD(sh, proxy->subproxies, subid, sizeof(int), proxy);
 	proxy->subproxy_count++;
 	HASH_ADD_INT(sdata->proxies, id, proxy);
-	/* Set the new proxy priority to its id */
-	__set_proxy_prio(sdata, proxy, id);
+	/* Set the initial priority to impossibly high initially as the userid
+	 * has yet to be inherited and the priority should be set only after
+	 * all the proxy details are finalised. */
+	proxy->priority = 0x00FFFFFFFFFFFFFF;
+	HASH_SORT(sdata->proxies, prio_sort);
 	sdata->proxy_count++;
 	return proxy;
 }
@@ -2250,11 +2353,16 @@ static proxy_t *existing_subproxy(sdata_t *sdata, const int id, const int subid)
 	return subproxy;
 }
 
+static void check_userproxies(sdata_t *sdata, proxy_t *proxy, const int userid);
+
 static void set_proxy_prio(sdata_t *sdata, proxy_t *proxy, const int priority)
 {
 	mutex_lock(&sdata->proxy_lock);
 	__set_proxy_prio(sdata, proxy, priority);
 	mutex_unlock(&sdata->proxy_lock);
+
+	if (!proxy->global)
+		check_userproxies(sdata, proxy, proxy->userid);
 }
 
 /* Set proxy to the current proxy and calculate how much headroom it has */
@@ -2315,7 +2423,7 @@ static void generator_recruit(const ckpool_t *ckp, const int proxyid, const int 
 /* Find how much headroom we have and connect up to that many clients that are
  * not currently on this pool, recruiting more slots to switch more clients
  * later on lazily. Only reconnect clients bound to global proxies. */
-static void reconnect_clients(sdata_t *sdata)
+static void reconnect_global_clients(sdata_t *sdata)
 {
 	stratum_instance_t *client, *tmpclient;
 	int reconnects = 0;
@@ -2397,7 +2505,33 @@ static void check_bestproxy(sdata_t *sdata)
 		LOGNOTICE("Stratifier setting active proxy to %d", changed_id);
 }
 
-static void dead_proxyid(sdata_t *sdata, const int id, const int subid, const bool replaced)
+static proxy_t *best_proxy(sdata_t *sdata)
+{
+	proxy_t *proxy;
+
+	mutex_lock(&sdata->proxy_lock);
+	proxy = sdata->proxy;
+	mutex_unlock(&sdata->proxy_lock);
+
+	return proxy;
+}
+
+static void check_globalproxies(sdata_t *sdata, proxy_t *proxy)
+{
+	check_bestproxy(sdata);
+	if (proxy->parent == best_proxy(sdata)->parent)
+		reconnect_global_clients(sdata);
+}
+
+static void check_proxy(sdata_t *sdata, proxy_t *proxy)
+{
+	if (proxy->global)
+		check_globalproxies(sdata, proxy);
+	else
+		check_userproxies(sdata, proxy, proxy->userid);
+}
+
+static void dead_proxyid(sdata_t *sdata, const int id, const int subid, const bool replaced, const bool deleted)
 {
 	stratum_instance_t *client, *tmp;
 	int reconnects = 0, proxyid = 0;
@@ -2407,6 +2541,8 @@ static void dead_proxyid(sdata_t *sdata, const int id, const int subid, const bo
 	proxy = existing_subproxy(sdata, id, subid);
 	if (proxy) {
 		proxy->dead = true;
+		proxy->deleted = deleted;
+		set_proxy_prio(sdata, proxy, 0xFFFF);
 		if (!replaced && proxy->global)
 			check_bestproxy(sdata);
 	}
@@ -2488,10 +2624,10 @@ static void update_subscribe(ckpool_t *ckp, const char *cmd)
 	/* Is this a replacement for an existing proxy id? */
 	old = existing_subproxy(sdata, id, subid);
 	if (old) {
-		dead_proxyid(sdata, id, subid, true);
+		dead_proxyid(sdata, id, subid, true, false);
 		proxy = old;
 		proxy->dead = false;
-	} else
+	} else /* This is where all new proxies are created */
 		proxy = subproxy_by_id(sdata, id, subid);
 	proxy->global = global;
 	proxy->userid = userid;
@@ -2512,7 +2648,11 @@ static void update_subscribe(ckpool_t *ckp, const char *cmd)
 	proxy->enonce1constlen = strlen(proxy->enonce1) / 2;
 	hex2bin(proxy->enonce1bin, proxy->enonce1, proxy->enonce1constlen);
 	proxy->nonce2len = json_integer_value(json_object_get(val, "nonce2len"));
-	if (proxy->nonce2len > 7)
+	if (ckp->nonce2length) {
+		proxy->enonce1varlen = proxy->nonce2len - ckp->nonce2length;
+		if (proxy->enonce1varlen < 0)
+			proxy->enonce1varlen = 0;
+	} else if (proxy->nonce2len > 7)
 		proxy->enonce1varlen = 4;
 	else if (proxy->nonce2len > 5)
 		proxy->enonce1varlen = 2;
@@ -2532,7 +2672,18 @@ static void update_subscribe(ckpool_t *ckp, const char *cmd)
 		LOGNOTICE("Upstream pool %s %d extranonce2 length %d, max proxy clients %"PRId64,
 			  proxy->url, id, proxy->nonce2len, proxy->max_clients);
 	}
+	if (ckp->nonce2length && proxy->enonce2varlen != ckp->nonce2length)
+		LOGWARNING("Only able to set nonce2len %d of requested %d on proxy %d:%d",
+			   proxy->enonce2varlen, ckp->nonce2length, id, subid);
 	json_decref(val);
+
+	/* Set the priority on a new proxy now that we have all the fields
+	 * filled in to push it to its correct priority position in the
+	 * hashlist. */
+	if (!old)
+		set_proxy_prio(sdata, proxy, id);
+
+	check_proxy(sdata, proxy);
 }
 
 /* Find the highest priority alive proxy belonging to userid and recruit extra
@@ -2561,7 +2712,7 @@ static void recruit_best_userproxy(sdata_t *sdata, const int userid, const int r
 
 /* Check how much headroom the userid proxies have and reconnect any clients
  * that are not bound to it that should be */
-static void check_userproxies(sdata_t *sdata, const int userid)
+static void check_userproxies(sdata_t *sdata, proxy_t *proxy, const int userid)
 {
 	int64_t headroom = proxy_headroom(sdata, userid);
 	stratum_instance_t *client, *tmpclient;
@@ -2575,8 +2726,10 @@ static void check_userproxies(sdata_t *sdata, const int userid)
 			continue;
 		if (client->user_id != userid)
 			continue;
-		/* Is this client bound to a dead proxy? */
-		if (!client->reconnect && client->proxy->userid == userid)
+		/* Is the client already bound to a proxy of its own userid of
+		 * a higher priority than this one. */
+		if (client->proxy->userid == userid &&
+		    client->proxy->parent->priority <= proxy->parent->priority)
 			continue;
 		if (headroom-- < 1)
 			continue;
@@ -2591,17 +2744,6 @@ static void check_userproxies(sdata_t *sdata, const int userid)
 	}
 	if (headroom < 0)
 		recruit_best_userproxy(sdata, userid, -headroom);
-}
-
-static proxy_t *best_proxy(sdata_t *sdata)
-{
-	proxy_t *proxy;
-
-	mutex_lock(&sdata->proxy_lock);
-	proxy = sdata->proxy;
-	mutex_unlock(&sdata->proxy_lock);
-
-	return proxy;
 }
 
 static void update_notify(ckpool_t *ckp, const char *cmd)
@@ -2693,12 +2835,7 @@ static void update_notify(ckpool_t *ckp, const char *cmd)
 			LOGNOTICE("Block hash on proxy %d changed to %s", id, dsdata->lastswaphash);
 	}
 
-	if (proxy->global) {
-		check_bestproxy(sdata);
-		if (proxy->parent == best_proxy(sdata)->parent)
-			reconnect_clients(sdata);
-	} else
-		check_userproxies(sdata, proxy->userid);
+	check_proxy(sdata, proxy);
 	clean |= new_block;
 	LOGINFO("Proxy %d:%d broadcast updated stratum notify with%s clean", id,
 		subid, clean ? "" : "out");
@@ -2835,6 +2972,11 @@ static void reap_proxies(ckpool_t *ckp, sdata_t *sdata)
 			proxy->subproxy_count--;
 			free_proxy(subproxy);
 		}
+		/* Should we reap the parent proxy too?*/
+		if (!proxy->deleted || proxy->subproxy_count > 1 || proxy->bound_clients)
+			continue;
+		HASH_DELETE(hh, sdata->proxies, proxy);
+		free_proxy(proxy);
 	}
 	mutex_unlock(&sdata->proxy_lock);
 
@@ -2860,7 +3002,7 @@ static void __inc_instance_ref(stratum_instance_t *client)
 /* Find an __instance_by_id and increase its reference count allowing us to
  * use this instance outside of instance_lock without fear of it being
  * dereferenced. Does not return dropped clients still on the list. */
-static stratum_instance_t *ref_instance_by_id(sdata_t *sdata, const int64_t id)
+static inline stratum_instance_t *ref_instance_by_id(sdata_t *sdata, const int64_t id)
 {
 	stratum_instance_t *client;
 
@@ -2887,20 +3029,25 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, bool lazil
 		DL_DELETE(sdata->remote_instances, client);
 	if (client->workername) {
 		if (user) {
-			ASPRINTF(msg, "Dropped client %"PRId64" %s %suser %s worker %s %s",
-				 client->id, client->address, user->throttled ? "throttled " : "",
+			ASPRINTF(msg, "Dropped client %s %s %suser %s worker %s %s",
+				 client->identity, client->address, user->throttled ? "throttled " : "",
 				 user->username, client->workername, lazily ? "lazily" : "");
 		} else {
-			ASPRINTF(msg, "Dropped client %"PRId64" %s no user worker %s %s",
-				 client->id, client->address, client->workername,
+			ASPRINTF(msg, "Dropped client %s %s no user worker %s %s",
+				 client->identity, client->address, client->workername,
 				 lazily ? "lazily" : "");
 		}
 	} else {
-		ASPRINTF(msg, "Dropped workerless client %"PRId64" %s %s",
-			 client->id, client->address, lazily ? "lazily" : "");
+		ASPRINTF(msg, "Dropped workerless client %s %s %s",
+			 client->identity, client->address, lazily ? "lazily" : "");
 	}
 	__del_client(sdata, client);
 	__kill_instance(sdata, client);
+}
+
+static int __dec_instance_ref(stratum_instance_t *client)
+{
+	return --client->ref;
 }
 
 /* Decrease the reference count of instance. */
@@ -2913,7 +3060,7 @@ static void _dec_instance_ref(sdata_t *sdata, stratum_instance_t *client, const 
 	int ref;
 
 	ck_wlock(&sdata->instance_lock);
-	ref = --client->ref;
+	ref = __dec_instance_ref(client);
 	/* See if there are any instances that were dropped that could not be
 	 * moved due to holding a reference and drop them now. */
 	if (unlikely(client->dropped && !ref)) {
@@ -2950,8 +3097,8 @@ static stratum_instance_t *__recruit_stratum_instance(sdata_t *sdata)
 }
 
 /* Enter with write instance_lock held */
-static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t id,
-						  const char *address, int server)
+static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, const char *address,
+						  int server)
 {
 	stratum_instance_t *client;
 	sdata_t *sdata = ckp->sdata;
@@ -2976,13 +3123,20 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, const int64_t i
 		stratum_instance_t *passthrough;
 		int64_t pass_id = id >> 32;
 
+		id &= 0xffffffffll;
 		passthrough = __instance_by_id(sdata, pass_id);
 		if (passthrough && passthrough->node) {
 			client->latency = passthrough->latency;
-			LOGINFO("Client %"PRId64" inherited node latency of %d",
-				id, client->latency);
+			LOGINFO("Client %s inherited node latency of %d",
+				client->identity, client->latency);
+			sprintf(client->identity, "node:%"PRId64" subclient:%"PRId64,
+				pass_id, id);
+		} else {
+			sprintf(client->identity, "passthrough:%"PRId64" subclient:%"PRId64,
+				pass_id, id);
 		}
-	}
+	} else
+		sprintf(client->identity, "%"PRId64, id);
 	return client;
 }
 
@@ -3006,7 +3160,7 @@ out_unlock:
 	ck_wunlock(&sdata->instance_lock);
 
 	if (ret)
-		LOGNOTICE("Reconnecting old instance %"PRId64" to instance %"PRId64, old_id, id);
+		LOGINFO("Reconnecting old instance %"PRId64" to instance %"PRId64, old_id, id);
 	return ret;
 }
 
@@ -3544,12 +3698,22 @@ static void reconnect_client(sdata_t *sdata, stratum_instance_t *client)
 	stratum_add_send(sdata, json_msg, client->id, SM_RECONNECT);
 }
 
-static void dead_proxy(sdata_t *sdata, const char *buf)
+static void dead_proxy(ckpool_t *ckp, sdata_t *sdata, const char *buf)
 {
 	int id = 0, subid = 0;
 
 	sscanf(buf, "deadproxy=%d:%d", &id, &subid);
-	dead_proxyid(sdata, id, subid, false);
+	dead_proxyid(sdata, id, subid, false, false);
+	reap_proxies(ckp, sdata);
+}
+
+static void del_proxy(ckpool_t *ckp, sdata_t *sdata, const char *buf)
+{
+	int id = 0, subid = 0;
+
+	sscanf(buf, "delproxy=%d:%d", &id, &subid);
+	dead_proxyid(sdata, id, subid, false, true);
+	reap_proxies(ckp, sdata);
 }
 
 static void reconnect_client_id(sdata_t *sdata, const int64_t client_id)
@@ -4238,7 +4402,9 @@ retry:
 	} else if (cmdmatch(buf, "reconnect")) {
 		request_reconnect(sdata, buf);
 	} else if (cmdmatch(buf, "deadproxy")) {
-		dead_proxy(sdata, buf);
+		dead_proxy(ckp, sdata, buf);
+	} else if (cmdmatch(buf, "delproxy")) {
+		del_proxy(ckp, sdata, buf);
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else if (cmdmatch(buf, "ckdbflush")) {
@@ -4372,19 +4538,16 @@ static proxy_t *__best_subproxy(proxy_t *proxy)
  * running out of room. */
 static sdata_t *select_sdata(const ckpool_t *ckp, sdata_t *ckp_sdata, const int userid)
 {
-	proxy_t *current, *proxy, *tmp, *best = NULL;
+	proxy_t *global, *proxy, *tmp, *best = NULL;
 
 	if (!ckp->proxy || ckp->passthrough)
 		return ckp_sdata;
-	current = ckp_sdata->proxy;
-	if (!current) {
-		LOGWARNING("No proxy available yet to generate subscribes");
-		return NULL;
-	}
 
 	/* Proxies are ordered by priority so first available will be the best
 	 * priority */
 	mutex_lock(&ckp_sdata->proxy_lock);
+	best = global = ckp_sdata->proxy;
+
 	HASH_ITER(hh, ckp_sdata->proxies, proxy, tmp) {
 		if (proxy->userid < userid)
 			continue;
@@ -4398,12 +4561,14 @@ static sdata_t *select_sdata(const ckpool_t *ckp, sdata_t *ckp_sdata, const int 
 
 	if (!best) {
 		if (!userid)
-			LOGWARNING("Temporarily insufficient subproxies to accept more clients");
+			LOGWARNING("Temporarily insufficient proxies to accept more clients");
+		else
+			LOGNOTICE("Temporarily insufficient proxies for userid %d to accept more clients", userid);
 		return NULL;
 	}
 	if (!userid) {
-		if (best->id != current->id || current_headroom(ckp_sdata, &proxy) < 2)
-			generator_recruit(ckp, current->id, 1);
+		if (best->id != global->id || current_headroom(ckp_sdata, &proxy) < 2)
+			generator_recruit(ckp, global->id, 1);
 	} else {
 		if (proxy_headroom(ckp_sdata, userid) < 2)
 			generator_recruit(ckp, best->id, 1);
@@ -4557,8 +4722,8 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 
 	client->sdata = sdata;
 	if (ckp->proxy) {
-		LOGINFO("Current %d, selecting proxy %d:%d for client %"PRId64, ckp_sdata->proxy->id,
-			sdata->subproxy->id, sdata->subproxy->subid, client->id);
+		LOGINFO("Current %d, selecting proxy %d:%d for client %s", ckp_sdata->proxy->id,
+			sdata->subproxy->id, sdata->subproxy->subid, client->identity);
 	}
 
 	if (!old_match) {
@@ -4568,11 +4733,11 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 			client->reject = 3;
 			return json_string("proxy full");
 		}
-		LOGINFO("Set new subscription %"PRId64" to new enonce1 %lx string %s", client->id,
+		LOGINFO("Set new subscription %s to new enonce1 %lx string %s", client->identity,
 			client->enonce1_64, client->enonce1);
 	} else {
-		LOGINFO("Set new subscription %"PRId64" to old matched enonce1 %lx string %s",
-			client->id, client->enonce1_64, client->enonce1);
+		LOGINFO("Set new subscription %s to old matched enonce1 %lx string %s",
+			client->identity, client->enonce1_64, client->enonce1);
 	}
 
 	/* Workbases will exist if sdata->current_workbase is not NULL */
@@ -5232,11 +5397,11 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 		if (now_t < user->failed_authtime + user->auth_backoff) {
 			if (!user->throttled) {
 				user->throttled = true;
-				LOGNOTICE("Client %"PRId64" %s worker %s rate limited due to failed auth attempts",
-					  client->id, client->address, buf);
+				LOGNOTICE("Client %s %s worker %s rate limited due to failed auth attempts",
+					  client->identity, client->address, buf);
 			} else{
-				LOGINFO("Client %"PRId64" %s worker %s rate limited due to failed auth attempts",
-					client->id, client->address, buf);
+				LOGINFO("Client %s %s worker %s rate limited due to failed auth attempts",
+					client->identity, client->address, buf);
 			}
 			client->dropped = true;
 			goto out;
@@ -5265,20 +5430,20 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 		client->authorised = ret;
 		user->authorised = ret;
 		if (ckp->proxy) {
-			LOGNOTICE("Authorised client %"PRId64" to proxy %d:%d, worker %s as user %s",
-				  client->id, client->proxyid, client->subproxyid, buf, user->username);
+			LOGNOTICE("Authorised client %s to proxy %d:%d, worker %s as user %s",
+				  client->identity, client->proxyid, client->subproxyid, buf, user->username);
 			if (ckp->userproxy)
 				check_global_user(ckp, user, client);
 		} else {
-			LOGNOTICE("Authorised client %"PRId64" worker %s as user %s",
-				  client->id, buf, user->username);
+			LOGNOTICE("Authorised client %s worker %s as user %s",
+				  client->identity, buf, user->username);
 		}
 		user->failed_authtime = 0;
 		user->auth_backoff = DEFAULT_AUTH_BACKOFF; /* Reset auth backoff time */
 		user->throttled = false;
 	} else {
-		LOGNOTICE("Client %"PRId64" %s worker %s failed to authorise as user %s",
-			  client->id, client->address, buf,user->username);
+		LOGNOTICE("Client %s %s worker %s failed to authorise as user %s",
+			  client->identity, client->address, buf,user->username);
 		user->failed_authtime = time(NULL);
 		user->auth_backoff <<= 1;
 		/* Cap backoff time to 10 mins */
@@ -5471,8 +5636,8 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 
 	client->ssdc = 0;
 
-	LOGINFO("Client %"PRId64" biased dsps %.2f dsps %.2f drr %.2f adjust diff from %"PRId64" to: %"PRId64" ",
-		client->id, dsps, client->dsps5, drr, client->diff, optimal);
+	LOGINFO("Client %s biased dsps %.2f dsps %.2f drr %.2f adjust diff from %"PRId64" to: %"PRId64" ",
+		client->identity, dsps, client->dsps5, drr, client->diff, optimal);
 
 	copy_tv(&client->ldc, &now_t);
 	client->diff_change_job_id = next_blockid;
@@ -5741,7 +5906,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		*err_val = JSON_ERR(err);
 		goto out;
 	}
-	if (unlikely(json_array_size(params_val) != 5)) {
+	if (unlikely(json_array_size(params_val) < 5)) {
 		err = SE_INVALID_SIZE;
 		*err_val = JSON_ERR(err);
 		goto out;
@@ -5823,8 +5988,8 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		worker_instance_t *worker = client->worker_instance;
 
 		client->best_diff = sdiff;
-		LOGINFO("User %s worker %s client %"PRId64" new best diff %lf", user->username,
-			worker->workername, client->id, sdiff);
+		LOGINFO("User %s worker %s client %s new best diff %lf", user->username,
+			worker->workername, client->identity, sdiff);
 		check_best_diff(ckp, sdata, user, worker, sdiff, client);
 	}
 	bswap_256(sharehash, hash);
@@ -5840,7 +6005,8 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 			ts_to_tv(&now_tv, &now);
 			latency = ms_tvdiff(&now_tv, &wb->retired);
 			if (latency < client->latency) {
-				LOGDEBUG("Accepting %dms late share from client %"PRId64, latency, client->id);
+				LOGDEBUG("Accepting %dms late share from client %s",
+					 latency, client->identity);
 				goto no_stale;
 			}
 		}
@@ -5871,25 +6037,25 @@ out_unlock:
 		suffix_string(wdiff, wdiffsuffix, 16, 0);
 		if (sdiff >= diff) {
 			if (new_share(sdata, hash, id)) {
-				LOGINFO("Accepted client %"PRId64" share diff %.1f/%.0f/%s: %s",
-					client->id, sdiff, diff, wdiffsuffix, hexhash);
+				LOGINFO("Accepted client %s share diff %.1f/%.0f/%s: %s",
+					client->identity, sdiff, diff, wdiffsuffix, hexhash);
 				result = true;
 			} else {
 				err = SE_DUPE;
 				json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
-				LOGINFO("Rejected client %"PRId64" dupe diff %.1f/%.0f/%s: %s",
-					client->id, sdiff, diff, wdiffsuffix, hexhash);
+				LOGINFO("Rejected client %s dupe diff %.1f/%.0f/%s: %s",
+					client->identity, sdiff, diff, wdiffsuffix, hexhash);
 				submit = false;
 			}
 		} else {
 			err = SE_HIGH_DIFF;
-			LOGINFO("Rejected client %"PRId64" high diff %.1f/%.0f/%s: %s",
-				client->id, sdiff, diff, wdiffsuffix, hexhash);
+			LOGINFO("Rejected client %s high diff %.1f/%.0f/%s: %s",
+				client->identity, sdiff, diff, wdiffsuffix, hexhash);
 			json_set_string(json_msg, "reject-reason", SHARE_ERR(err));
 			submit = false;
 		}
 	}  else
-		LOGINFO("Rejected client %"PRId64" invalid share %s", client->id, SHARE_ERR(err));
+		LOGINFO("Rejected client %s invalid share %s", client->identity, SHARE_ERR(err));
 
 	/* Submit share to upstream pool in proxy mode. We submit valid and
 	 * stale shares and filter out the rest. */
@@ -5923,6 +6089,8 @@ out_unlock:
 	json_set_string(val, "createinet", ckp->serverurl[client->server]);
 	json_set_string(val, "workername", client->workername);
 	json_set_string(val, "username", user->username);
+        json_set_string(val, "address", client->address);
+        json_set_string(val, "agent", client->useragent);
 
 	if (ckp->logshares) {
 		fp = fopen(fname, "ae");
@@ -5944,19 +6112,19 @@ out:
 		if (client->first_invalid < client->last_share.tv_sec || !client->first_invalid)
 			client->first_invalid = now_t;
 		else if (client->first_invalid && client->first_invalid < now_t - 180 && client->reject < 3) {
-			LOGNOTICE("Client %"PRId64" rejecting for 180s, disconnecting", client->id);
+			LOGNOTICE("Client %s rejecting for 180s, disconnecting", client->identity);
 			if (ckp->node)
 				connector_drop_client(ckp, client->id);
 			else
 				stratum_send_message(sdata, client, "Disconnecting for continuous invalid shares");
 			client->reject = 3;
 		} else if (client->first_invalid && client->first_invalid < now_t - 120 && client->reject < 2) {
-			LOGNOTICE("Client %"PRId64" rejecting for 120s, reconnecting", client->id);
+			LOGNOTICE("Client %s rejecting for 120s, reconnecting", client->identity);
 			stratum_send_message(sdata, client, "Reconnecting for continuous invalid shares");
 			reconnect_client(sdata, client);
 			client->reject = 2;
 		} else if (client->first_invalid && client->first_invalid < now_t - 60 && !client->reject) {
-			LOGNOTICE("Client %"PRId64" rejecting for 60s, sending update", client->id);
+			LOGNOTICE("Client %s rejecting for 60s, sending update", client->identity);
 			update_client(client, client->id);
 			client->reject = 1;
 		}
@@ -5982,7 +6150,7 @@ out:
 			json_set_string(val, "createinet", ckp->serverurl[client->server]);
 			ckdbq_add(ckp, ID_SHAREERR, val);
 		}
-		LOGINFO("Invalid share from client %"PRId64": %s", client->id, client->workername);
+		LOGINFO("Invalid share from client %s: %s", client->identity, client->workername);
 	}
 	free(fname);
 	return json_boolean(result);
@@ -6133,13 +6301,13 @@ static void suggest_diff(ckpool_t *ckp, stratum_instance_t *client, const char *
 	int64_t sdiff;
 
 	if (unlikely(!client_active(client))) {
-		LOGNOTICE("Attempted to suggest diff on unauthorised client %"PRId64, client->id);
+		LOGNOTICE("Attempted to suggest diff on unauthorised client %s", client->identity);
 		return;
 	}
 	if (arr_val && json_is_integer(arr_val))
 		sdiff = json_integer_value(arr_val);
 	else if (sscanf(method, "mining.suggest_difficulty(%"PRId64, &sdiff) != 1) {
-		LOGINFO("Failed to parse suggest_difficulty for client %"PRId64, client->id);
+		LOGINFO("Failed to parse suggest_difficulty for client %s", client->identity);
 		return;
 	}
 	/* Clamp suggest diff to global pool mindiff */
@@ -6157,8 +6325,10 @@ static void suggest_diff(ckpool_t *ckp, stratum_instance_t *client, const char *
 }
 
 /* Send diff first when sending the first stratum template after subscribing */
-static void init_client(sdata_t *sdata, const stratum_instance_t *client, const int64_t client_id)
+static void init_client(const stratum_instance_t *client, const int64_t client_id)
 {
+	sdata_t *sdata = client->sdata;
+
 	stratum_send_diff(sdata, client);
 	if (!client->ckp->btcsolo)
 		stratum_send_update(sdata, client_id, true);
@@ -6187,7 +6357,7 @@ static void send_node_all_txns(sdata_t *sdata, const stratum_instance_t *client)
 	msg->json_msg = val;
 	msg->client_id = client->id;
 	ckmsgq_add(sdata->ssends, msg);
-	LOGNOTICE("Sending new node client %"PRId64" all transactions", client->id);
+	LOGNOTICE("Sending new node client %s all transactions", client->identity);
 }
 
 static void *setup_node(void *arg)
@@ -6197,7 +6367,7 @@ static void *setup_node(void *arg)
 	pthread_detach(pthread_self());
 
 	client->latency = round_trip(client->address) / 2;
-	LOGNOTICE("Node client %"PRId64" %s latency set to %dms", client->id,
+	LOGNOTICE("Node client %s %s latency set to %dms", client->identity,
 		  client->address, client->latency);
 	send_node_all_txns(client->sdata, client);
 	dec_instance_ref(client->sdata, client);
@@ -6218,7 +6388,7 @@ static void add_mining_node(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *c
 	__inc_instance_ref(client);
 	ck_wunlock(&sdata->instance_lock);
 
-	LOGWARNING("Added client %"PRId64" %s as mining node on server %d:%s", client->id,
+	LOGWARNING("Added client %s %s as mining node on server %d:%s", client->identity,
 		   client->address, client->server, ckp->serverurl[client->server]);
 
 	create_pthread(&pth, setup_node, client);
@@ -6251,7 +6421,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	}
 
 	if (cmdmatch(method, "mining.term")) {
-		LOGDEBUG("Mining terminate requested from %"PRId64" %s", client_id, client->address);
+		LOGDEBUG("Mining terminate requested from %s %s", client->identity, client->address);
 		drop_client(ckp, sdata, client_id);
 		return;
 	}
@@ -6260,8 +6430,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		json_t *val, *result_val;
 
 		if (unlikely(client->subscribed)) {
-			LOGNOTICE("Client %"PRId64" %s trying to subscribe twice",
-				  client_id, client->address);
+			LOGNOTICE("Client %s %s trying to subscribe twice",
+				  client->identity, client->address);
 			return;
 		}
 		result_val = parse_subscribe(client, client_id, params_val);
@@ -6276,7 +6446,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		json_object_set_new_nocheck(val, "error", json_null());
 		stratum_add_send(sdata, val, client_id, SM_SUBSCRIBERESULT);
 		if (likely(client->subscribed))
-			init_client(sdata, client, client_id);
+			init_client(client, client_id);
 		return;
 	}
 
@@ -6286,14 +6456,15 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		/* Add this client as a trusted remote node in the connector and
 		 * drop the client in the stratifier */
 		if (!ckp->trusted[client->server] || ckp->proxy) {
-			LOGNOTICE("Dropping client %"PRId64" %s trying to authorise as remote node on non trusted server %d",
-				  client_id, client->address, client->server);
+			LOGNOTICE("Dropping client %s %s trying to authorise as remote node on non trusted server %d",
+				  client->identity, client->address, client->server);
 			connector_drop_client(ckp, client_id);
 		} else {
 			add_remote_server(sdata, client);
 			snprintf(buf, 255, "remote=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
 		}
+		sprintf(client->identity, "remote:%"PRId64, client_id);
 		return;
 	}
 
@@ -6303,14 +6474,15 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		/* Add this client as a passthrough in the connector and
 		 * add it to the list of mining nodes in the stratifier */
 		if (!ckp->nodeserver[client->server] || ckp->proxy || ckp->btcsolo) {
-			LOGNOTICE("Dropping client %"PRId64" %s trying to authorise as node on non node server %d",
-				  client_id, client->address, client->server);
+			LOGNOTICE("Dropping client %s %s trying to authorise as node on non node server %d",
+				  client->identity, client->address, client->server);
 			connector_drop_client(ckp, client_id);
 			drop_client(ckp, sdata, client_id);
 		} else {
 			snprintf(buf, 255, "passthrough=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
 			add_mining_node(ckp, sdata, client);
+			sprintf(client->identity, "node:%"PRId64, client_id);
 		}
 		return;
 	}
@@ -6319,8 +6491,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		char buf[256];
 
 		if (ckp->proxy) {
-			LOGNOTICE("Dropping client %"PRId64" %s trying to connect as passthrough on proxy server %d",
-				  client_id, client->address, client->server);
+			LOGNOTICE("Dropping client %s %s trying to connect as passthrough on proxy server %d",
+				  client->identity, client->address, client->server);
 			connector_drop_client(ckp, client_id);
 			drop_client(ckp, sdata, client_id);
 		} else {
@@ -6328,10 +6500,11 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 			 * is a passthrough and to manage its messages accordingly. No
 			 * data from this client id should ever come back to this
 			 * stratifier after this so drop the client in the stratifier. */
-			LOGNOTICE("Adding passthrough client %"PRId64" %s", client_id, client->address);
+			LOGNOTICE("Adding passthrough client %s %s", client->identity, client->address);
 			snprintf(buf, 255, "passthrough=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
 			drop_client(ckp, sdata, client_id);
+			sprintf(client->identity, "passthrough:%"PRId64, client_id);
 		}
 		return;
 	}
@@ -6342,8 +6515,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		json_params_t *jp;
 
 		if (unlikely(client->authorised)) {
-			LOGNOTICE("Client %"PRId64" %s trying to authorise twice",
-				  client_id, client->address);
+			LOGNOTICE("Client %s %s trying to authorise twice",
+				  client->identity, client->address);
 			return;
 		}
 		jp = create_json_params(client_id, method_val, params_val, id_val);
@@ -6354,16 +6527,16 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	/* We should only accept requests from subscribed and authed users here
 	 * on */
 	if (!client->subscribed) {
-		LOGINFO("Dropping %s from unsubscribed client %"PRId64" %s", method,
-			client_id, client->address);
+		LOGINFO("Dropping %s from unsubscribed client %s %s", method,
+			client->identity, client->address);
 		connector_drop_client(ckp, client_id);
 		return;
 	}
 
 	/* We should only accept authorised requests from here on */
 	if (!client->authorised) {
-		LOGINFO("Dropping %s from unauthorised client %"PRId64" %s", method,
-			client_id, client->address);
+		LOGINFO("Dropping %s from unauthorised client %s %s", method,
+			client->identity, client->address);
 		return;
 	}
 
@@ -6381,7 +6554,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 	}
 
 	/* Unhandled message here */
-	LOGINFO("Unhandled client %"PRId64" %s method %s", client_id, client->address, method);
+	LOGINFO("Unhandled client %s %s method %s", client->identity, client->address, method);
 	return;
 }
 
@@ -6407,7 +6580,7 @@ static void parse_share_result(ckpool_t *ckp, stratum_instance_t *client, json_t
 	if (client->upstream_invalid < client->last_share.tv_sec || !client->upstream_invalid)
 		client->upstream_invalid = now_t;
 	else if (client->upstream_invalid && client->upstream_invalid < now_t - 150) {
-		LOGNOTICE("Client %"PRId64" upstream rejects for 150s, disconnecting", client->id);
+		LOGNOTICE("Client %s upstream rejects for 150s, disconnecting", client->identity);
 		connector_drop_client(ckp, client->id);
 		client->reject = 3;
 	}
@@ -6417,7 +6590,7 @@ static void parse_diff(stratum_instance_t *client, json_t *val)
 {
 	double diff = json_number_value(json_array_get(val, 0));
 
-	LOGINFO("Set client %"PRId64" to diff %lf", client->id, diff);
+	LOGINFO("Set client %s to diff %lf", client->identity, diff);
 	client->diff = diff;
 }
 
@@ -6429,19 +6602,19 @@ static void parse_subscribe_result(stratum_instance_t *client, json_t *val)
 	len = strlen(client->enonce1) / 2;
 	hex2bin(client->enonce1bin, client->enonce1, len);
 	memcpy(&client->enonce1_64, client->enonce1bin, 8);
-	LOGINFO("Client %"PRId64" got enonce1 %lx string %s", client->id, client->enonce1_64, client->enonce1);
+	LOGINFO("Client %s got enonce1 %lx string %s", client->identity, client->enonce1_64, client->enonce1);
 }
 
 static void parse_authorise_result(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *client,
 				   json_t *val)
 {
 	if (!json_is_true(val)) {
-		LOGNOTICE("Client %"PRId64" was not authorised upstream, dropping", client->id);
+		LOGNOTICE("Client %s was not authorised upstream, dropping", client->identity);
 		client->authorised = false;
 		connector_drop_client(ckp, client->id);
 		drop_client(ckp, sdata, client->id);
 	} else
-		LOGINFO("Client %"PRId64" was authorised upstream", client->id);
+		LOGINFO("Client %s was authorised upstream", client->identity);
 }
 
 static int node_msg_type(json_t *val)
@@ -6670,7 +6843,20 @@ out:
 	free(buf);
 }
 
-static void add_node_txns(sdata_t *sdata, const json_t *val)
+/* Submit the transactions in node mode so the local btcd has all the
+ * transactions that will go into the next blocksolve. */
+static void submit_transaction(ckpool_t *ckp, const char *hash)
+{
+	char *buf;
+
+	if (unlikely(!ckp->generator_ready))
+		return;
+	ASPRINTF(&buf, "submittxn:%s", hash);
+	send_generator(ckp, buf, GEN_LAX);
+	free(buf);
+}
+
+static void add_node_txns(ckpool_t *ckp, sdata_t *sdata, const json_t *val)
 {
 	json_t *txn_array, *txn_val, *data_val, *hash_val;
 	txntable_t *txn;
@@ -6698,6 +6884,7 @@ static void add_node_txns(sdata_t *sdata, const json_t *val)
 			txn->refcount = 100;
 			continue;
 		}
+		submit_transaction(ckp, data);
 		txn = ckzalloc(sizeof(txntable_t));
 		memcpy(txn->hash, hash, 65);
 		txn->data = strdup(data);
@@ -6726,10 +6913,10 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *clie
 
 	if (msg_type < 0) {
 		buf = json_dumps(val, 0);
-		LOGERR("Missing client %"PRId64" node method from %s", client->id, buf);
+		LOGERR("Missing client %s node method from %s", client->identity, buf);
 		goto out;
 	}
-	LOGDEBUG("Got client %"PRId64" node method %d:%s", client->id, msg_type, stratum_msgs[msg_type]);
+	LOGDEBUG("Got client %s node method %d:%s", client->identity, msg_type, stratum_msgs[msg_type]);
 	id_val = json_object_get(val, "id");
 	method = json_object_get(val, "method");
 	params = json_object_get(val, "params");
@@ -6759,8 +6946,8 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *clie
 			break;
 		case SM_NONE:
 			buf = json_dumps(val, 0);
-			LOGNOTICE("Unrecognised method from client %"PRId64" :%s",
-				  client->id, buf);
+			LOGNOTICE("Unrecognised method from client %s :%s",
+				  client->identity, buf);
 			break;
 		default:
 			break;
@@ -6783,7 +6970,7 @@ static void parse_node_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 	LOGDEBUG("Got node method %d:%s", msg_type, stratum_msgs[msg_type]);
 	switch (msg_type) {
 		case SM_TRANSACTIONS:
-			add_node_txns(sdata, val);
+			add_node_txns(ckp, sdata, val);
 			break;
 		case SM_WORKINFO:
 			add_node_base(ckp, val);
@@ -6804,8 +6991,8 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 	int delays = 0;
 
 	if (client->reject == 3) {
-		LOGINFO("Dropping client %"PRId64" %s tagged for lazy invalidation",
-			client_id, client->address);
+		LOGINFO("Dropping client %s %s tagged for lazy invalidation",
+			client->identity, client->address);
 		connector_drop_client(ckp, client_id);
 		return;
 	}
@@ -6822,10 +7009,10 @@ static void parse_instance_msg(ckpool_t *ckp, sdata_t *sdata, smsg_t *msg, strat
 			const char *result = json_string_value(res_val);
 
 			if (!safecmp(result, "pong"))
-				LOGDEBUG("Received pong from client %"PRId64, client_id);
+				LOGDEBUG("Received pong from client %s", client->identity);
 			else
-				LOGDEBUG("Received spurious response %s from client %"PRId64,
-					 result ? result : "", client_id);
+				LOGDEBUG("Received spurious response %s from client %s",
+					 result ? result : "", client->identity);
 			return;
 		}
 		send_json_err(sdata, client_id, id_val, "-3:method not found");
@@ -6864,11 +7051,12 @@ static void srecv_process(ckpool_t *ckp, json_t *val)
 	msg->json_msg = val;
 	val = json_object_get(msg->json_msg, "client_id");
 	if (unlikely(!val)) {
-		buf = json_dumps(val, JSON_COMPACT);
 		if (ckp->node)
 			parse_node_msg(ckp, sdata, msg->json_msg);
-		else
+		else {
+			buf = json_dumps(val, JSON_COMPACT);
 			LOGWARNING("Failed to extract client_id from connector json smsg %s", buf);
+		}
 		goto out;
 	}
 
@@ -6914,7 +7102,7 @@ static void srecv_process(ckpool_t *ckp, json_t *val)
 		goto out;
 	}
 	if (unlikely(noid))
-		LOGINFO("Stratifier added instance %"PRId64" server %d", client->id, server);
+		LOGINFO("Stratifier added instance %s server %d", client->identity, server);
 
 	if (client->remote)
 		parse_trusted_msg(ckp, sdata, msg->json_msg, client);
@@ -6982,7 +7170,7 @@ static void sshare_process(ckpool_t *ckp, json_params_t *jp)
 		goto out;
 	}
 	if (unlikely(!client->authorised)) {
-		LOGDEBUG("Client %"PRId64" no longer authorised to submit shares", client_id);
+		LOGDEBUG("Client %s no longer authorised to submit shares", client->identity);
 		goto out_decref;
 	}
 	json_msg = json_object();
@@ -7400,6 +7588,35 @@ static void upstream_workers(ckpool_t *ckp, user_instance_t *user)
 	send_proc(ckp->connector, buf);
 }
 
+
+/* To iterate over all users, if user is initially NULL, this will return the first entry,
+ * otherwise it will return the entry after user, and NULL if there are no more entries.
+ * Allows us to grab and drop the lock on each iteration. */
+static user_instance_t *next_user(sdata_t *sdata, user_instance_t *user)
+{
+	ck_rlock(&sdata->instance_lock);
+	if (unlikely(!user))
+		user = sdata->user_instances;
+	else
+		user = user->hh.next;
+	ck_runlock(&sdata->instance_lock);
+
+	return user;
+}
+
+/* Ditto for worker */
+static worker_instance_t *next_worker(sdata_t *sdata, user_instance_t *user, worker_instance_t *worker)
+{
+	ck_rlock(&sdata->instance_lock);
+	if (!worker)
+		worker = user->worker_instances;
+	else
+		worker = worker->next;
+	ck_runlock(&sdata->instance_lock);
+
+	return worker;
+}
+
 static void *statsupdate(void *arg)
 {
 	ckpool_t *ckp = (ckpool_t *)arg;
@@ -7417,10 +7634,10 @@ static void *statsupdate(void *arg)
 		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080, per_tdiff;
 		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
 		char suffix360[16], suffix1440[16], suffix10080[16];
-		stratum_instance_t *client, *tmp;
 		log_entry_t *log_entries = NULL;
-		user_instance_t *user, *tmpuser;
 		char_entry_t *char_list = NULL;
+		stratum_instance_t *client;
+		user_instance_t *user;
 		int idle_workers = 0;
 		char *fname, *s, *sp;
 		tv_t now, diff;
@@ -7432,45 +7649,58 @@ static void *statsupdate(void *arg)
 		tv_time(&now);
 		timersub(&now, &stats->start_time, &diff);
 
-		/* Use this locking as an opportunity to test clients. */
-		ck_rlock(&sdata->instance_lock);
-		HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
+		ck_wlock(&sdata->instance_lock);
+		/* Grab the first entry */
+		client = sdata->stratum_instances;
+		if (likely(client))
+			__inc_instance_ref(client);
+		ck_wunlock(&sdata->instance_lock);
+
+		while (client) {
+			tv_time(&now);
 			/* Look for clients that may have been dropped which the
 			 * stratifier has not been informed about and ask the
 			 * connector if they still exist */
-			if (client->dropped) {
+			if (client->dropped)
 				connector_test_client(ckp, client->id);
-				continue;
-			}
-
-			if (client->node || client->remote)
-				continue;
-
-			/* Test for clients that haven't authed in over a minute
-			 * and drop them lazily */
-			if (!client->authorised) {
+			else if (client->node || client->remote) {
+				/* Do nothing to these */
+			} else if (!client->authorised) {
+				/* Test for clients that haven't authed in over a minute
+				 * and drop them lazily */
 				if (now.tv_sec > client->start_time + 60) {
 					client->dropped = true;
 					connector_drop_client(ckp, client->id);
 				}
-				continue;
+			} else {
+				per_tdiff = tvdiff(&now, &client->last_share);
+				/* Decay times per connected instance */
+				if (per_tdiff > 60) {
+					/* No shares for over a minute, decay to 0 */
+					decay_client(client, 0, &now);
+					idle_workers++;
+					if (per_tdiff > 600)
+						client->idle = true;
+					/* Test idle clients are still connected */
+					connector_test_client(ckp, client->id);
+				}
 			}
 
-			per_tdiff = tvdiff(&now, &client->last_share);
-			/* Decay times per connected instance */
-			if (per_tdiff > 60) {
-				/* No shares for over a minute, decay to 0 */
-				decay_client(client, 0, &now);
-				idle_workers++;
-				if (per_tdiff > 600)
-					client->idle = true;
-				/* Test idle clients are still connected */
-				connector_test_client(ckp, client->id);
-				continue;
-			}
+			ck_wlock(&sdata->instance_lock);
+			/* Drop the reference of the last entry we examined,
+			 * then grab the next client. */
+			__dec_instance_ref(client);
+			client = client->hh.next;
+			/* Grab a reference to this client allowing us to examine
+			 * it without holding the lock */
+			if (likely(client))
+				__inc_instance_ref(client);
+			ck_wunlock(&sdata->instance_lock);
 		}
 
-		HASH_ITER(hh, sdata->user_instances, user, tmpuser) {
+		user = NULL;
+
+		while ((user = next_user(sdata, user)) != NULL) {
 			worker_instance_t *worker;
 			bool idle = false;
 			json_t *user_array;
@@ -7479,9 +7709,11 @@ static void *statsupdate(void *arg)
 				continue;
 
 			user_array = json_array();
+			worker = NULL;
+			tv_time(&now);
 
 			/* Decay times per worker */
-			DL_FOREACH(user->worker_instances, worker) {
+			while ((worker = next_worker(sdata, user, worker)) != NULL) {
 				per_tdiff = tvdiff(&now, &worker->last_share);
 				if (per_tdiff > 60) {
 					decay_worker(worker, 0, &now);
@@ -7575,7 +7807,6 @@ static void *statsupdate(void *arg)
 			if (ckp->remote)
 				upstream_workers(ckp, user);
 		}
-		ck_runlock(&sdata->instance_lock);
 
 		/* Dump log entries out of instance_lock */
 		dump_log_entries(&log_entries);

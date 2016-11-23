@@ -82,7 +82,7 @@ function _getsock($fun, $port, $tmo, $unix=true)
 #
 function getsock($fun, $tmo)
 {
- return _getsock($fun, '/opt/ckdb/listener', $tmo);
+ return _getsock($fun, '/opt/ckdb/listenerweb', $tmo);
 }
 #
 function readsockline($fun, $socket)

@@ -140,7 +140,8 @@ function msgEncode($cmd, $id, $fields, $user)
 
  $now = time();
  $t = $now % 10000;
- $msg = $cmd . $send_sep . $id.$t . $send_sep;
+ $cs = intval(floor(microtime(true) * 100) % 100);
+ $msg = $cmd . $send_sep . $id.$t.'x'.$cs . $send_sep;
  foreach ($fields as $name => $value)
 	$msg .= $name . $val_sep . $value . $fld_sep;
  $msg .= 'createcode' . $val_sep . 'php' . $fld_sep;
@@ -175,6 +176,8 @@ function homeInfo($user)
 function checkPass($user, $pass, $twofa)
 {
  $passhash = myhash($pass);
+ if (!nuem($twofa))
+	$twofa = trim($twofa);
  if (nuem($twofa))
 	$twofa = 0;
  $flds = array('username' => $user, 'passwordhash' => $passhash,
@@ -190,6 +193,8 @@ function setPass($user, $oldpass, $newpass, $twofa)
 {
  $oldhash = myhash($oldpass);
  $newhash = myhash($newpass);
+ if (!nuem($twofa))
+	$twofa = trim($twofa);
  if (nuem($twofa))
 	$twofa = 0;
  $flds = array('username' => $user, 'oldhash' => $oldhash,
@@ -204,6 +209,8 @@ function setPass($user, $oldpass, $newpass, $twofa)
 function resetPass($user, $newpass, $twofa)
 {
  $newhash = myhash($newpass);
+ if (!nuem($twofa))
+	$twofa = trim($twofa);
  if (nuem($twofa))
 	$twofa = 0;
  $flds = array('username' => $user, 'newhash' => $newhash, '2fa' => $twofa);

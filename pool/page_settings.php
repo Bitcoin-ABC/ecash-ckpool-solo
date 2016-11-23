@@ -32,7 +32,7 @@ function settings($data, $user, $email, $addr, $err)
  $pg .= '<tr class=dc><td class=dr nowrap>';
  $pg .= '<span class=st1>*</span>2nd Authentication:';
  $pg .= '</td><td class=dl>';
- $pg .= '<input type=password name=2fa size=10>';
+ $pg .= '<input name=2fa size=10>';
  $pg .= '</td></tr>';
  $pg .= '<tr class=dc><td colspan=2 class=dc><font size=-1>';
  $pg .= "<span class=st1>*</span>Leave blank if you haven't enabled it</font>";
@@ -66,7 +66,7 @@ function settings($data, $user, $email, $addr, $err)
   $pg .= '<tr class=dc><td class=dr nowrap>';
   $pg .= '<span class=st1>*</span>2nd Authentication:';
   $pg .= '</td><td class=dl>';
-  $pg .= '<input type=password name=2fa size=10>';
+  $pg .= '<input name=2fa size=10>';
   $pg .= '</td></tr>';
   $pg .= '<tr class=dc><td colspan=2 class=dc><font size=-1>';
   $pg .= "<span class=st1>*</span>Leave blank if you haven't enabled it</font>";
@@ -103,7 +103,7 @@ function settings($data, $user, $email, $addr, $err)
  $pg .= '<tr class=dc><td class=dr nowrap>';
  $pg .= '<span class=st1>*</span>2nd Authentication:';
  $pg .= '</td><td class=dl>';
- $pg .= '<input type=password name=2fa size=10>';
+ $pg .= '<input name=2fa size=10>';
  $pg .= '</td></tr>';
  $pg .= '<tr class=dc><td colspan=2 class=dc><font size=-1>';
  $pg .= "<span class=st1>*</span>Leave blank if you haven't enabled it</font>";
@@ -149,7 +149,9 @@ function dosettings($data, $user)
 		else
 		{
 			$addr = getparam('baddr', false);
-			$addrarr = array(array('addr' => $addr));
+			if (nuem($addr))
+				$addr = '';
+			$addrarr = array(array('addr' => trim($addr)));
 			$pass = getparam('pass', false);
 			$twofa = getparam('2fa', false);
 			$ans = userSettings($user, null, $addrarr, $pass, $twofa);

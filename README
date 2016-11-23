@@ -75,7 +75,7 @@ BUILDING:
 Building ckpool standalone without ckdb has no dependencies outside of the
 basic build tools on any linux installation.
 
-sudo apt-get install build-essential
+sudo apt-get install build-essential yasm
 ./configure --without-ckdb
 make
 
@@ -83,16 +83,19 @@ make
 Building with ckdb requires installation of the postgresql, gsl and ssl
 development libraries.
 
-sudo apt-get install build-essential libpq-dev libgsl0ldbl libgsl0-dev
+sudo apt-get install build-essential yasm libpq-dev libgsl-dev
 ./configure
 make
+
+older distributions may instead require a different version of gsl:
+ sudo apt-get install build-essential libpq-dev libgsl0ldbl libgsl0-dev yasm
 
 N.B. ckdb also requires libssl-dev but libpq-dev depends on it and installs it
 
 
 Building from git also requires autoconf and automake
 
-sudo apt-get install build-essential libpq-dev autoconf automake libtool
+sudo apt-get install build-essential yasm libpq-dev libgsl-dev autoconf automake libtool
 ./autogen.sh
 ./configure
 make

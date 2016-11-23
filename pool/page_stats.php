@@ -16,10 +16,20 @@ function dostats($data, $user)
  {
 	$info = $data['info'];
 
+	$pe = false;
 	if (isset($info['p_elapsed']))
 	{
 		$dspel = howlongago($info['p_elapsed']);
-		$pg .= "Pool Uptime: $dspel<br>";
+		$pg .= "Pool&nbsp;Uptime:&nbsp;$dspel";
+		$pe = true;
+	}
+
+	if (isset($info['ckdb_elapsed']))
+	{
+		if ($pe)
+			$pg .= '&emsp;';
+		$dspel = howlongago($info['ckdb_elapsed']);
+		$pg .= "CKDB&nbsp;Uptime:&nbsp;$dspel";
 	}
 
 	$dsp = '?THs';

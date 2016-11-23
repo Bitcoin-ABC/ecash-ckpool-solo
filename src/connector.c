@@ -351,6 +351,7 @@ out:
 /* Client must hold a reference count */
 static int drop_client(cdata_t *cdata, client_instance_t *client)
 {
+	bool passthrough = client->passthrough;
 	int64_t client_id = client->id;
 	int fd = -1;
 
@@ -358,8 +359,11 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 	fd = __drop_client(cdata, client);
 	ck_wunlock(&cdata->lock);
 
-	if (fd > -1)
-		LOGINFO("Connector dropped client %"PRId64" fd %d", client_id, fd);
+	if (fd > -1) {
+		if (passthrough)
+			LOGNOTICE("Connector dropped passthrough %"PRId64, client_id);
+		LOGDEBUG("Connector dropped fd %d", fd);
+	}
 
 	return fd;
 }

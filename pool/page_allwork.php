@@ -19,7 +19,7 @@ function doallwork($data, $user)
  $instances = 0;
 
  $pg .= worktitle($data, $user);
-
+ $pg .= '<tbody>';
  $ans = getAllUsers($user);
  if ($ans['STATUS'] == 'ok')
  {
@@ -35,7 +35,7 @@ function doallwork($data, $user)
 				$title, $instances);
 	}
  }
-
+ $pg .= '</tbody>';
  $pg .= worktotal($offset, $totshare, $totdiff, $totshrate, $totinvalid,
 		  $totrate, $blockacc, $blockreward, $instances);
 

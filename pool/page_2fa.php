@@ -80,7 +80,8 @@ function set_2fa($data, $user, $tfa, $ans, $err, $msg)
 	$pg .= "</canvas></div><br>";
 	$pg .= makeForm('2fa');
 	$pg .= 'Then enter your App 2FA Value: <input name=Value value="" size=10> ';
-	$pg .= '<input type=submit name=Test value=Test></form></td></tr>';
+	$pg .= '<input type=submit name=Test value=Test></form><br>';
+	$pg .= 'The 2FA Value is always a 6 digit number</td></tr>';
 	$pg .= '<tr class=dl><td>';
 	$pg .= app_txt('2FA apps');
 	$pg .= '<span class=urg>N.B.</span> if you wish to setup 2FA on more than one device,<br>';

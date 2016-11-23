@@ -217,7 +217,7 @@ static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 		LOGWARNING("Invalid btcaddress: %s !", ckp->btcaddress);
 		goto out;
 	}
-	si->alive = ret = true;
+	si->alive = cs->alive = ret = true;
 	LOGNOTICE("Server alive: %s:%s", cs->url, cs->port);
 out:
 	/* Close the file handle */
@@ -297,7 +297,6 @@ static void gen_loop(proc_instance_t *pi)
 	server_instance_t *si = NULL, *old_si;
 	unix_msg_t *umsg = NULL;
 	ckpool_t *ckp = pi->ckp;
-	bool started = false;
 	char *buf = NULL;
 	connsock_t *cs;
 	gbtbase_t *gbt;
@@ -309,8 +308,8 @@ reconnect:
 	si = live_server(ckp);
 	if (!si)
 		goto out;
-	if (unlikely(!started)) {
-		started = true;
+	if (unlikely(!ckp->generator_ready)) {
+		ckp->generator_ready = true;
 		LOGWARNING("%s generator ready", ckp->name);
 	}
 
@@ -339,7 +338,7 @@ retry:
 		if (!gen_gbtbase(cs, gbt)) {
 			LOGWARNING("Failed to get block template from %s:%s",
 				   cs->url, cs->port);
-			si->alive = false;
+			si->alive = cs->alive = false;
 			send_unix_msg(umsg->sockd, "Failed");
 			goto reconnect;
 		} else {
@@ -355,7 +354,7 @@ retry:
 		else if (!get_bestblockhash(cs, hash)) {
 			LOGINFO("No best block hash support from %s:%s",
 				cs->url, cs->port);
-			si->alive = false;
+			si->alive = cs->alive = false;
 			send_unix_msg(umsg->sockd, "failed");
 		} else {
 			send_unix_msg(umsg->sockd, hash);
@@ -366,13 +365,13 @@ retry:
 		if (si->notify)
 			send_unix_msg(umsg->sockd, "notify");
 		else if ((height = get_blockcount(cs)) == -1) {
-			si->alive = false;
+			si->alive = cs->alive = false;
 			send_unix_msg(umsg->sockd,  "failed");
 			goto reconnect;
 		} else {
 			LOGDEBUG("Height: %d", height);
 			if (!get_blockhash(cs, height, hash)) {
-				si->alive = false;
+				si->alive = cs->alive = false;
 				send_unix_msg(umsg->sockd, "failed");
 				goto reconnect;
 			} else {
@@ -969,6 +968,9 @@ static void store_proxy(gdata_t *gdata, proxy_instance_t *proxy)
 	mutex_unlock(&gdata->lock);
 }
 
+/* The difference between a dead proxy and a deleted one is the parent proxy entry
+ * is not removed from the stratifier as it assumes it is down whereas a deleted
+ * proxy has had its entry removed from the generator. */
 static void send_stratifier_deadproxy(ckpool_t *ckp, const int id, const int subid)
 {
 	char buf[256];
@@ -976,6 +978,16 @@ static void send_stratifier_deadproxy(ckpool_t *ckp, const int id, const int sub
 	if (ckp->passthrough)
 		return;
 	sprintf(buf, "deadproxy=%d:%d", id, subid);
+	send_proc(ckp->stratifier, buf);
+}
+
+static void send_stratifier_delproxy(ckpool_t *ckp, const int id, const int subid)
+{
+	char buf[256];
+
+	if (ckp->passthrough)
+		return;
+	sprintf(buf, "delproxy=%d:%d", id, subid);
 	send_proc(ckp->stratifier, buf);
 }
 
@@ -2088,12 +2100,15 @@ static void *proxy_recv(void *arg)
 			/* Serialise messages from here once we have a cs by
 			 * holding the semaphore. */
 			cksem_wait(&cs->sem);
-			if (event.events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP))
-				ret = -1;
-			else {
+			/* Process any messages before checking for errors in
+			 * case a message is sent and then the socket
+			 * immediately closed.
+			 */
+			if (event.events & EPOLLIN) {
 				timeout = 30;
 				ret = read_socket_line(cs, &timeout);
-			}
+			} else if (event.events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP))
+				ret = -1;
 		}
 		if (ret < 1) {
 			LOGNOTICE("Proxy %d:%d %s failed to epoll/read_socket_line in proxy_recv",
@@ -2166,7 +2181,8 @@ static void *userproxy_recv(void *arg)
 		if (unlikely(!proxy->authorised))
 			continue;
 
-		if (event.events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+		if ((event.events & (EPOLLHUP | EPOLLERR | EPOLLRDHUP)) &&
+		    !(event.events & EPOLLIN)) {
 			LOGNOTICE("Proxy %d:%d %s hung up in epoll_wait", proxy->id,
 				  proxy->subid, proxy->url);
 			disable_subproxy(gdata, proxy->parent, proxy);
@@ -2446,9 +2462,11 @@ static void delete_proxy(ckpool_t *ckp, gdata_t *gdata, proxy_instance_t *proxy)
 			HASH_DELETE(sh, proxy->subproxies, subproxy);
 		mutex_unlock(&proxy->proxy_lock);
 
-		send_stratifier_deadproxy(ckp, subproxy->id, subproxy->subid);
-		if (subproxy && proxy != subproxy)
-			store_proxy(gdata, subproxy);
+		if (subproxy) {
+			send_stratifier_delproxy(ckp, subproxy->id, subproxy->subid);
+			if (proxy != subproxy)
+				store_proxy(gdata, subproxy);
+		}
 	} while (subproxy);
 
 	/* Recycle the proxy itself */
@@ -2693,7 +2711,6 @@ static void proxy_loop(proc_instance_t *pi)
 	gdata_t *gdata = ckp->gdata;
 	unix_msg_t *umsg = NULL;
 	connsock_t *cs = NULL;
-	bool started = false;
 	char *buf = NULL;
 
 reconnect:
@@ -2722,8 +2739,8 @@ reconnect:
 			   proxi->id, proxi->url, ckp->passthrough ? " in passthrough mode" : "");
 	}
 
-	if (unlikely(!started)) {
-		started = true;
+	if (unlikely(!ckp->generator_ready)) {
+		ckp->generator_ready = true;
 		LOGWARNING("%s generator ready", ckp->name);
 	}
 retry:
@@ -2763,6 +2780,12 @@ retry:
 		memset(buf + 12 + 64, 0, 1);
 		sprintf(blockmsg, "%sblock:%s", ret ? "" : "no", buf + 12);
 		send_proc(ckp->stratifier, blockmsg);
+	} else if (cmdmatch(buf, "submittxn:")) {
+		if (unlikely(strlen(buf) < 11)) {
+			LOGWARNING("Got zero length submittxn");
+			goto retry;
+		}
+		submit_txn(cs, buf + 10);
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else if (cmdmatch(buf, "ping")) {
@@ -2865,7 +2888,7 @@ static proxy_instance_t *__add_proxy(ckpool_t *ckp, gdata_t *gdata, const int id
 	proxy->id = id;
 	proxy->url = strdup(ckp->proxyurl[id]);
 	proxy->auth = strdup(ckp->proxyauth[id]);
-	if (proxy->pass)
+	if (ckp->proxypass[id])
 		proxy->pass = strdup(ckp->proxypass[id]);
 	else
 		proxy->pass = strdup("");

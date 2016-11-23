@@ -173,12 +173,15 @@ function btcfmt($amt)
  return number_format($amt, 8);
 }
 #
-function utcd($when, $brief = false)
+function utcd($when, $brief = false, $zone = true)
 {
  if ($brief)
-	 return gmdate('M-d H:i:s', round($when));
+	return gmdate('M&#8209;d H:i:s', round($when));
  else
-	 return gmdate('Y-m-d H:i:s+00', round($when));
+	if ($zone)
+		return gmdate('Y&#8209;m&#8209;d H:i:s+00', round($when));
+	else
+		return gmdate('Y&#8209;m&#8209;d H:i:s', round($when));
 }
 #
 global $sipre;
@@ -230,6 +233,19 @@ function difffmt($amt)
  return siprefmt($amt, 3);
 }
 #
+function dspname($name)
+{
+ if (strlen($name) < 23)
+	return array(false, htmlspecialchars($name));
+
+ if (strpbrk($name, '._') === false)
+	return array(true, htmlspecialchars(substr($name, 0, 20)).'&hellip;');
+
+ $left = htmlspecialchars(substr($name, 0, 17));
+ $right = htmlspecialchars(substr($name, -3));
+ return array(true, $left.'&hellip;'.$right);
+}
+#
 function emailStr($str)
 {
  $all = '/[^A-Za-z0-9_+\.@-]/'; // no space = trim
@@ -272,6 +288,21 @@ function safepass($pass)
  return true;
 }
 #
+# simple test without checksum validation
+function btcaddr($addr)
+{
+ $c0 = substr($addr, 0, 1);
+ if ($c0 != '1' && $c0 != '3')
+	return false;
+ $len = strlen($addr);
+ if ($len <= 26 || $len >= 37)
+	return false;
+ $rem = preg_replace('/[A-HJ-NP-Za-km-z1-9]/', '', $addr);
+ if (strlen($rem) > 0)
+	return false;
+ return true;
+}
+#
 function bademail($email, $isold = false)
 {
  if ($email == null || $email == '')
@@ -302,6 +333,12 @@ function loginStr($str)
  // Anything but . _ / Tab
  $all = '/[\._\/\011]/';
  return preg_replace($all, '', $str);
+}
+#
+function deworker($str)
+{
+ $work = '/[\._].*$/';
+ return preg_replace($work, '', $str);
 }
 #
 function trn($str)
@@ -442,8 +479,19 @@ session_start();
 #
 include_once('db.php');
 #
+global $disable_login;
+$disable_login = false;
+if (file_exists('../pool/disable_login.php'))
+ include_once('../pool/disable_login.php');
+#
 function validUserPass($user, $pass, $twofa)
 {
+ global $disable_login;
+ if (function_exists('checklogin'))
+	checklogin($user);
+ if ($disable_login == true)
+	exit(0);
+ #
  $rep = checkPass($user, $pass, $twofa);
  if ($rep != null)
 	$ans = repDecode($rep);
