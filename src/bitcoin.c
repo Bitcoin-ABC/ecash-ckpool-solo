@@ -358,7 +358,6 @@ out:
 void submit_txn(connsock_t *cs, char *params)
 {
 	char *rpc_req;
-	json_t *val;
 	int len;
 
 	if (unlikely(!cs->alive))
@@ -367,8 +366,6 @@ void submit_txn(connsock_t *cs, char *params)
 	len = strlen(params) + 64;
 	rpc_req = ckalloc(len);
 	sprintf(rpc_req, "{\"method\": \"sendrawtransaction\", \"params\": [\"%s\"]}\n", params);
-	val = json_rpc_call(cs, rpc_req);
+	json_rpc_msg(cs, rpc_req);
 	dealloc(rpc_req);
-	/* We don't really care about the result */
-	json_decref(val);
 }

@@ -1859,56 +1859,6 @@ static void send_node_block(sdata_t *sdata, const char *enonce1, const char *non
 	}
 }
 
-static void upstream_blocksubmit(ckpool_t *ckp, const char *gbt_block)
-{
-	char *buf;
-
-	ASPRINTF(&buf, "upstream={\"method\":\"submitblock\",\"submitblock\":\"%s\"}\n",
-		 gbt_block);
-	send_proc(ckp->connector, buf);
-	free(buf);
-}
-
-static void downstream_blocksubmits(ckpool_t *ckp, const char *gbt_block, const stratum_instance_t *source)
-{
-	stratum_instance_t *client;
-	sdata_t *sdata = ckp->sdata;
-	ckmsg_t *bulk_send = NULL;
-	int messages = 0;
-
-	ck_rlock(&sdata->instance_lock);
-	if (sdata->remote_instances) {
-		json_t *val = json_object();
-
-		JSON_CPACK(val, "{ss,ss}",
-			        "method", "submitblock",
-				"submitblock", gbt_block);
-		DL_FOREACH(sdata->remote_instances, client) {
-			ckmsg_t *client_msg;
-			smsg_t *msg;
-			json_t *json_msg;
-
-			if (client == source)
-				continue;
-			json_msg = json_copy(val);
-			client_msg = ckalloc(sizeof(ckmsg_t));
-			msg = ckzalloc(sizeof(smsg_t));
-			msg->json_msg = json_msg;
-			msg->client_id = client->id;
-			client_msg->data = msg;
-			DL_APPEND(bulk_send, client_msg);
-			messages++;
-		}
-		json_decref(val);
-	}
-	ck_runlock(&sdata->instance_lock);
-
-	if (bulk_send) {
-		LOGNOTICE("Sending submitblock to downstream servers");
-		ssend_bulk_prepend(sdata, bulk_send, messages);
-	}
-}
-
 static void
 process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const int cblen,
 	      const uchar *data, const uchar *hash, uchar *swap32, char *blockhash)
@@ -1945,10 +1895,6 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 	if (wb->txns)
 		realloc_strcat(&gbt_block, wb->txn_data);
 	send_generator(ckp, gbt_block, GEN_PRIORITY);
-	if (ckp->remote)
-		upstream_blocksubmit(ckp, gbt_block);
-	else
-		downstream_blocksubmits(ckp, gbt_block, NULL);
 	free(gbt_block);
 }
 
@@ -6761,8 +6707,9 @@ static void parse_remote_workers(sdata_t *sdata, json_t *val, const char *buf)
 	LOGDEBUG("Adding %d remote workers to user %s", workers, username);
 }
 
-static void parse_remote_blocksubmit(ckpool_t *ckp, json_t *val, const char *buf,
-				     const stratum_instance_t *client)
+/* This is here to support older trusted nodes submitting blocks this way but
+ * we no longer do it. */
+static void parse_remote_blocksubmit(ckpool_t *ckp, json_t *val, const char *buf)
 {
 	json_t *submitblock_val;
 	const char *gbt_block;
@@ -6775,7 +6722,6 @@ static void parse_remote_blocksubmit(ckpool_t *ckp, json_t *val, const char *buf
 	}
 	LOGWARNING("Submitting possible downstream block!");
 	send_generator(ckp, gbt_block, GEN_PRIORITY);
-	downstream_blocksubmits(ckp, gbt_block, client);
 }
 
 static void parse_remote_block(sdata_t *sdata, json_t *val, const char *buf)
@@ -6832,7 +6778,7 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 	else if (!safecmp(method, "workers"))
 		parse_remote_workers(sdata, val, buf);
 	else if (!safecmp(method, "submitblock"))
-		parse_remote_blocksubmit(ckp, val, buf, client);
+		parse_remote_blocksubmit(ckp, val, buf);
 	else if (!safecmp(method, "block"))
 		parse_remote_block(sdata, val, buf);
 	else if (!safecmp(method, "ping"))

@@ -825,11 +825,12 @@ static const char *rpc_method(const char *rpc_req)
 
 /* All of these calls are made to bitcoind which prefers open/close instead
  * of persistent connections so cs->fd is always invalid. */
-json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
+static json_t *_json_rpc_call(connsock_t *cs, const char *rpc_req, const bool info_only)
 {
 	float timeout = RPC_TIMEOUT;
 	char *http_req = NULL;
 	json_error_t err_val;
+	char *warning = NULL;
 	json_t *val = NULL;
 	tv_t stt_tv, fin_tv;
 	double elapsed;
@@ -839,28 +840,28 @@ json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
 	cksem_wait(&cs->sem);
 	cs->fd = connect_socket(cs->url, cs->port);
 	if (unlikely(cs->fd < 0)) {
-		LOGWARNING("Unable to connect socket to %s:%s in %s", cs->url, cs->port, __func__);
+		ASPRINTF(&warning, "Unable to connect socket to %s:%s in %s", cs->url, cs->port, __func__);
 		goto out;
 	}
 	if (unlikely(!cs->url)) {
-		LOGWARNING("No URL in %s", __func__);
+		ASPRINTF(&warning, "No URL in %s", __func__);
 		goto out;
 	}
 	if (unlikely(!cs->port)) {
-		LOGWARNING("No port in %s", __func__);
+		ASPRINTF(&warning, "No port in %s", __func__);
 		goto out;
 	}
 	if (unlikely(!cs->auth)) {
-		LOGWARNING("No auth in %s", __func__);
+		ASPRINTF(&warning, "No auth in %s", __func__);
 		goto out;
 	}
 	if (unlikely(!rpc_req)) {
-		LOGWARNING("Null rpc_req passed to %s", __func__);
+		ASPRINTF(&warning, "Null rpc_req passed to %s", __func__);
 		goto out;
 	}
 	len = strlen(rpc_req);
 	if (unlikely(!len)) {
-		LOGWARNING("Zero length rpc_req passed to %s", __func__);
+		ASPRINTF(&warning, "Zero length rpc_req passed to %s", __func__);
 		goto out;
 	}
 	http_req = ckalloc(len + 256); // Leave room for headers
@@ -878,23 +879,23 @@ json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
 	if (ret != len) {
 		tv_time(&fin_tv);
 		elapsed = tvdiff(&fin_tv, &stt_tv);
-		LOGWARNING("Failed to write to socket in %s (%.10s...) %.3fs",
-			   __func__, rpc_method(rpc_req), elapsed);
+		ASPRINTF(&warning, "Failed to write to socket in %s (%.10s...) %.3fs",
+			 __func__, rpc_method(rpc_req), elapsed);
 		goto out_empty;
 	}
 	ret = read_socket_line(cs, &timeout);
 	if (ret < 1) {
 		tv_time(&fin_tv);
 		elapsed = tvdiff(&fin_tv, &stt_tv);
-		LOGWARNING("Failed to read socket line in %s (%.10s...) %.3fs",
-			   __func__, rpc_method(rpc_req), elapsed);
+		ASPRINTF(&warning, "Failed to read socket line in %s (%.10s...) %.3fs",
+			 __func__, rpc_method(rpc_req), elapsed);
 		goto out_empty;
 	}
 	if (strncasecmp(cs->buf, "HTTP/1.1 200 OK", 15)) {
 		tv_time(&fin_tv);
 		elapsed = tvdiff(&fin_tv, &stt_tv);
-		LOGWARNING("HTTP response to (%.10s...) %.3fs not ok: %s",
-			   rpc_method(rpc_req), elapsed, cs->buf);
+		ASPRINTF(&warning, "HTTP response to (%.10s...) %.3fs not ok: %s",
+			 rpc_method(rpc_req), elapsed, cs->buf);
 		goto out_empty;
 	}
 	do {
@@ -902,32 +903,54 @@ json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
 		if (ret < 1) {
 			tv_time(&fin_tv);
 			elapsed = tvdiff(&fin_tv, &stt_tv);
-			LOGWARNING("Failed to read http socket lines in %s (%.10s...) %.3fs",
-				   __func__, rpc_method(rpc_req), elapsed);
+			ASPRINTF(&warning, "Failed to read http socket lines in %s (%.10s...) %.3fs",
+				 __func__, rpc_method(rpc_req), elapsed);
 			goto out_empty;
 		}
 	} while (strncmp(cs->buf, "{", 1));
 	tv_time(&fin_tv);
 	elapsed = tvdiff(&fin_tv, &stt_tv);
 	if (elapsed > 5.0) {
-		LOGWARNING("HTTP socket read+write took %.3fs in %s (%.10s...)",
-			   elapsed, __func__, rpc_method(rpc_req));
+		ASPRINTF(&warning, "HTTP socket read+write took %.3fs in %s (%.10s...)",
+			 elapsed, __func__, rpc_method(rpc_req));
 	}
 
 	val = json_loads(cs->buf, 0, &err_val);
 	if (!val) {
-		LOGWARNING("JSON decode (%.10s...) failed(%d): %s",
-			   rpc_method(rpc_req), err_val.line, err_val.text);
+		ASPRINTF(&warning, "JSON decode (%.10s...) failed(%d): %s",
+			 rpc_method(rpc_req), err_val.line, err_val.text);
 	}
 out_empty:
 	empty_socket(cs->fd);
 	empty_buffer(cs);
 out:
+	if (warning) {
+		if (info_only)
+			LOGNOTICE("%s", warning);
+		else
+			LOGWARNING("%s", warning);
+		free(warning);
+	}
 	Close(cs->fd);
 	free(http_req);
 	dealloc(cs->buf);
 	cksem_post(&cs->sem);
 	return val;
+}
+
+json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
+{
+	return _json_rpc_call(cs, rpc_req, false);
+}
+
+/* For when we are submitting information that is not important and don't care
+ * about the response. */
+void json_rpc_msg(connsock_t *cs, const char *rpc_req)
+{
+	json_t *val = _json_rpc_call(cs, rpc_req, true);
+
+	/* We don't care about the result */
+	json_decref(val);
 }
 
 static void terminate_oldpid(const ckpool_t *ckp, proc_instance_t *pi, const pid_t oldpid)
