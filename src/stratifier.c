@@ -7866,14 +7866,19 @@ static void *statsupdate(void *arg)
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
 
-		JSON_CPACK(val, "{sI,sI,sI,sf,sf,sf,sf}",
+		sprintf(suffix1, "%.1f", stats->sps1);
+		sprintf(suffix5, "%.1f", stats->sps5);
+		sprintf(suffix15, "%.1f", stats->sps15);
+		sprintf(suffix60, "%.1f", stats->sps60);
+
+		JSON_CPACK(val, "{sI,sI,sI,ss,ss,ss,ss}",
 				"accepted", stats->accounted_diff_shares,
 				"rejected", stats->accounted_rejects,
 				"bestshare", stats->best_diff,
-				"SPS1m", stats->sps1,
-				"SPS5m", stats->sps5,
-				"SPS15m", stats->sps15,
-				"SPS1h", stats->sps60);
+				"SPS1m", suffix1,
+				"SPS5m", suffix5,
+				"SPS15m", suffix15,
+				"SPS1h", suffix60);
 		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
 		json_decref(val);
 		LOGNOTICE("Pool:%s", s);
