@@ -7964,6 +7964,17 @@ static void *ckdb_heartbeat(void *arg)
 	return NULL;
 }
 
+static void json_double_string(double *dbl, json_t *val, const char *key)
+{
+	char *string;
+
+	json_get_string(&string, val, key);
+	if (!string)
+		return;
+	sscanf(string, "%lf", dbl);
+	free(string);
+}
+
 static void read_poolstats(ckpool_t *ckp)
 {
 	char *s = alloca(4096), *pstats, *dsps, *sps;
@@ -8026,10 +8037,10 @@ static void read_poolstats(ckpool_t *ckp)
 		LOGINFO("Failed to json decode sps line from pool logfile: %s", dsps);
 		return;
 	}
-	json_get_double(&stats->sps1, val, "SPS1m");
-	json_get_double(&stats->sps5, val, "SPS5m");
-	json_get_double(&stats->sps15, val, "SPS15m");
-	json_get_double(&stats->sps60, val, "SPS1h");
+	json_double_string(&stats->sps1, val, "SPS1m");
+	json_double_string(&stats->sps5, val, "SPS5m");
+	json_double_string(&stats->sps15, val, "SPS15m");
+	json_double_string(&stats->sps60, val, "SPS1h");
 	json_get_int64(&stats->accounted_diff_shares, val, "accepted");
 	json_get_int64(&stats->accounted_rejects, val, "rejected");
 	json_get_int64(&stats->best_diff, val, "bestshare");
