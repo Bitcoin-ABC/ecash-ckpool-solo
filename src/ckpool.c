@@ -896,6 +896,18 @@ static json_t *_json_rpc_call(connsock_t *cs, const char *rpc_req, const bool in
 		elapsed = tvdiff(&fin_tv, &stt_tv);
 		ASPRINTF(&warning, "HTTP response to (%.10s...) %.3fs not ok: %s",
 			 rpc_method(rpc_req), elapsed, cs->buf);
+		timeout = 0;
+		/* Look for a json response if there is one */
+		while (read_socket_line(cs, &timeout) > 0) {
+			timeout = 0;
+			if (*cs->buf != '{')
+				continue;
+			free(warning);
+			/* Replace the warning with the json response */
+			ASPRINTF(&warning, "JSON response to (%.10s...) %.3fs not ok: %s",
+				 rpc_method(rpc_req), elapsed, cs->buf);
+			break;
+		}
 		goto out_empty;
 	}
 	do {
