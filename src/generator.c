@@ -1582,6 +1582,12 @@ static void send_json_msgq(gdata_t *gdata, cs_msg_t **csmsgq)
 		while (csmsg->len) {
 			int fd;
 
+			if (unlikely(!proxy->alive)) {
+				LOGDEBUG("Dropping send message to dead proxy %d:%d in send_json_msgq",
+					 proxy->id, proxy->subid);
+				csmsg->len = 0;
+				break;
+			}
 			proxy->sending = csmsg;
 			fd = proxy->cs.fd;
 			ret = send(fd, csmsg->buf + csmsg->ofs, csmsg->len, MSG_DONTWAIT);
