@@ -442,7 +442,7 @@ static void send_client(cdata_t *cdata, int64_t id, char *buf);
 
 /* Look for shares being submitted via a redirector and add them to a linked
  * list for looking up the responses. */
-static void parse_redirector_share(client_instance_t *client, const json_t *val)
+static void parse_redirector_share(cdata_t *cdata, client_instance_t *client, const json_t *val)
 {
 	share_t *share, *tmp;
 	time_t now;
@@ -456,8 +456,13 @@ static void parse_redirector_share(client_instance_t *client, const json_t *val)
 	now = time(NULL);
 	share->submitted = now;
 	share->id = id;
-	DL_APPEND(client->shares, share);
+
 	LOGINFO("Redirector adding client %"PRId64" share id: %"PRId64, client->id, id);
+
+	/* We use the cdata lock instead of a separate lock since this function
+	 * is called infrequently. */
+	ck_wlock(&cdata->lock);
+	DL_APPEND(client->shares, share);
 
 	/* Age old shares. */
 	DL_FOREACH_SAFE(client->shares, share, tmp) {
@@ -466,6 +471,7 @@ static void parse_redirector_share(client_instance_t *client, const json_t *val)
 			dealloc(share);
 		}
 	}
+	ck_wunlock(&cdata->lock);
 }
 
 /* Client is holding a reference count from being on the epoll list. Returns
@@ -522,7 +528,7 @@ reparse:
 			json_object_set_new_nocheck(val, "client_id", json_integer(passthrough_id));
 		} else {
 			if (ckp->redirector && !client->redirected && strstr(client->buf, "mining.submit"))
-				parse_redirector_share(client, val);
+				parse_redirector_share(cdata, client, val);
 			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
 			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
 		}
@@ -860,7 +866,7 @@ static void redirect_client(ckpool_t *ckp, client_instance_t *client)
 
 /* Look for accepted shares in redirector mode to know we can redirect this
  * client to a protected server. */
-static void test_redirector_shares(ckpool_t *ckp, client_instance_t *client, const char *buf)
+static void test_redirector_shares(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client, const char *buf)
 {
 	json_t *val = json_loads(buf, 0, NULL);
 	share_t *share, *found = NULL;
@@ -875,19 +881,21 @@ static void test_redirector_shares(ckpool_t *ckp, client_instance_t *client, con
 		LOGINFO("Failed to find response id");
 		goto out;
 	}
+
+	ck_rlock(&cdata->lock);
 	DL_FOREACH(client->shares, share) {
 		if (share->id == id) {
 			LOGDEBUG("Found matching share %"PRId64" in trs for client %"PRId64,
 				 id, client->id);
-			DL_DELETE(client->shares, share);
 			found = share;
 			break;
 		}
 	}
+	ck_runlock(&cdata->lock);
+
 	if (found) {
 		bool result = false;
 
-		dealloc(found);
 		if (!json_get_bool(&result, val, "result")) {
 			LOGINFO("Failed to find result in trs share");
 			goto out;
@@ -905,10 +913,12 @@ static void test_redirector_shares(ckpool_t *ckp, client_instance_t *client, con
 		redirect_client(ckp, client);
 
 		/* Clear the list now since we don't need it any more */
+		ck_wlock(&cdata->lock);
 		DL_FOREACH_SAFE(client->shares, share, found) {
 			DL_DELETE(client->shares, share);
 			dealloc(share);
 		}
+		ck_wunlock(&cdata->lock);
 	}
 out:
 	json_decref(val);
@@ -982,7 +992,7 @@ static void send_client(cdata_t *cdata, const int64_t id, char *buf)
 			stratifier_add_recv(ckp, val);
 		}
 		if (ckp->redirector && !client->redirected)
-			test_redirector_shares(ckp, client, buf);
+			test_redirector_shares(ckp, cdata, client, buf);
 	}
 out:
 	sender_send = ckzalloc(sizeof(sender_send_t));
