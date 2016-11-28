@@ -688,18 +688,6 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 	wb->coinb3len = 0;
 	wb->coinb3bin = ckzalloc(256);
 
-	if (wb->insert_witness) {
-		// 0 value
-		wb->coinb2len += 8;
-
-		wb->coinb2bin[wb->coinb2len++] = witnessdata_size + 2; // total scriptPubKey size
-		wb->coinb2bin[wb->coinb2len++] = 0x6a; // OP_RETURN
-		wb->coinb2bin[wb->coinb2len++] = witnessdata_size;
-
-		hex2bin(&wb->coinb2bin[wb->coinb2len], wb->witnessdata, witnessdata_size);
-		wb->coinb2len += witnessdata_size;
-	}
-
 	if (ckp->donvalid) {
 		u64 = (uint64_t *)wb->coinb3bin;
 		*u64 = htole64(d64);
@@ -708,6 +696,18 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 		wb->coinb3bin[wb->coinb3len++] = sdata->donkeytxnlen;
 		memcpy(wb->coinb3bin + wb->coinb3len, sdata->donkeytxnbin, sdata->donkeytxnlen);
 		wb->coinb3len += sdata->donkeytxnlen;
+	}
+
+	if (wb->insert_witness) {
+		// 0 value
+		wb->coinb3len += 8;
+
+		wb->coinb3bin[wb->coinb3len++] = witnessdata_size + 2; // total scriptPubKey size
+		wb->coinb3bin[wb->coinb3len++] = 0x6a; // OP_RETURN
+		wb->coinb3bin[wb->coinb3len++] = witnessdata_size;
+
+		hex2bin(&wb->coinb3bin[wb->coinb3len], wb->witnessdata, witnessdata_size);
+		wb->coinb3len += witnessdata_size;
 	}
 
 	wb->coinb3len += 4; // Blank lock
