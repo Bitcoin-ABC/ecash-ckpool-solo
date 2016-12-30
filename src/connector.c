@@ -170,6 +170,14 @@ struct connector_data {
 
 typedef struct connector_data cdata_t;
 
+void connector_upstream_msg(ckpool_t *ckp, char *msg)
+{
+	cdata_t *cdata = ckp->cdata;
+
+	LOGDEBUG("Upstreaming %s", msg);
+	ckmsgq_add(cdata->upstream_sends, msg);
+}
+
 /* Increase the reference count of instance */
 static void __inc_instance_ref(client_instance_t *client)
 {
@@ -351,17 +359,24 @@ out:
 /* Client must hold a reference count */
 static int drop_client(cdata_t *cdata, client_instance_t *client)
 {
-	bool passthrough = client->passthrough;
+	bool passthrough = client->passthrough, remote = client->remote;
+	char address_name[INET6_ADDRSTRLEN];
 	int64_t client_id = client->id;
 	int fd = -1;
 
+	strcpy(address_name, client->address_name);
 	ck_wlock(&cdata->lock);
 	fd = __drop_client(cdata, client);
 	ck_wunlock(&cdata->lock);
 
 	if (fd > -1) {
-		if (passthrough)
-			LOGNOTICE("Connector dropped passthrough %"PRId64, client_id);
+		if (passthrough) {
+			LOGNOTICE("Connector dropped passthrough %"PRId64" %s",
+				  client_id, address_name);
+		} else if (remote) {
+			LOGWARNING("Remote trusted server client %"PRId64" %s disconnected",
+				   client_id, address_name);
+		}
 		LOGDEBUG("Connector dropped fd %d", fd);
 	}
 
@@ -641,7 +656,6 @@ static void *receiver(void *arg)
 	ckpool_t *ckp = cdata->ckp;
 	uint64_t serverfds, i;
 	int ret, epfd;
-	char *buf;
 
 	rename_proc("creceiver");
 
@@ -664,10 +678,8 @@ static void *receiver(void *arg)
 	}
 
 	/* Wait for the stratifier to be ready for us */
-	do {
-		buf = send_recv_proc(ckp->stratifier, "ping");
-	} while (!buf);
-	free(buf);
+	while (!ckp->stratifier_ready)
+		cksleep_ms(10);
 
 	while (42) {
 		uint64_t edu64;
@@ -1189,14 +1201,20 @@ static void *urecv_process(void *arg)
 			LOGWARNING("Failed to find method from upstream pool json %s",
 				   cs->buf);
 			json_decref(val);
-			goto nomsg;
+			goto decref;
 		}
-		if (!safecmp(method, "submitblock"))
+		if (!safecmp(method, stratum_msgs[SM_TRANSACTIONS]))
+			parse_upstream_txns(ckp, val);
+		else if (!safecmp(method, stratum_msgs[SM_AUTHRESULT]))
+			parse_upstream_auth(ckp, val);
+		else if (!safecmp(method, "submitblock"))
 			parse_remote_submitblock(ckp, val, cs->buf);
 		else if (!safecmp(method, "pong"))
 			LOGDEBUG("Received upstream pong");
 		else
 			LOGWARNING("Unrecognised upstream method %s", method);
+decref:
+		json_decref(val);
 nomsg:
 		cksem_post(&cs->sem);
 
@@ -1275,11 +1293,12 @@ static void drop_passthrough_client(cdata_t *cdata, const int64_t id)
 	send_client(cdata, id, msg);
 }
 
-static char *connector_stats(cdata_t *cdata, const int runtime)
+char *connector_stats(void *data, const int runtime)
 {
 	json_t *val = json_object(), *subval;
 	client_instance_t *client;
 	int objects, generated;
+	cdata_t *cdata = data;
 	sender_send_t *send;
 	int64_t memsize;
 	char *buf;
@@ -1331,6 +1350,16 @@ static char *connector_stats(cdata_t *cdata, const int runtime)
 	return buf;
 }
 
+void connector_send_fd(ckpool_t *ckp, const int fdno, const int sockd)
+{
+	cdata_t *cdata = ckp->cdata;
+
+	if (fdno > -1 && fdno < ckp->serverurls)
+		send_fd(cdata->serverfd[fdno], sockd);
+	else
+		LOGWARNING("Connector asked to send invalid fd %d", fdno);
+}
+
 static void connector_loop(proc_instance_t *pi, cdata_t *cdata)
 {
 	unix_msg_t *umsg = NULL;
@@ -1340,7 +1369,6 @@ static void connector_loop(proc_instance_t *pi, cdata_t *cdata)
 	int ret = 0;
 	char *buf;
 
-	LOGWARNING("%s connector ready", ckp->name);
 	last_stats = cdata->start_time;
 
 retry:
@@ -1373,12 +1401,6 @@ retry:
 		json_t *val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
 
 		ckmsgq_add(cdata->cmpq, val);
-	} else if (cmdmatch(buf, "upstream=")) {
-		char *msg = strdup(buf + 9);
-
-		LOGDEBUG("Upstreaming %s", msg);
-		ckmsgq_add(cdata->upstream_sends, msg);
-		goto retry;
 	} else if (cmdmatch(buf, "dropclient")) {
 		client_instance_t *client;
 
@@ -1591,6 +1613,9 @@ void *connector(void *arg)
 	cdata->cevents = create_ckmsgqs(ckp, "cevent", &client_event_processor, threads);
 	create_pthread(&cdata->pth_receiver, receiver, cdata);
 	cdata->start_time = time(NULL);
+
+	ckp->connector_ready = true;
+	LOGWARNING("%s connector ready", ckp->name);
 
 	connector_loop(pi, cdata);
 out:

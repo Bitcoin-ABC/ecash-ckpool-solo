@@ -12,7 +12,15 @@
 
 #include "config.h"
 
+#define GETBEST_FAILED -1
+#define GETBEST_NOTIFY 0
+#define GETBEST_SUCCESS 1
+
 void generator_add_send(ckpool_t *ckp, json_t *val);
+json_t *generator_genbase(ckpool_t *ckp);
+int generator_getbest(ckpool_t *ckp, char *hash);
+bool generator_checkaddr(ckpool_t *ckp, const char *addr);
+void generator_submitblock(ckpool_t *ckp, char *buf);
 void *generator(void *arg);
 
 #endif /* GENERATOR_H */

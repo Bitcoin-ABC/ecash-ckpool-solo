@@ -4093,7 +4093,7 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 	K_ITEM *t_item = NULL, *cd_item = NULL, *seqall;
 	char *cmdptr, *idptr, *next, *eq, *end, *was;
 	char *data = NULL, *st = NULL, *st2 = NULL, *ip = NULL;
-	bool noid = false, intrans;
+	bool noid = false, intrans, anstr, wasend = false;
 	uint64_t ram2 = 0;
 	size_t siz;
 	int i;
@@ -4196,6 +4196,7 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 		next++;
 		// while we have a new quoted name
 		while (*next == JSON_STR) {
+			anstr = wasend = false;
 			was = next;
 			end = ++next;
 			// look for the end quote
@@ -4246,6 +4247,7 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 			while (*next == ' ')
 				next++;
 			if (*next == JSON_STR) {
+				anstr = true;
 				end = ++next;
 				// A quoted value must have a terminating quote
 				while (*end && *end != JSON_STR) {
@@ -4325,6 +4327,11 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 				if (strcmp(transfer->name,
 					   intransient_fields[i]) == 0) {
 					intrans = true;
+					/* If this is the last field & it wasn't
+					 *  a string, it will wipe the closing
+					 *  JSON_END - so flag it */
+					if (!anstr && *(next + siz) == JSON_END)
+						wasend = true;
 					// This will affect 'was' if JSON_END is missing
 					*(next + siz) = '\0';
 					transfer->intransient =
@@ -4362,7 +4369,9 @@ static enum cmd_values breakdown(K_ITEM **ml_item, char *buf, tv_t *now,
 					next++;
 			}
 		}
-		if (*next != JSON_END) {
+		/* If the last field was intransient and not a string, then it
+		 *  wiped the closing JSON_END - but flagged that with wasend */
+		if (*next != JSON_END && (!wasend)) {
 			LOGERR("JSON_END '%c' was:%.32s... buf=%.32s...",
 				JSON_END, st = safe_text(next),
 				st2 = safe_text(buf));

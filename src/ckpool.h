@@ -176,6 +176,8 @@ struct ckpool_instance {
 
 	/* Logger message queue */
 	ckmsgq_t *logger;
+	ckmsgq_t *console_logger;
+
 	/* Process instance data of parent/child processes */
 	proc_instance_t main;
 
@@ -293,6 +295,8 @@ enum stratum_msgtype {
 	SM_BLOCK,
 	SM_PONG,
 	SM_TRANSACTIONS,
+	SM_SHAREERR,
+	SM_WORKERSTATS,
 	SM_NONE
 };
 
@@ -316,6 +320,8 @@ static const char __maybe_unused *stratum_msgs[] = {
 	"block",
 	"pong",
 	"transactions",
+	"shareerr",
+	"workerstats",
 	""
 };
 
@@ -329,7 +335,7 @@ static const char __maybe_unused *stratum_msgs[] = {
 
 ckmsgq_t *create_ckmsgq(ckpool_t *ckp, const char *name, const void *func);
 ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, const int count);
-void _ckmsgq_add(ckmsgq_t *ckmsgq, void *data, const char *file, const char *func, const int line);
+bool _ckmsgq_add(ckmsgq_t *ckmsgq, void *data, const char *file, const char *func, const int line);
 #define ckmsgq_add(ckmsgq, data) _ckmsgq_add(ckmsgq, data, __FILE__, __func__, __LINE__)
 bool ckmsgq_empty(ckmsgq_t *ckmsgq);
 unix_msg_t *get_unix_msg(proc_instance_t *pi);
@@ -341,8 +347,8 @@ void empty_buffer(connsock_t *cs);
 int set_sendbufsize(ckpool_t *ckp, const int fd, const int len);
 int set_recvbufsize(ckpool_t *ckp, const int fd, const int len);
 int read_socket_line(connsock_t *cs, float *timeout);
-void _send_proc(const proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
-#define send_proc(pi, msg) _send_proc(&(pi), msg, __FILE__, __func__, __LINE__)
+void _queue_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line);
+#define send_proc(pi, msg) _queue_proc(&(pi), msg, __FILE__, __func__, __LINE__)
 char *_send_recv_proc(const proc_instance_t *pi, const char *msg, int writetimeout, int readtimedout,
 		      const char *file, const char *func, const int line);
 #define send_recv_proc(pi, msg) _send_recv_proc(&(pi), msg, UNIX_WRITE_TIMEOUT, UNIX_READ_TIMEOUT, __FILE__, __func__, __LINE__)

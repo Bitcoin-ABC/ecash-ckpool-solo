@@ -242,6 +242,14 @@ void logmsg(int loglevel, const char *fmt, ...);
 #define UNIX_READ_TIMEOUT 5
 #define UNIX_WRITE_TIMEOUT 10
 
+#define MIN1	60
+#define MIN5	300
+#define MIN15	900
+#define HOUR	3600
+#define HOUR6	21600
+#define DAY	86400
+#define WEEK	604800
+
 /* Share error values */
 
 enum share_err {
@@ -581,6 +589,7 @@ int ms_tvdiff(tv_t *end, tv_t *start);
 double tvdiff(tv_t *end, tv_t *start);
 
 void decay_time(double *f, double fadd, double fsecs, double interval);
+double sane_tdiff(tv_t *end, tv_t *start);
 void suffix_string(double val, char *buf, size_t bufsiz, int sigdigits);
 
 double le256todouble(const uchar *target);

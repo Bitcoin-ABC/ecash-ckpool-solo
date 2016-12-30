@@ -53,20 +53,20 @@ static bool open_logfile(ckpool_t *ckp)
 	return true;
 }
 
+/* Use ckmsgqs for logging to console and files to prevent logmsg from blocking
+ * on any delays. */
+static void console_log(ckpool_t __maybe_unused *ckp, char *msg)
+{
+	fprintf(stderr, "\33[2K\r%s", msg);
+	fflush(stderr);
+
+	free(msg);
+}
+
 static void proclog(ckpool_t *ckp, char *msg)
 {
-	time_t log_t;
+	time_t log_t = time(NULL);
 
-	if (unlikely(!msg)) {
-		fprintf(stderr, "Proclog received null message");
-		return;
-	}
-	if (unlikely(!strlen(msg))) {
-		fprintf(stderr, "Proclog received zero length message");
-		free(msg);
-		return;
-	}
-	log_t = time(NULL);
 	/* Reopen log file every minute, allowing us to move/rename it and
 	 * create a new logfile */
 	if (log_t > ckp->lastopen_t + 60) {
@@ -85,7 +85,7 @@ static void proclog(ckpool_t *ckp, char *msg)
 void logmsg(int loglevel, const char *fmt, ...) {
 	if (global_ckp->loglevel >= loglevel && fmt) {
 		int logfd = global_ckp->logfd;
-		char *buf = NULL;
+		char *buf = NULL, *log;
 		struct tm tm;
 		tv_t now_tv;
 		int ms;
@@ -96,6 +96,14 @@ void logmsg(int loglevel, const char *fmt, ...) {
 		VASPRINTF(&buf, fmt, ap);
 		va_end(ap);
 
+		if (unlikely(!buf)) {
+			fprintf(stderr, "Null buffer sent to logmsg\n");
+			return;
+		}
+		if (unlikely(!strlen(buf))) {
+			fprintf(stderr, "Zero length string sent to logmsg\n");
+			return;
+		}
 		tv_time(&now_tv);
 		ms = (int)(now_tv.tv_usec / 1000);
 		localtime_r(&(now_tv.tv_sec), &tm);
@@ -106,24 +114,17 @@ void logmsg(int loglevel, const char *fmt, ...) {
 				tm.tm_hour,
 				tm.tm_min,
 				tm.tm_sec, ms);
-		if (loglevel <= LOG_WARNING) {
-			fprintf(stderr, "\33[2K\r");
-			if (loglevel <= LOG_ERR && errno != 0)
-				fprintf(stderr, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
-			else
-				fprintf(stderr, "%s %s\n", stamp, buf);
-			fflush(stderr);
-		}
-		if (logfd > 0) {
-			char *msg;
+		if (loglevel <= LOG_ERR && errno != 0)
+			ASPRINTF(&log, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
+		else
+			ASPRINTF(&log, "%s %s\n", stamp, buf);
 
-			if (loglevel <= LOG_ERR && errno != 0)
-				ASPRINTF(&msg, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
-			else
-				ASPRINTF(&msg, "%s %s\n", stamp, buf);
-			ckmsgq_add(global_ckp->logger, msg);
-		}
+		if (loglevel <= LOG_WARNING)
+			ckmsgq_add(global_ckp->console_logger, strdup(log));
+		if (logfd > 0)
+			ckmsgq_add(global_ckp->logger, strdup(log));
 		free(buf);
+		free(log);
 	}
 }
 
@@ -203,7 +204,7 @@ ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, cons
 
 /* Generic function for adding messages to a ckmsgq linked list and signal the
  * ckmsgq parsing thread(s) to wake up and process it. */
-void _ckmsgq_add(ckmsgq_t *ckmsgq, void *data, const char *file, const char *func, const int line)
+bool _ckmsgq_add(ckmsgq_t *ckmsgq, void *data, const char *file, const char *func, const int line)
 {
 	ckmsg_t *msg;
 
@@ -212,7 +213,7 @@ void _ckmsgq_add(ckmsgq_t *ckmsgq, void *data, const char *file, const char *fun
 		/* Discard data if we're unlucky enough to be sending it to
 		 * msg queues not set up during start up */
 		free(data);
-		return;
+		return false;
 	}
 	while (unlikely(!ckmsgq->active))
 		cksleep_ms(10);
@@ -225,6 +226,8 @@ void _ckmsgq_add(ckmsgq_t *ckmsgq, void *data, const char *file, const char *fun
 	DL_APPEND(ckmsgq->msgs, msg);
 	pthread_cond_broadcast(ckmsgq->cond);
 	mutex_unlock(ckmsgq->lock);
+
+	return true;
 }
 
 /* Return whether there are any messages queued in the ckmsgq linked list. */
@@ -344,41 +347,6 @@ static int pid_wait(const pid_t pid, const int ms)
 	return ret;
 }
 
-static int _send_procmsg(proc_instance_t *pi, const char *buf, const char *file, const char *func, const int line)
-{
-	char *path = pi->us.path;
-	int ret = -1;
-	int sockd;
-
-	if (unlikely(!path || !strlen(path))) {
-		LOGERR("Attempted to send message %s to null path in send_proc from %s %s:%d",
-		       buf ? buf : "", file, func, line);
-		goto out;
-	}
-	if (unlikely(!buf || !strlen(buf))) {
-		LOGERR("Attempted to send null message to socket %s in send_proc from %s %s:%d",
-		       path, file, func, line);
-		goto out;
-	}
-	sockd = open_unix_client(path);
-	if (unlikely(sockd < 0)) {
-		LOGWARNING("Failed to open socket %s in send_procmsg from %s %s:%d",
-			   path, file, func, line);
-		goto out;
-	}
-	if (unlikely(!send_unix_msg(sockd, buf)))
-		LOGWARNING("Failed to send %s to socket %s from %s %s:%d", buf,
-			   path, file, func, line);
-	else
-		ret = sockd;
-out:
-	if (unlikely(ret == -1))
-		LOGERR("Failure in send_procmsg from %s %s:%d", file, func, line);
-	return ret;
-}
-
-#define send_procmsg(PI, BUF) _send_procmsg(&(PI), BUF, __FILE__, __func__, __LINE__)
-
 static void api_message(ckpool_t *ckp, char **buf, int *sockd)
 {
 	apimsg_t *apimsg = ckalloc(sizeof(apimsg_t));
@@ -436,31 +404,21 @@ retry:
 			send_unix_msg(sockd, "success");
 		}
 	} else if (cmdmatch(buf, "getxfd")) {
-		int connfd = send_procmsg(ckp->connector, buf);
+		int fdno = -1;
 
-		if (connfd > 0) {
-			int newfd = get_fd(connfd);
-
-			if (newfd > 0) {
-				LOGDEBUG("Sending new fd %d", newfd);
-				send_fd(newfd, sockd);
-				Close(newfd);
-			} else
-				LOGWARNING("Failed to get_fd");
-			Close(connfd);
-		} else
-			LOGWARNING("Failed to send_procmsg to connector");
+		sscanf(buf, "getxfd%d", &fdno);
+		connector_send_fd(ckp, fdno, sockd);
 	} else if (cmdmatch(buf, "accept")) {
 		LOGWARNING("Listener received accept message, accepting clients");
-		send_procmsg(ckp->connector, "accept");
+		send_proc(ckp->connector, "accept");
 		send_unix_msg(sockd, "accepting");
 	} else if (cmdmatch(buf, "reject")) {
 		LOGWARNING("Listener received reject message, rejecting clients");
-		send_procmsg(ckp->connector, "reject");
+		send_proc(ckp->connector, "reject");
 		send_unix_msg(sockd, "rejecting");
 	} else if (cmdmatch(buf, "reconnect")) {
 		LOGWARNING("Listener received request to send reconnect to clients");
-		send_procmsg(ckp->stratifier, buf);
+		send_proc(ckp->stratifier, buf);
 		send_unix_msg(sockd, "reconnecting");
 	} else if (cmdmatch(buf, "restart")) {
 		LOGWARNING("Listener received restart message, attempting handover");
@@ -474,17 +432,17 @@ retry:
 		}
 	} else if (cmdmatch(buf, "stratifierstats")) {
 		LOGDEBUG("Listener received stratifierstats request");
-		msg = send_recv_proc(ckp->stratifier, "stats");
+		msg = stratifier_stats(ckp, ckp->sdata);
 		send_unix_msg(sockd, msg);
 		dealloc(msg);
 	} else if (cmdmatch(buf, "connectorstats")) {
 		LOGDEBUG("Listener received connectorstats request");
-		msg = send_recv_proc(ckp->connector, "stats");
+		msg = connector_stats(ckp->cdata, 0);
 		send_unix_msg(sockd, msg);
 		dealloc(msg);
 	} else if (cmdmatch(buf, "ckdbflush")) {
 		LOGWARNING("Received ckdb flush message");
-		send_procmsg(ckp->stratifier, buf);
+		send_proc(ckp->stratifier, buf);
 		send_unix_msg(sockd, "flushing");
 	} else {
 		LOGINFO("Listener received unhandled message: %s", buf);
@@ -707,37 +665,26 @@ out:
 	return ret;
 }
 
-/* Send a single message to a process instance when there will be no response,
- * closing the socket immediately. */
-void _send_proc(const proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line)
+/* We used to send messages between each proc_instance via unix sockets when
+ * ckpool was a multi-process model but that is no longer required so we can
+ * place the messages directly on the other proc_instance's queue until we
+ * deprecate this mechanism. */
+void _queue_proc(proc_instance_t *pi, const char *msg, const char *file, const char *func, const int line)
 {
-	char *path = pi->us.path;
-	bool ret = false;
-	int sockd;
+	unix_msg_t *umsg;
 
 	if (unlikely(!msg || !strlen(msg))) {
-		LOGERR("Attempted to send null message to %s in send_proc", pi->processname);
+		LOGWARNING("Null msg passed to queue_proc from %s %s:%d", file, func, line);
 		return;
 	}
+	umsg = ckalloc(sizeof(unix_msg_t));
+	umsg->sockd = -1;
+	umsg->buf = strdup(msg);
 
-	if (unlikely(!path || !strlen(path))) {
-		LOGERR("Attempted to send message %s to null path in send_proc", msg ? msg : "");
-		goto out;
-	}
-
-	sockd = open_unix_client(path);
-	if (unlikely(sockd < 0)) {
-		LOGWARNING("Failed to open socket %s", path);
-		goto out;
-	}
-	if (unlikely(!send_unix_msg(sockd, msg)))
-		LOGWARNING("Failed to send %s to socket %s", msg, path);
-	else
-		ret = true;
-	Close(sockd);
-out:
-	if (unlikely(!ret))
-		LOGERR("Failure in send_proc from %s %s:%d", file, func, line);
+	mutex_lock(&pi->rmsg_lock);
+	DL_APPEND(pi->unix_msgs, umsg);
+	pthread_cond_signal(&pi->rmsg_cond);
+	mutex_unlock(&pi->rmsg_lock);
 }
 
 /* Send a single message to a process instance and retrieve the response, then
@@ -1123,6 +1070,7 @@ static void rm_namepid(const proc_instance_t *pi)
 static void launch_logger(ckpool_t *ckp)
 {
 	ckp->logger = create_ckmsgq(ckp, "logger", &proclog);
+	ckp->console_logger = create_ckmsgq(ckp, "conlog", &console_log);
 }
 
 static void clean_up(ckpool_t *ckp)
@@ -1741,7 +1689,7 @@ int main(int argc, char **argv)
 			case 't':
 				if (ckp.proxy)
 					quit(1, "Cannot set a proxy type and trusted remote mode");
-				ckp.remote = true;
+				ckp.standalone = ckp.remote = true;
 				break;
 			case 'u':
 				if (ckp.proxy || ckp.redirector || ckp.passthrough || ckp.node)

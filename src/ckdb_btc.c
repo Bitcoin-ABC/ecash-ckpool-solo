@@ -108,7 +108,7 @@ static int read_socket(int fd, char **buf, int timeout)
 
 static char *_btc_io(__maybe_unused const char *cmd, char *json, WHERE_FFL_ARGS)
 {
-	char *ip, *port;
+	char *ip = NULL, *port = NULL;
 	char *data, *ans, *res, *ptr;
 	int fd, ret, red;
 	size_t len;
