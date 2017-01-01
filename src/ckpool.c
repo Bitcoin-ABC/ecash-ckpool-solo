@@ -82,50 +82,59 @@ static void proclog(ckpool_t *ckp, char *msg)
 }
 
 /* Log everything to the logfile, but display warnings on the console as well */
-void logmsg(int loglevel, const char *fmt, ...) {
-	if (global_ckp->loglevel >= loglevel && fmt) {
-		int logfd = global_ckp->logfd;
-		char *buf = NULL, *log;
-		struct tm tm;
-		tv_t now_tv;
-		int ms;
-		va_list ap;
-		char stamp[128];
+void logmsg(int loglevel, const char *fmt, ...)
+{
+	int logfd = global_ckp->logfd;
+	char *log, *buf = NULL;
+	char stamp[128];
+	struct tm tm;
+	tv_t now_tv;
+	va_list ap;
+	int ms;
 
-		va_start(ap, fmt);
-		VASPRINTF(&buf, fmt, ap);
-		va_end(ap);
+	if (global_ckp->loglevel < loglevel || !fmt)
+		return;
 
-		if (unlikely(!buf)) {
-			fprintf(stderr, "Null buffer sent to logmsg\n");
-			return;
-		}
-		if (unlikely(!strlen(buf))) {
-			fprintf(stderr, "Zero length string sent to logmsg\n");
-			return;
-		}
-		tv_time(&now_tv);
-		ms = (int)(now_tv.tv_usec / 1000);
-		localtime_r(&(now_tv.tv_sec), &tm);
-		sprintf(stamp, "[%d-%02d-%02d %02d:%02d:%02d.%03d]",
-				tm.tm_year + 1900,
-				tm.tm_mon + 1,
-				tm.tm_mday,
-				tm.tm_hour,
-				tm.tm_min,
-				tm.tm_sec, ms);
-		if (loglevel <= LOG_ERR && errno != 0)
-			ASPRINTF(&log, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
-		else
-			ASPRINTF(&log, "%s %s\n", stamp, buf);
+	tv_time(&now_tv);
+	ms = (int)(now_tv.tv_usec / 1000);
+	localtime_r(&(now_tv.tv_sec), &tm);
+	sprintf(stamp, "[%d-%02d-%02d %02d:%02d:%02d.%03d]",
+			tm.tm_year + 1900,
+			tm.tm_mon + 1,
+			tm.tm_mday,
+			tm.tm_hour,
+			tm.tm_min,
+			tm.tm_sec, ms);
 
-		if (loglevel <= LOG_WARNING)
-			ckmsgq_add(global_ckp->console_logger, strdup(log));
-		if (logfd > 0)
-			ckmsgq_add(global_ckp->logger, strdup(log));
-		free(buf);
-		free(log);
+	va_start(ap, fmt);
+	VASPRINTF(&buf, fmt, ap);
+	va_end(ap);
+
+	if (unlikely(!buf)) {
+		fprintf(stderr, "Null buffer sent to logmsg\n");
+		return;
 	}
+	if (unlikely(!strlen(buf))) {
+		fprintf(stderr, "Zero length string sent to logmsg\n");
+		goto out;
+	}
+	if (loglevel <= LOG_ERR && errno != 0)
+		ASPRINTF(&log, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
+	else
+		ASPRINTF(&log, "%s %s\n", stamp, buf);
+
+	if (unlikely(!global_ckp->console_logger)) {
+		fprintf(stderr, "%s", log);
+		goto out_free;
+	}
+	if (loglevel <= LOG_WARNING)
+		ckmsgq_add(global_ckp->console_logger, strdup(log));
+	if (logfd > 0)
+		ckmsgq_add(global_ckp->logger, strdup(log));
+out_free:
+	free(log);
+out:
+	free(buf);
 }
 
 /* Generic function for creating a message queue receiving and parsing thread */
