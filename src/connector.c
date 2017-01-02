@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2017 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -1051,7 +1051,7 @@ static void remote_server(ckpool_t *ckp, cdata_t *cdata, client_instance_t *clie
 	LOGWARNING("Connector adding client %"PRId64" %s as remote trusted server",
 		   client->id, client->address_name);
 	client->remote = true;
-	ASPRINTF(&buf, "{\"result\": true}\n");
+	ASPRINTF(&buf, "{\"result\": true, \"ckdb\": %s}\n", CKP_STANDALONE(ckp) ? "false" : "true");
 	send_client(cdata, client->id, buf);
 	if (!ckp->rmem_warn)
 		set_recvbufsize(ckp, client->fd, 2097152);
@@ -1103,7 +1103,13 @@ static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 		LOGWARNING("Denied upstream trusted connection");
 		goto out;
 	}
-	LOGWARNING("Connected to upstream server %s:%s as trusted remote", cs->url, cs->port);
+	/* Parse whether the upstream pool is using ckdb or not. Default to yes
+	 * if no ckdb field is received for backward compatibility. */
+	res_val = json_object_get(val, "ckdb");
+	if (!res_val || json_is_true(res_val))
+		ckp->upstream_ckdb = true;
+	LOGWARNING("Connected to upstream %sckdb server %s:%s as trusted remote",
+		   ckp->upstream_ckdb ? "" : "non-", cs->url, cs->port);
 	ret = true;
 out:
 	cksem_post(&cs->sem);
@@ -1137,19 +1143,6 @@ static void usend_process(ckpool_t *ckp, char *buf)
 	}
 out:
 	free(buf);
-}
-
-static void parse_remote_submitblock(ckpool_t *ckp, const json_t *val, const char *buf)
-{
-	const char *gbt_block = json_string_value(json_object_get(val, "submitblock"));
-
-	if (unlikely(!gbt_block)) {
-		LOGWARNING("Failed to find submitblock data from upstream submitblock method %s",
-			   buf);
-		return;
-	}
-	LOGWARNING("Submitting possible upstream block!");
-	send_proc(ckp->generator, gbt_block);
 }
 
 static void ping_upstream(cdata_t *cdata)
@@ -1207,8 +1200,10 @@ static void *urecv_process(void *arg)
 			parse_upstream_txns(ckp, val);
 		else if (!safecmp(method, stratum_msgs[SM_AUTHRESULT]))
 			parse_upstream_auth(ckp, val);
-		else if (!safecmp(method, "submitblock"))
-			parse_remote_submitblock(ckp, val, cs->buf);
+		else if (!safecmp(method, stratum_msgs[SM_WORKINFO]))
+			parse_upstream_workinfo(ckp, val);
+		else if (!safecmp(method, stratum_msgs[SM_BLOCK]))
+			parse_upstream_block(ckp, val);
 		else if (!safecmp(method, "pong"))
 			LOGDEBUG("Received upstream pong");
 		else

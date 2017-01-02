@@ -503,16 +503,16 @@ bool _CKPQConn(PGconn **conn, WHERE_FFL_ARGS)
 {
 	if (*conn == NULL) {
 		if (connect_dis == false) {
-			LOGEMERG("%s() ERR already (%s/%s/%d)" WHERE_FFL
+			LOGNOTICE("%s() already (%s/%s/%d)" WHERE_FFL
 #if LOCK_CHECK
-				 " @%s"
+				  " @%s"
 #endif
-				 , __func__, connect_file, connect_func,
-				 connect_line, WHERE_FFL_PASS
+				  , __func__, connect_file, connect_func,
+				  connect_line, WHERE_FFL_PASS
 #if LOCK_CHECK
-				 , my_thread_name
+				  , my_thread_name
 #endif
-				 );
+			);
 		}
 		if (!pgdb_paused) {
 			LOGDEBUG("%s(): connecting", __func__);
@@ -607,7 +607,7 @@ int64_t nextid(PGconn *conn, char *idname, int64_t increment,
 	char *params[5];
 	int n, f, par = 0;
 	int64_t lastid;
-	char *field;
+	char *field = NULL;
 	bool ok;
 
 	lastid = 0;
@@ -1119,7 +1119,7 @@ bool users_fill(PGconn *conn)
 	K_ITEM *item;
 	int n, i;
 	USERS *row;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 10;
 	bool ok;
@@ -1517,7 +1517,7 @@ bool useratts_fill(PGconn *conn)
 	K_ITEM *item;
 	int n, i;
 	USERATTS *row;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 9;
 	bool ok;
@@ -1926,7 +1926,7 @@ bool workers_fill(PGconn *conn)
 	K_ITEM *item = NULL;
 	int n, t, i;
 	WORKERS *row;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 7;
 	bool ok = false;
@@ -2324,7 +2324,7 @@ bool paymentaddresses_fill(PGconn *conn)
 	K_ITEM *item;
 	PAYMENTADDRESSES *row;
 	int n, i;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 5;
 	bool ok;
@@ -2574,7 +2574,7 @@ bool payments_fill(PGconn *conn)
 	K_ITEM *item = NULL;
 	PAYMENTS *row;
 	int n, t, i;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 11;
 	bool ok = false;
@@ -2815,7 +2815,7 @@ bool idcontrol_fill(PGconn *conn)
 	K_ITEM *item;
 	int n, i;
 	IDCONTROL *row;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 2;
 	bool ok;
@@ -3381,7 +3381,7 @@ bool optioncontrol_fill(PGconn *conn)
 	IPS *ips;
 	char *params[1];
 	int n, i, par = 0, ban_count, ok_count;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 4;
 	bool ok;
@@ -3658,7 +3658,7 @@ bool workinfo_fill(PGconn *conn)
 	WORKINFO *row;
 	char *params[3];
 	int n, t, i, par = 0;
-	char *field;
+	char *field = NULL;
 	char *sel = NULL;
 	size_t len, off;
 	int fields = 10;
@@ -4418,7 +4418,7 @@ bool shares_fill(PGconn *conn)
 	WORKINFO *workinfo = NULL;
 	SHARES *row;
 	int n, t, i;
-	char *field;
+	char *field = NULL;
 	char *sel = NULL;
 	char *params[1];
 	int fields = 16, par = 0;
@@ -6706,7 +6706,7 @@ bool blocks_fill(PGconn *conn)
 	K_ITEM *item;
 	int n, i;
 	BLOCKS *row;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 18;
 	bool ok;
@@ -7043,7 +7043,7 @@ bool miningpayouts_fill(PGconn *conn)
 	K_ITEM *item = NULL;
 	MININGPAYOUTS *row;
 	int n, t, i;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 4;
 	bool ok = false;
@@ -7594,7 +7594,7 @@ bool payouts_fill(PGconn *conn)
 	PAYOUTS *row;
 	BLOCKS *blocks;
 	int n, i;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 13;
 	bool ok;
@@ -8331,7 +8331,7 @@ bool poolstats_fill(PGconn *conn)
 	time_t now_t;
 	char tzinfo[16], stamp[128];
 	POOLSTATS *row;
-	char *field;
+	char *field = NULL;
 	char *sel = NULL;
 	size_t len, off;
 	int fields = 8;
@@ -8771,7 +8771,7 @@ bool markersummary_fill(PGconn *conn)
 	MARKERSUMMARY *row, *p_row;
 	WORKMARKERS *workmarkers;
 	char *params[1];
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 20, par = 0;
 	int64_t ms = 0, amt = 0;
@@ -9414,7 +9414,7 @@ bool workmarkers_fill(PGconn *conn)
 	char *params[1];
 	int n, i, par = 0;
 	WORKMARKERS *row;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 6;
 	bool ok;
@@ -9746,7 +9746,7 @@ bool marks_fill(PGconn *conn)
 	K_ITEM *item;
 	int n, i;
 	MARKS *row;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	int fields = 6;
 	bool ok;
@@ -9864,7 +9864,7 @@ bool check_db_version(PGconn *conn)
 {
 	ExecStatusType rescode;
 	PGresult *res;
-	char *field;
+	char *field = NULL;
 	char *sel;
 	char *pgv;
 	int fields = 3;

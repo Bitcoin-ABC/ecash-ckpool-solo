@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2017 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -369,7 +369,7 @@ static inline void json_intcpy(int *i, json_t *val, const char *key)
 
 static inline void json_strdup(char **buf, json_t *val, const char *key)
 {
-	*buf = strdup(json_string_value(json_object_get(val, key)));
+	*buf = strdup(json_string_value(json_object_get(val, key)) ? : "");
 }
 
 /* Helpers for setting a field will check for valid entry and print an error

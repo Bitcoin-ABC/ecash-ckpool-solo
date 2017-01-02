@@ -178,7 +178,7 @@ CREATE TABLE workinfo (
     merklehash text DEFAULT ''::text NOT NULL,
     prevhash character varying(256) NOT NULL,
     coinbase1 character varying(256) NOT NULL,
-    coinbase2 character varying(256) NOT NULL,
+    coinbase2 character varying(511) NOT NULL,
     version character varying(64) NOT NULL,
     bits character varying(64) NOT NULL,
     ntime character varying(64) NOT NULL,

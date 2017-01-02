@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2017 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -87,6 +87,8 @@ struct workbase {
 
 	/* The id a remote workinfo is mapped to locally */
 	int64_t mapped_id;
+	/* The client id this remote workinfo came from */
+	int64_t client_id;
 
 	ts_t gentime;
 	tv_t retired;
@@ -958,11 +960,26 @@ static void send_postponed(sdata_t *sdata)
 static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_id,
 			     const int msg_type);
 
-/* Send a json msg to an upstream trusted remote server */
-static void upstream_json(ckpool_t *ckp, const json_t *val)
+/* Strip fields that will be recreated upstream or won't be used to minimise
+ * bandwidth. */
+static void strip_fields(ckpool_t *ckp, json_t *val)
 {
-	char *msg = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_COMPACT | JSON_EOL);
+	json_object_del(val, "poolinstance");
+	json_object_del(val, "createby");
+	if (!ckp->upstream_ckdb) {
+		json_object_del(val, "createdate");
+		json_object_del(val, "createcode");
+		json_object_del(val, "createinet");
+	}
+}
 
+/* Send a json msg to an upstream trusted remote server */
+static void upstream_json(ckpool_t *ckp, json_t *val)
+{
+	char *msg;
+
+	strip_fields(ckp, val);
+	msg = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_COMPACT | JSON_EOL);
 	/* Connector absorbs and frees msg */
 	connector_upstream_msg(ckp, msg);
 }
@@ -1007,8 +1024,6 @@ static void send_node_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *
 	json_set_int(wb_val, "coinbasevalue", wb->coinbasevalue);
 	json_set_int(wb_val, "height", wb->height);
 	json_set_string(wb_val, "flags", wb->flags);
-	 /* Set to zero to be backwards compat with older node code */
-	json_set_int(wb_val, "transactions", 0);
 	json_set_int(wb_val, "txns", wb->txns);
 	json_set_string(wb_val, "txn_hashes", wb->txn_hashes);
 	json_set_int(wb_val, "merkles", wb->merkles);
@@ -1026,6 +1041,20 @@ static void send_node_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *
 		json_t *json_msg = json_deep_copy(wb_val);
 
 		json_set_string(json_msg, "node.method", stratum_msgs[SM_WORKINFO]);
+		client_msg = ckalloc(sizeof(ckmsg_t));
+		msg = ckzalloc(sizeof(smsg_t));
+		msg->json_msg = json_msg;
+		msg->client_id = client->id;
+		client_msg->data = msg;
+		DL_APPEND(bulk_send, client_msg);
+		messages++;
+	}
+	DL_FOREACH(sdata->remote_instances, client) {
+		ckmsg_t *client_msg;
+		smsg_t *msg;
+		json_t *json_msg = json_deep_copy(wb_val);
+
+		json_set_string(json_msg, "method", stratum_msgs[SM_WORKINFO]);
 		client_msg = ckalloc(sizeof(ckmsg_t));
 		msg = ckzalloc(sizeof(smsg_t));
 		msg->json_msg = json_msg;
@@ -1237,8 +1266,8 @@ static void broadcast_ping(sdata_t *sdata);
 
 /* Build a hashlist of all transactions, allowing us to compare with the list of
  * existing transactions to determine which need to be propagated */
-static void add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char *hash,
-		    const char *data)
+static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char *hash,
+		    const char *data, bool local)
 {
 	bool found = false;
 	txntable_t *txn;
@@ -1248,16 +1277,16 @@ static void add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char
 	ck_rlock(&sdata->workbase_lock);
 	HASH_FIND_STR(sdata->txns, hash, txn);
 	if (txn) {
-		if (ckp->node)
+		if (!local)
 			txn->refcount = 100;
-		else
+		else if (txn->refcount < 20)
 			txn->refcount = 20;
 		found = true;
 	}
 	ck_runlock(&sdata->workbase_lock);
 
 	if (found)
-		return;
+		return false;
 
 	txn = ckzalloc(sizeof(txntable_t));
 	memcpy(txn->hash, hash, 65);
@@ -1267,6 +1296,8 @@ static void add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char
 	else
 		txn->refcount = 20;
 	HASH_ADD_STR(*txns, hash, txn);
+
+	return true;
 }
 
 static void send_node_transactions(ckpool_t *ckp, sdata_t *sdata, const json_t *txn_val)
@@ -1312,13 +1343,54 @@ static void send_node_transactions(ckpool_t *ckp, sdata_t *sdata, const json_t *
 	}
 }
 
+static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool local)
+{
+	json_t *val, *txn_array = json_array();
+	int added = 0, purged = 0;
+	txntable_t *tmp, *tmpa;
+
+	/* Find which transactions have their refcount decremented to zero
+	 * and remove them. */
+	ck_wlock(&sdata->workbase_lock);
+	HASH_ITER(hh, sdata->txns, tmp, tmpa) {
+		if (tmp->refcount-- > 0)
+			continue;
+		HASH_DEL(sdata->txns, tmp);
+		dealloc(tmp->data);
+		dealloc(tmp);
+		purged++;
+	}
+	/* Add the new transactions to the transaction table */
+	HASH_ITER(hh, txns, tmp, tmpa) {
+		json_t *txn_val;
+
+		/* Propagate transaction here */
+		JSON_CPACK(txn_val, "{ss,ss}", "hash", tmp->hash, "data", tmp->data);
+		json_array_append_new(txn_array, txn_val);
+		/* Move to the sdata transaction table */
+		HASH_DEL(txns, tmp);
+		HASH_ADD_STR(sdata->txns, hash, tmp);
+		added++;
+	}
+	ck_wunlock(&sdata->workbase_lock);
+
+	JSON_CPACK(val, "{so}", "transaction", txn_array);
+	send_node_transactions(ckp, sdata, val);
+	json_decref(val);
+
+	if (added || purged) {
+		LOGINFO("Stratifier added %d %stransactions and purged %d", added,
+			local ? "" : "remote ", purged);
+	}
+}
+
 /* Distill down a set of transactions into an efficient tree arrangement for
  * stratum messages and fast work assembly. */
 static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *txn_array)
 {
-	int i, j, binleft, binlen, added = 0, purged = 0;
-	txntable_t *txns = NULL, *tmp, *tmpa;
-	json_t *arr_val, *val;
+	int i, j, binleft, binlen;
+	txntable_t *txns = NULL;
+	json_t *arr_val;
 	uchar *hashbin;
 
 	wb->txns = json_array_size(txn_array);
@@ -1361,7 +1433,7 @@ static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t
 				return;
 			}
 			txn = json_string_value(json_object_get(arr_val, "data"));
-			add_txn(ckp, sdata, &txns, hash, txn);
+			add_txn(ckp, sdata, &txns, hash, txn, true);
 			len = strlen(txn);
 			memcpy(wb->txn_data + ofs, txn, len);
 			ofs += len;
@@ -1397,39 +1469,7 @@ static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t
 	}
 	LOGNOTICE("Stored %d transactions", wb->txns);
 
-	txn_array = json_array();
-
-	/* Find which transactions have their refcount decremented to zero
-	 * and remove them. */
-	ck_wlock(&sdata->workbase_lock);
-	HASH_ITER(hh, sdata->txns, tmp, tmpa) {
-		if (tmp->refcount-- > 0)
-			continue;
-		HASH_DEL(sdata->txns, tmp);
-		dealloc(tmp->data);
-		dealloc(tmp);
-		purged++;
-	}
-	/* Add the new transactions to the transaction table */
-	HASH_ITER(hh, txns, tmp, tmpa) {
-		json_t *txn_val;
-
-		/* Propagate transaction here */
-		JSON_CPACK(txn_val, "{ss,ss}", "hash", tmp->hash, "data", tmp->data);
-		json_array_append_new(txn_array, txn_val);
-		/* Move to the sdata transaction table */
-		HASH_DEL(txns, tmp);
-		HASH_ADD_STR(sdata->txns, hash, tmp);
-		added++;
-	}
-	ck_wunlock(&sdata->workbase_lock);
-
-	JSON_CPACK(val, "{so}", "transaction", txn_array);
-	send_node_transactions(ckp, sdata, val);
-	json_decref(val);
-
-	if (added || purged)
-		LOGINFO("Stratifier added %d transactions and purged %d", added, purged);
+	update_txns(ckp, sdata, txns, true);
 }
 
 static const unsigned char witness_nonce[32] = {0};
@@ -1667,12 +1707,56 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	ck_wunlock(&sdata->workbase_lock);
 
 	val = generate_workinfo(ckp, wb, __func__);
-	/* Replace workinfoid with mapped id */
-	json_set_int64(val, "workinfoid", wb->mapped_id);
+	/* Replace jobid with mapped id */
+	json_set_int64(val, "jobid", wb->mapped_id);
+
+	/* If this is the upstream pool, send a copy of this to all OTHER remote
+	 * trusted servers as well */
+	if (!ckp->remote) {
+		json_t *wb_val = json_deep_copy(val);
+		stratum_instance_t *client;
+		ckmsg_t *bulk_send = NULL;
+		int messages = 0;
+
+		/* Strip unnecessary fields and add extra fields needed */
+		strip_fields(ckp, wb_val);
+		json_set_int(wb_val, "txns", wb->txns);
+		json_set_string(wb_val, "txn_hashes", wb->txn_hashes);
+		json_set_int(wb_val, "merkles", wb->merkles);
+
+		ck_rlock(&sdata->instance_lock);
+		DL_FOREACH(sdata->remote_instances, client) {
+			ckmsg_t *client_msg;
+			json_t *json_msg;
+			smsg_t *msg;
+
+			/* Don't send remote workinfo back to same remote */
+			if (client->id == wb->client_id)
+				continue;
+			json_msg = json_deep_copy(wb_val);
+			json_set_string(json_msg, "method", stratum_msgs[SM_WORKINFO]);
+			client_msg = ckalloc(sizeof(ckmsg_t));
+			msg = ckzalloc(sizeof(smsg_t));
+			msg->json_msg = json_msg;
+			msg->client_id = client->id;
+			client_msg->data = msg;
+			DL_APPEND(bulk_send, client_msg);
+			messages++;
+		}
+		ck_runlock(&sdata->instance_lock);
+
+		json_decref(wb_val);
+
+		if (bulk_send) {
+			LOGINFO("Sending remote workinfo to %d other remote servers", messages);
+			ssend_bulk_postpone(sdata, bulk_send, messages);
+		}
+	}
+
 	ckdbq_add(ckp, ID_WORKINFO, val);
 }
 
-static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted)
+static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t client_id)
 {
 	workbase_t *wb = ckzalloc(sizeof(workbase_t));
 	sdata_t *sdata = ckp->sdata;
@@ -1681,6 +1765,12 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted)
 	char header[228];
 
 	wb->ckp = ckp;
+	/* This is the client id if this workbase came from a remote trusted
+	 * server. */
+	wb->client_id = client_id;
+
+	/* Some of these fields are empty when running as a remote trusted
+	 * server receiving other workinfos from the upstream pool */
 	json_int64cpy(&wb->id, val, "jobid");
 	json_strcpy(wb->target, val, "target");
 	json_dblcpy(&wb->diff, val, "diff");
@@ -1694,8 +1784,6 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted)
 	json_uint64cpy(&wb->coinbasevalue, val, "coinbasevalue");
 	json_intcpy(&wb->height, val, "height");
 	json_strdup(&wb->flags, val, "flags");
-	/* First see if the server uses the old communication format */
-	json_intcpy(&wb->txns, val, "transactions");
 	if (!ckp->proxy) {
 		/* This is a workbase from a trusted remote */
 		json_intcpy(&wb->txns, val, "txns");
@@ -1707,16 +1795,6 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted)
 			LOGWARNING("Unable to rebuild transactions to create workinfo from remote, will be unable to submit block locally");
 			wb->incomplete = true;
 			wb->txns = 0;
-		}
-	} else if (wb->txns) {
-		int i;
-
-		json_strdup(&wb->txn_data, val, "txn_data");
-		json_intcpy(&wb->merkles, val, "merkles");
-		wb->merkle_array = json_object_dup(val, "merklehash");
-		for (i = 0; i < wb->merkles; i++) {
-			strcpy(&wb->merklehash[i][0], json_string_value(json_array_get(wb->merkle_array, i)));
-			hex2bin(&wb->merklebin[i][0], &wb->merklehash[i][0], 32);
 		}
 	} else {
 		json_intcpy(&wb->txns, val, "txns");
@@ -1760,12 +1838,13 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted)
 	LOGDEBUG("Header: %s", header);
 	hex2bin(wb->headerbin, header, 112);
 
-	/* If this is from a remote trusted server, add it to the
-	 * remote_workbases hashtable */
+	/* If this is from a remote trusted server or an upstream server, add
+	 * it to the remote_workbases hashtable */
 	if (trusted)
 		add_remote_base(ckp, sdata, wb);
 	else
 		add_base(ckp, sdata, wb, &new_block);
+
 	if (new_block)
 		LOGNOTICE("Block hash changed to %s", sdata->lastswaphash);
 }
@@ -5698,6 +5777,67 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	stratum_send_diff(sdata, client);
 }
 
+static void add_remote_blockdata(ckpool_t *ckp, json_t *val, const int cblen, const char *coinbase,
+				 const uchar *data)
+{
+	char *buf;
+
+	json_set_string(val, "name", ckp->name);
+	json_set_int(val, "cblen", cblen);
+	buf = bin2hex(coinbase, cblen);
+	json_set_string(val, "coinbasehex", buf);
+	free(buf);
+	buf = bin2hex(data, 80);
+	json_set_string(val, "swaphex", buf);
+	free(buf);
+}
+
+static void downstream_blockdata(sdata_t *sdata, const json_t *val, int64_t client_id)
+{
+	stratum_instance_t *client;
+	ckmsg_t *bulk_send = NULL;
+	int messages = 0;
+
+	ck_rlock(&sdata->instance_lock);
+	DL_FOREACH(sdata->remote_instances, client) {
+		ckmsg_t *client_msg;
+		json_t *json_msg;
+		smsg_t *msg;
+
+		/* Don't send remote workinfo back to same remote */
+		if (client->id == client_id)
+			continue;
+		json_msg = json_deep_copy(val);
+		client_msg = ckalloc(sizeof(ckmsg_t));
+		msg = ckzalloc(sizeof(smsg_t));
+		msg->json_msg = json_msg;
+		msg->client_id = client->id;
+		client_msg->data = msg;
+		DL_APPEND(bulk_send, client_msg);
+		messages++;
+	}
+	ck_runlock(&sdata->instance_lock);
+
+	if (bulk_send) {
+		LOGINFO("Sending block to %d remote servers", messages);
+		ssend_bulk_postpone(sdata, bulk_send, messages);
+	}
+}
+
+static void
+downstream_block(ckpool_t *ckp, sdata_t *sdata, const json_t *val, const int cblen,
+		 const char *coinbase, const uchar *data)
+{
+	json_t *block_val = json_deep_copy(val);
+
+	/* Strip unnecessary fields and add extra fields needed */
+	strip_fields(ckp, block_val);
+	json_set_string(block_val, "method", stratum_msgs[SM_BLOCK]);
+	add_remote_blockdata(ckp, block_val, cblen, coinbase, data);
+	downstream_blockdata(sdata, block_val, 0);
+	json_decref(block_val);
+}
+
 /* We should already be holding the workbase_lock. Needs to be entered with
  * client holding a ref count. */
 static void
@@ -5758,19 +5898,12 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	mutex_unlock(&sdata->block_lock);
 
 	if (ckp->remote) {
-		char *buf;
-
-		json_set_string(val, "name", ckp->name);
-		json_set_int(val, "cblen", cblen);
-		buf = bin2hex(coinbase, cblen);
-		json_set_string(val, "coinbasehex", buf);
-		free(buf);
-		buf = bin2hex(data, 80);
-		json_set_string(val, "swaphex", buf);
-		free(buf);
+		add_remote_blockdata(ckp, val, cblen, coinbase, data);
 		upstream_json_msgtype(ckp, val, SM_BLOCK);
-	} else
+	} else {
+		downstream_block(ckp, sdata, val, cblen, coinbase, data);
 		ckdbq_add(ckp, ID_BLOCK, val);
+	}
 }
 
 /* Entered with instance_lock held */
@@ -6221,7 +6354,7 @@ out:
 			json_set_string(val, "createby", "code");
 			json_set_string(val, "createcode", __func__);
 			json_set_string(val, "createinet", ckp->serverurl[client->server]);
-			if (ckp->remote)
+			if (ckp->remote && ckp->upstream_ckdb)
 				upstream_json_msgtype(ckp, val, SM_SHAREERR);
 			else
 				ckdbq_add(ckp, ID_SHAREERR, val);
@@ -6334,6 +6467,8 @@ static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 			stratum_add_send(sdata, json_msg, client->id, SM_UPDATE);
 	}
 	ck_runlock(&sdata->instance_lock);
+
+	send_postponed(sdata);
 }
 
 static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_val, const char *err_msg)
@@ -6427,8 +6562,13 @@ static void send_node_all_txns(sdata_t *sdata, const stratum_instance_t *client)
 	}
 	ck_runlock(&sdata->workbase_lock);
 
-	JSON_CPACK(val, "{ss,so}", "node.method", stratum_msgs[SM_TRANSACTIONS],
-		   "transaction", txn_array);
+	if (client->trusted) {
+		JSON_CPACK(val, "{ss,so}", "method", stratum_msgs[SM_TRANSACTIONS],
+			   "transaction", txn_array);
+	} else {
+		JSON_CPACK(val, "{ss,so}", "node.method", stratum_msgs[SM_TRANSACTIONS],
+			   "transaction", txn_array);
+	}
 	msg = ckzalloc(sizeof(smsg_t));
 	msg->json_msg = val;
 	msg->client_id = client->id;
@@ -6475,7 +6615,11 @@ static void add_remote_server(sdata_t *sdata, stratum_instance_t *client)
 	ck_wlock(&sdata->instance_lock);
 	client->trusted = true;
 	DL_APPEND(sdata->remote_instances, client);
+	__inc_instance_ref(client);
 	ck_wunlock(&sdata->instance_lock);
+
+	send_node_all_txns(sdata, client);
+	dec_instance_ref(sdata, client);
 }
 
 /* Enter with client holding ref count */
@@ -6923,6 +7067,11 @@ out:
 	}
 }
 
+void parse_upstream_workinfo(ckpool_t *ckp, json_t *val)
+{
+	add_node_base(ckp, val, true, 0);
+}
+
 /* Remap the remote client id to the local one and submit to ckdb */
 static void parse_remote_workerstats(ckpool_t *ckp, json_t *val, const int64_t remote_id)
 {
@@ -6936,7 +7085,7 @@ static void parse_remote_workerstats(ckpool_t *ckp, json_t *val, const int64_t r
 	ckdbq_add(ckp, ID_WORKERSTATS, val);
 }
 
-#define parse_remote_workinfo(ckp, val) add_node_base(ckp, val, true)
+#define parse_remote_workinfo(ckp, val, client_id) add_node_base(ckp, val, true, client_id)
 
 static void parse_remote_auth(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratum_instance_t *remote,
 			      const int64_t remote_id)
@@ -6997,25 +7146,10 @@ static void parse_remote_workers(sdata_t *sdata, json_t *val, const char *buf)
 	LOGDEBUG("Adding %d remote workers to user %s", workers, username);
 }
 
-/* This is here to support older trusted nodes submitting blocks this way but
- * we no longer do it. */
-static void parse_remote_blocksubmit(ckpool_t *ckp, json_t *val, const char *buf)
-{
-	char *gbt_block;
-
-	json_strdup(&gbt_block, val, "submitblock");
-	if (unlikely(!gbt_block)) {
-		LOGWARNING("Failed to get submitblock data from remote message %s", buf);
-		return;
-	}
-	LOGWARNING("Submitting possible downstream block!");
-	generator_submitblock(ckp, gbt_block + 12);
-	free(gbt_block);
-}
-
 /* Attempt to submit a remote block locally by recreating it from its workinfo
  * in addition to sending it to ckdb */
-static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
+static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf,
+			       const int64_t client_id)
 {
 	json_t *workername_val = json_object_get(val, "workername"),
 		*name_val = json_object_get(val, "name");
@@ -7035,6 +7169,7 @@ static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 	cnfrm = json_string_value(json_object_get(val, "confirmed"));
 	if (cnfrm && cnfrm[0] == '1')
 		goto out_add;
+
 	json_get_int64(&id, val, "workinfoid");
 	coinbasehex = json_string_value(json_object_get(val, "coinbasehex"));
 	swaphex = json_string_value(json_object_get(val, "swaphex"));
@@ -7079,8 +7214,20 @@ out_add:
 	/* Make a duplicate for use by ckdbq_add */
 	val = json_deep_copy(val);
 	remap_workinfo_id(sdata, val);
+	if (!ckp->remote)
+		downstream_blockdata(sdata, val, client_id);
 
 	ckdbq_add(ckp, ID_BLOCK, val);
+}
+
+void parse_upstream_block(ckpool_t *ckp, json_t *val)
+{
+	char *buf;
+	sdata_t *sdata = ckp->sdata;
+
+	buf = json_dumps(val, 0);
+	parse_remote_block(ckp, sdata, val, buf, 0);
+	free(buf);
 }
 
 static void send_remote_pong(sdata_t *sdata, stratum_instance_t *client)
@@ -7094,14 +7241,13 @@ static void send_remote_pong(sdata_t *sdata, stratum_instance_t *client)
 static void add_node_txns(ckpool_t *ckp, sdata_t *sdata, const json_t *val)
 {
 	json_t *txn_array, *txn_val, *data_val, *hash_val;
-	txntable_t *txn;
+	txntable_t *txns = NULL;
 	int i, arr_size;
 	int added = 0;
 
 	txn_array = json_object_get(val, "transaction");
 	arr_size = json_array_size(txn_array);
 
-	ck_wlock(&sdata->workbase_lock);
 	for (i = 0; i < arr_size; i++) {
 		const char *hash, *data;
 
@@ -7114,26 +7260,17 @@ static void add_node_txns(ckpool_t *ckp, sdata_t *sdata, const json_t *val)
 			LOGERR("Failed to get hash/data in add_node_txns");
 			continue;
 		}
-		HASH_FIND_STR(sdata->txns, hash, txn);
-		if (txn) {
-			txn->refcount = 100;
+
+		if (!add_txn(ckp, sdata, &txns, hash, data, false))
 			continue;
-		}
+
+		/* Submit transactions if we haven't seen them before */
 		submit_transaction(ckp, data);
-		txn = ckzalloc(sizeof(txntable_t));
-		memcpy(txn->hash, hash, 65);
-		txn->data = strdup(data);
-		/* Set the refcount for node transactions greater than the
-		 * upstream pool to ensure we never age them faster than the
-		 * pool does. */
-		txn->refcount = 100;
-		HASH_ADD_STR(sdata->txns, hash, txn);
 		added++;
 	}
-	ck_wunlock(&sdata->workbase_lock);
 
 	if (added)
-		LOGINFO("Stratifier added %d remote transactions", added);
+		update_txns(ckp, sdata, txns, false);
 }
 
 void parse_remote_txns(ckpool_t *ckp, const json_t *val)
@@ -7153,8 +7290,11 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 		LOGWARNING("Failed to get method from remote message %s", buf);
 		goto out;
 	}
-	/* Rename the pool instance to match main pool (for now?) */
-	json_set_string(val, "poolinstance", ckp->name);
+	if (!CKP_STANDALONE(ckp)) {
+		/* Rename the pool instance to match main pool (for now?) */
+		json_set_string(val, "poolinstance", ckp->name);
+		json_set_string(val, "createby", "remote");
+	}
 
 	if (likely(!safecmp(method, stratum_msgs[SM_SHARE])))
 		parse_remote_share(ckp, sdata, val, buf);
@@ -7163,17 +7303,15 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 	else if (!safecmp(method, stratum_msgs[SM_WORKERSTATS]))
 		parse_remote_workerstats(ckp, val, client->id);
 	else if (!safecmp(method, stratum_msgs[SM_WORKINFO]))
-		parse_remote_workinfo(ckp, val);
+		parse_remote_workinfo(ckp, val, client->id);
 	else if (!safecmp(method, stratum_msgs[SM_AUTH]))
 		parse_remote_auth(ckp, sdata, val, client, client->id);
 	else if (!safecmp(method, stratum_msgs[SM_SHAREERR]))
 		parse_remote_shareerr(ckp, sdata, val, buf);
 	else if (!safecmp(method, stratum_msgs[SM_BLOCK]))
-		parse_remote_block(ckp, sdata, val, buf);
+		parse_remote_block(ckp, sdata, val, buf, client->id);
 	else if (!safecmp(method, "workers"))
 		parse_remote_workers(sdata, val, buf);
-	else if (!safecmp(method, "submitblock"))
-		parse_remote_blocksubmit(ckp, val, buf);
 	else if (!safecmp(method, "ping"))
 		send_remote_pong(sdata, client);
 	else
@@ -7254,7 +7392,7 @@ static void parse_node_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 			add_node_txns(ckp, sdata, val);
 			break;
 		case SM_WORKINFO:
-			add_node_base(ckp, val, false);
+			add_node_base(ckp, val, false, 0);
 			break;
 		case SM_BLOCK:
 			submit_node_block(ckp, sdata, val);
@@ -7855,7 +7993,7 @@ static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 
 	/* Add all entries outside of the instance lock */
 	DL_FOREACH_SAFE(json_list, entry, tmpentry) {
-		if (ckp->remote && !ckp->btcsolo)
+		if (ckp->remote && !ckp->btcsolo && ckp->upstream_ckdb)
 			upstream_json_msgtype(ckp, entry->val, SM_WORKERSTATS);
 		else
 			ckdbq_add(ckp, ID_WORKERSTATS, entry->val);

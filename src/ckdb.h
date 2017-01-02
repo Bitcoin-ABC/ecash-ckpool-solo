@@ -57,8 +57,8 @@
  * Consider adding row level locking (a per kitem usage count) if needed */
 
 #define DB_VLOCK "1"
-#define DB_VERSION "1.0.7"
-#define CKDB_VERSION DB_VERSION"-2.715"
+#define DB_VERSION "1.0.8"
+#define CKDB_VERSION DB_VERSION"-2.718"
 
 #define WHERE_FFL " - from %s %s() line %d"
 #define WHERE_FFL_HERE __FILE__, __func__, __LINE__
@@ -495,8 +495,9 @@ extern bool pgdb_pause_disabled;
 #define FAILED_PI "failed.PI"
 
 #define POOLINSTANCE_RESET_MSG(_txt) do { \
-		int64_t _workinfo, _ageworkinfo, _auth, _addrauth, _poolstats; \
-		int64_t _userstats, _workerstats, _workmarkers, _marks; \
+		int64_t _workinfo = 0, _ageworkinfo = 0, _auth = 0; \
+		int64_t _addrauth = 0, _poolstats = 0, _userstats = 0; \
+		int64_t _workerstats = 0, _workmarkers = 0, _marks = 0; \
 		bool msg = false; \
 		ck_wlock(&poolinstance_lock); \
 		if (mismatch_all_total) { \

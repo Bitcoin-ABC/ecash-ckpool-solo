@@ -195,6 +195,8 @@ struct ckpool_instance {
 
 	/* Are we running in trusted remote node mode */
 	bool remote;
+	/* Does our upstream pool in remote mode have ckdb */
+	bool upstream_ckdb;
 
 	/* Are we running in node proxy mode */
 	bool node;
