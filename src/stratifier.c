@@ -334,6 +334,7 @@ struct stratum_instance {
 	int proxyid; /* Which proxy id  */
 	int subproxyid; /* Which subproxy */
 
+	bool passthrough; /* Is this a passthrough */
 	bool trusted; /* Is this a trusted remote server */
 	bool remote; /* Is this a remote client on a trusted remote server */
 };
@@ -958,9 +959,6 @@ static void send_postponed(sdata_t *sdata)
 	}
 	mutex_unlock(ssends->lock);
 }
-
-static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_id,
-			     const int msg_type);
 
 /* Strip fields that will be recreated upstream or won't be used to minimise
  * bandwidth. */
@@ -1911,7 +1909,7 @@ share_diff(char *coinbase, const uchar *enonce1bin, const workbase_t *wb, const 
 }
 
 /* passthrough subclients have client_ids in the high bits */
-static inline bool passthrough_subclient(const int64_t client_id)
+static inline bool subclient(const int64_t client_id)
 {
 	return (client_id > 0xffffffffll);
 }
@@ -1927,7 +1925,7 @@ static void send_node_block(sdata_t *sdata, const char *enonce1, const char *non
 
 	/* Don't send the block back to a remote node if that's where it was
 	 * found. */
-	if (passthrough_subclient(client_id))
+	if (subclient(client_id))
 		skip = client_id >> 32;
 	else
 		skip = 0;
@@ -3220,20 +3218,23 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, con
 	/* Points to ckp sdata in ckpool mode, but is changed later in proxy
 	 * mode . */
 	client->sdata = sdata;
-	if (passthrough_subclient(id)) {
-		stratum_instance_t *passthrough;
+	if (subclient(id)) {
+		stratum_instance_t *remote;
 		int64_t pass_id = id >> 32;
 
 		id &= 0xffffffffll;
-		passthrough = __instance_by_id(sdata, pass_id);
-		if (passthrough && passthrough->node) {
-			client->latency = passthrough->latency;
+		remote = __instance_by_id(sdata, pass_id);
+		if (remote && remote->node) {
+			client->latency = remote->latency;
 			LOGINFO("Client %s inherited node latency of %d",
 				client->identity, client->latency);
 			sprintf(client->identity, "node:%"PRId64" subclient:%"PRId64,
 				pass_id, id);
-		} else {
+		} else if (remote && remote->trusted) {
 			sprintf(client->identity, "remote:%"PRId64" subclient:%"PRId64,
+				pass_id, id);
+		} else { /* remote->passthrough remaining */
+			sprintf(client->identity, "passthrough:%"PRId64" subclient:%"PRId64,
 				pass_id, id);
 		}
 	} else
@@ -3319,7 +3320,7 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 
 		client_msg = ckalloc(sizeof(ckmsg_t));
 		msg = ckzalloc(sizeof(smsg_t));
-		if (passthrough_subclient(client->id))
+		if (subclient(client->id))
 			json_set_string(val, "node.method", stratum_msgs[msg_type]);
 		msg->json_msg = json_deep_copy(val);
 		msg->client_id = client->id;
@@ -3350,7 +3351,7 @@ static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_i
 		return;
 	}
 
-	if (passthrough_subclient(client_id)) {
+	if (subclient(client_id)) {
 		int64_t remote_id = client_id >> 32;
 		stratum_instance_t *remote;
 
@@ -3359,10 +3360,10 @@ static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_i
 			json_decref(val);
 			return;
 		}
-		if (remote->node)
-			json_set_string(val, "node.method", stratum_msgs[msg_type]);
-		else if (remote->trusted)
+		if (remote->trusted)
 			json_set_string(val, "method", stratum_msgs[msg_type]);
+		else /* Both remote->node and remote->passthrough */
+			json_set_string(val, "node.method", stratum_msgs[msg_type]);
 		dec_instance_ref(sdata, remote);
 	}
 	LOGDEBUG("Sending stratum message %s", stratum_msgs[msg_type]);
@@ -4845,7 +4846,7 @@ static json_t *parse_subscribe(stratum_instance_t *client, const int64_t client_
 			session_id = int_from_sessionid(buf);
 			LOGDEBUG("Found old session id %d", session_id);
 		}
-		if (!ckp->proxy && session_id && !passthrough_subclient(client_id)) {
+		if (!ckp->proxy && session_id && !subclient(client_id)) {
 			if ((client->enonce1_64 = disconnected_sessionid_exists(sdata, session_id, client_id))) {
 				sprintf(client->enonce1, "%016lx", client->enonce1_64);
 				old_match = true;
@@ -6736,14 +6737,13 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 			connector_drop_client(ckp, client_id);
 			drop_client(ckp, sdata, client_id);
 		} else {
-			/* We need to inform the connector process that this client
-			 * is a passthrough and to manage its messages accordingly. No
-			 * data from this client id should ever come back to this
-			 * stratifier after this so drop the client in the stratifier. */
+			/* We need  is a passthrough and to manage its messages
+			 * accordingly. No data from this client id should ever
+			 * come directly back to this stratifier. */
 			LOGNOTICE("Adding passthrough client %s %s", client->identity, client->address);
+			client->passthrough = true;
 			snprintf(buf, 255, "passthrough=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
-			drop_client(ckp, sdata, client_id);
 			sprintf(client->identity, "passthrough:%"PRId64, client_id);
 		}
 		return;
