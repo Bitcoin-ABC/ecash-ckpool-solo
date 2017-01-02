@@ -5501,12 +5501,12 @@ static void client_auth(ckpool_t *ckp, stratum_instance_t *client, user_instance
 
 static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, const bool clean);
 
-static void __update_solo_client(sdata_t *sdata, stratum_instance_t *client, user_instance_t *user_instance)
+static void update_solo_client(sdata_t *sdata, workbase_t *wb, const int64_t client_id,
+				 user_instance_t *user_instance)
 {
-	json_t *json_msg;
+	json_t *json_msg = __user_notify(wb, user_instance, true);
 
-	json_msg = __user_notify(sdata->current_workbase, user_instance, true);
-	stratum_add_send(sdata, json_msg, client->id, SM_UPDATE);
+	stratum_add_send(sdata, json_msg, client_id, SM_UPDATE);
 }
 
 /* Needs to be entered with client holding a ref count. */
@@ -5615,8 +5615,9 @@ out:
 
 		ck_wlock(&sdata->instance_lock);
 		__generate_userwb(sdata, wb, user);
-		__update_solo_client(sdata, client, user);
 		ck_wunlock(&sdata->instance_lock);
+
+		update_solo_client(sdata, wb, client->id, user);
 
 		ck_wlock(&sdata->workbase_lock);
 		wb->ref--;
