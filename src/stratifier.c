@@ -6680,9 +6680,9 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 				  client->identity, client->address, client->server);
 			connector_drop_client(ckp, client_id);
 		} else {
-			add_remote_server(sdata, client);
 			snprintf(buf, 255, "remote=%"PRId64, client_id);
 			send_proc(ckp->connector, buf);
+			add_remote_server(sdata, client);
 		}
 		sprintf(client->identity, "remote:%"PRId64, client_id);
 		return;
