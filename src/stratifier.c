@@ -8612,6 +8612,8 @@ void *stratifier(void *arg)
 	/* Wait for the generator to have something for us */
 	while (!ckp->proxy && !ckp->generator_ready)
 		cksleep_ms(10);
+	while (ckp->remote && !ckp->connector_ready)
+		cksleep_ms(10);
 
 	if (!ckp->proxy) {
 		if (!generator_checkaddr(ckp, ckp->btcaddress)) {

@@ -1237,11 +1237,10 @@ static bool setup_upstream(ckpool_t *ckp, cdata_t *cdata)
 
 	cksem_init(&cs->sem);
 	cksem_post(&cs->sem);
-	/* Must succeed on initial connect to upstream pool */
-	if (!connect_upstream(ckp, cs)) {
-		LOGEMERG("Failed initial connect to upstream server %s:%s", cs->url, cs->port);
-		goto out;
-	}
+
+	while (!connect_upstream(ckp, cs))
+		cksleep_ms(5000);
+
 	create_pthread(&pth, urecv_process, ckp);
 	cdata->upstream_sends = create_ckmsgq(ckp, "usender", &usend_process);
 	ret = true;
