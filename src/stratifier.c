@@ -144,6 +144,8 @@ struct workbase {
 	bool proxy; /* This workbase is proxied work */
 
 	bool incomplete; /* This is a remote workinfo without all the txn data */
+
+	int ref;
 };
 
 typedef struct workbase workbase_t;
@@ -1229,6 +1231,8 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 			break;
 		if (wb == tmp)
 			continue;
+		if (wb->ref)
+			continue;
 		/*  Age old workbases older than 10 minutes old */
 		if (tmp->gentime.tv_sec < wb->gentime.tv_sec - 600) {
 			HASH_DEL(sdata->workbases, tmp);
@@ -1690,6 +1694,8 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 		if (HASH_COUNT(sdata->remote_workbases) < 3)
 			break;
 		if (wb == tmp)
+			continue;
+		if (wb->ref)
 			continue;
 		/*  Age old workbases older than 10 minutes old */
 		if (tmp->gentime.tv_sec < wb->gentime.tv_sec - 600) {
@@ -5599,14 +5605,22 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 out:
 	if (ckp->btcsolo && ret && !client->remote) {
 		sdata_t *sdata = ckp->sdata;
+		workbase_t *wb;
 
-		/* recursive lock, grab instance first then workbase */
+		/* To avoid grabbing recursive lock */
+		ck_wlock(&sdata->workbase_lock);
+		wb = sdata->current_workbase;
+		wb->ref++;
+		ck_wunlock(&sdata->workbase_lock);
+
 		ck_wlock(&sdata->instance_lock);
-		ck_rlock(&sdata->workbase_lock);
-		__generate_userwb(sdata, sdata->current_workbase, user);
+		__generate_userwb(sdata, wb, user);
 		__update_solo_client(sdata, client, user);
-		ck_runlock(&sdata->workbase_lock);
 		ck_wunlock(&sdata->instance_lock);
+
+		ck_wlock(&sdata->workbase_lock);
+		wb->ref--;
+		ck_wunlock(&sdata->workbase_lock);
 
 		stratum_send_diff(sdata, client);
 	}
@@ -6447,17 +6461,19 @@ static json_t *__user_notify(const workbase_t *wb, const user_instance_t *user, 
 	return val;
 }
 
-/* Sends a stratum update with a unique coinb2 for every client. Note locking
- * order, instance then workbase. */
+/* Sends a stratum update with a unique coinb2 for every client. Avoid
+ * recursive locking. */
 static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 {
 	stratum_instance_t *client, *tmp;
 	json_t *json_msg;
 
-	ck_rlock(&sdata->instance_lock);
+	ck_wlock(&sdata->instance_lock);
 	HASH_ITER(hh, sdata->stratum_instances, client, tmp) {
 		if (!client->user_instance)
 			continue;
+		__inc_instance_ref(client);
+		ck_wunlock(&sdata->instance_lock);
 
 		ck_rlock(&sdata->workbase_lock);
 		json_msg = __user_notify(sdata->current_workbase, client->user_instance, clean);
@@ -6465,8 +6481,11 @@ static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 
 		if (likely(json_msg))
 			stratum_add_send(sdata, json_msg, client->id, SM_UPDATE);
+
+		ck_wlock(&sdata->instance_lock);
+		__dec_instance_ref(client);
 	}
-	ck_runlock(&sdata->instance_lock);
+	ck_wunlock(&sdata->instance_lock);
 
 	send_postponed(sdata);
 }
