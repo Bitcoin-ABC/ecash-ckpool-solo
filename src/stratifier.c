@@ -412,6 +412,7 @@ struct txntable {
 	char hash[68];
 	char *data;
 	int refcount;
+	bool seen;
 };
 
 #define ID_AUTH 0
@@ -1283,7 +1284,7 @@ static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char
 			txn->refcount = 100;
 		else if (txn->refcount < 20)
 			txn->refcount = 20;
-		found = true;
+		txn->seen = found = true;
 	}
 	ck_runlock(&sdata->workbase_lock);
 
@@ -1293,7 +1294,7 @@ static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char
 	txn = ckzalloc(sizeof(txntable_t));
 	memcpy(txn->hash, hash, 65);
 	txn->data = strdup(data);
-	if (ckp->node)
+	if (!local || ckp->node)
 		txn->refcount = 100;
 	else
 		txn->refcount = 20;
@@ -1355,6 +1356,10 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 	 * and remove them. */
 	ck_wlock(&sdata->workbase_lock);
 	HASH_ITER(hh, sdata->txns, tmp, tmpa) {
+		if (tmp->seen) {
+			tmp->seen = false;
+			continue;
+		}
 		if (tmp->refcount-- > 0)
 			continue;
 		HASH_DEL(sdata->txns, tmp);
@@ -1388,7 +1393,8 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 
 /* Distill down a set of transactions into an efficient tree arrangement for
  * stratum messages and fast work assembly. */
-static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *txn_array)
+static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *txn_array,
+			   bool local)
 {
 	int i, j, binleft, binlen;
 	txntable_t *txns = NULL;
@@ -1435,7 +1441,7 @@ static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t
 				return;
 			}
 			txn = json_string_value(json_object_get(arr_val, "data"));
-			add_txn(ckp, sdata, &txns, hash, txn, true);
+			add_txn(ckp, sdata, &txns, hash, txn, local);
 			len = strlen(txn);
 			memcpy(wb->txn_data + ofs, txn, len);
 			ofs += len;
@@ -1570,7 +1576,7 @@ retry:
 	json_intcpy(&wb->height, val, "height");
 	json_strdup(&wb->flags, val, "flags");
 	txn_array = json_object_get(val, "transactions");
-	wb_merkle_bins(ckp, sdata, wb, txn_array);
+	wb_merkle_bins(ckp, sdata, wb, txn_array, true);
 
 	wb->insert_witness = false;
 	memset(wb->witnessdata, 0, sizeof(wb->witnessdata));
@@ -1627,12 +1633,13 @@ out:
 	free(prio);
 }
 
+/* Rebuilds transactions from txnhashes to be able to construct wb_merkle_bins */
 static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *txnhashes)
 {
 	const char *hashes = json_string_value(txnhashes);
 	json_t *txn_array;
+	bool ret = false;
 	txntable_t *txn;
-	bool ret = true;
 	int i, len;
 
 	if (likely(hashes))
@@ -1644,8 +1651,9 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *
 
 	if (unlikely(len < wb->txns * 65)) {
 		LOGERR("Truncated transactions in rebuild_txns only %d long", len);
-		return false;
+		return ret;
 	}
+	ret = true;
 	txn_array = json_array();
 
 	ck_rlock(&sdata->workbase_lock);
@@ -1657,22 +1665,25 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *
 		hash[64] = '\0';
 		HASH_FIND_STR(sdata->txns, hash, txn);
 		if (unlikely(!txn)) {
-			LOGNOTICE("Failed to find txn in rebuild_txns");
 			ret = false;
-			goto out_unlock;
+			continue;
 		}
+		/* This is unnecessary most of the time since it will be set
+		 * in rebuild_txns as well but helps in the case we can't call
+		 * rebuild_txns due to missing some txns */
 		txn->refcount = 100;
+		txn->seen = true;
 		JSON_CPACK(txn_val, "{ss,ss}",
 			   "hash", hash, "data", txn->data);
 		json_array_append_new(txn_array, txn_val);
 	}
-out_unlock:
 	ck_runlock(&sdata->workbase_lock);
 
 	if (ret) {
 		LOGINFO("Rebuilt txns into workbase with %d transactions", (int)i);
-		wb_merkle_bins(ckp, sdata, wb, txn_array);
-	}
+		wb_merkle_bins(ckp, sdata, wb, txn_array, false);
+	} else
+		LOGNOTICE("Failed to find all txns in rebuild_txns");
 	json_decref(txn_array);
 
 	return ret;
