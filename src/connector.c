@@ -356,6 +356,14 @@ out:
 	return ret;
 }
 
+static void stratifier_drop_id(ckpool_t *ckp, const int64_t id)
+{
+	char buf[256];
+
+	sprintf(buf, "dropclient=%"PRId64, id);
+	send_proc(ckp->stratifier, buf);
+}
+
 /* Client must hold a reference count */
 static int drop_client(cdata_t *cdata, client_instance_t *client)
 {
@@ -378,6 +386,7 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 				   client_id, address_name);
 		}
 		LOGDEBUG("Connector dropped fd %d", fd);
+		stratifier_drop_id(cdata->ckp, client_id);
 	}
 
 	return fd;
@@ -392,14 +401,6 @@ static void generator_drop_client(ckpool_t *ckp, const client_instance_t *client
 		   client->address_name, "server", client->server, "method", "mining.term",
 		   "params");
 	generator_add_send(ckp, val);
-}
-
-static void stratifier_drop_id(ckpool_t *ckp, const int64_t id)
-{
-	char buf[256];
-
-	sprintf(buf, "dropclient=%"PRId64, id);
-	send_proc(ckp->stratifier, buf);
 }
 
 static void stratifier_drop_client(ckpool_t *ckp, const client_instance_t *client)
