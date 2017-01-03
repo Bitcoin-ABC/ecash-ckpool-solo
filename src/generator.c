@@ -569,7 +569,6 @@ static bool parse_subscribe(connsock_t *cs, proxy_instance_t *proxi)
 {
 	json_t *val = NULL, *res_val, *notify_val, *tmp;
 	bool parsed, ret = false;
-	proxy_instance_t *parent;
 	int retries = 0, size;
 	const char *string;
 	char *buf, *old;
@@ -654,13 +653,6 @@ retry:
 	}
 	proxi->nonce2len = size;
 	proxi->clients_per_proxy = 1ll << ((size - 3) * 8);
-	parent = proxi->parent;
-
-	mutex_lock(&parent->proxy_lock);
-	parent->recruit -= proxi->clients_per_proxy;
-	if (parent->recruit < 0)
-		parent->recruit = 0;
-	mutex_unlock(&parent->proxy_lock);
 
 	LOGNOTICE("Found notify for new proxy %d:%d with enonce %s nonce2len %d", proxi->id,
 		proxi->subid, proxi->enonce1, proxi->nonce2len);
@@ -2003,6 +1995,19 @@ out:
 	}
 	proxi->alive = ret;
 	cksem_post(&cs->sem);
+
+	/* Decrease the parent's recruit count after sending the stratifier the
+	 * new subscribe so it can get an accurate headroom count before
+	 * requesting more proxies. */
+	if (ret) {
+		proxy_instance_t *parent = proxi->parent;
+
+		mutex_lock(&parent->proxy_lock);
+		parent->recruit -= proxi->clients_per_proxy;
+		if (parent->recruit < 0)
+			parent->recruit = 0;
+		mutex_unlock(&parent->proxy_lock);
+	}
 
 	return ret;
 }
