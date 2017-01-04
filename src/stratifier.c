@@ -1350,9 +1350,32 @@ static void send_node_transactions(ckpool_t *ckp, sdata_t *sdata, const json_t *
 	}
 }
 
+/* Submit the transactions in node/remote mode so the local btcd has all the
+ * transactions that will go into the next blocksolve. */
+static void submit_transaction(ckpool_t *ckp, const char *hash)
+{
+	char *buf;
+
+	if (unlikely(!ckp->generator_ready))
+		return;
+	ASPRINTF(&buf, "submittxn:%s", hash);
+	send_proc(ckp->generator,buf);
+	free(buf);
+}
+
+static void submit_transaction_array(ckpool_t *ckp, const json_t *arr)
+{
+	json_t *arr_val;
+	size_t index;
+
+	json_array_foreach(arr, index, arr_val) {
+		submit_transaction(ckp, json_string_value(arr_val));
+	}
+}
+
 static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool local)
 {
-	json_t *val, *txn_array = json_array();
+	json_t *val, *txn_array = json_array(), *purged_txns = json_array();
 	int added = 0, purged = 0;
 	txntable_t *tmp, *tmpa;
 
@@ -1360,6 +1383,8 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 	 * and remove them. */
 	ck_wlock(&sdata->workbase_lock);
 	HASH_ITER(hh, sdata->txns, tmp, tmpa) {
+		json_t *txn_val;
+
 		if (tmp->seen) {
 			tmp->seen = false;
 			continue;
@@ -1367,6 +1392,8 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 		if (tmp->refcount-- > 0)
 			continue;
 		HASH_DEL(sdata->txns, tmp);
+		txn_val = json_string(tmp->data);
+		json_array_append_new(purged_txns, txn_val);
 		dealloc(tmp->data);
 		dealloc(tmp);
 		purged++;
@@ -1385,12 +1412,20 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 	}
 	ck_wunlock(&sdata->workbase_lock);
 
-	if (json_array_size(txn_array)) {
+	if (added) {
 		JSON_CPACK(val, "{so}", "transaction", txn_array);
 		send_node_transactions(ckp, sdata, val);
 		json_decref(val);
 	} else
 		json_decref(txn_array);
+
+	/* Submit transactions to bitcoind again when we're purging them in
+	 * case they've been removed from its mempool as well and we need them
+	 * again in the future for a remote workinfo that hasn't forgotten
+	 * about them. */
+	if (purged)
+		submit_transaction_array(ckp, purged_txns);
+	json_decref(purged_txns);
 
 	if (added || purged) {
 		LOGINFO("Stratifier added %d %stransactions and purged %d", added,
@@ -7031,19 +7066,6 @@ static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workerna
 	}
 
 	return user;
-}
-
-/* Submit the transactions in node/remote mode so the local btcd has all the
- * transactions that will go into the next blocksolve. */
-static void submit_transaction(ckpool_t *ckp, const char *hash)
-{
-	char *buf;
-
-	if (unlikely(!ckp->generator_ready))
-		return;
-	ASPRINTF(&buf, "submittxn:%s", hash);
-	send_proc(ckp->generator,buf);
-	free(buf);
 }
 
 static void parse_remote_share(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
