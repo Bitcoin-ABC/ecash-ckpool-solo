@@ -2020,11 +2020,13 @@ out:
 	if (ret) {
 		proxy_instance_t *parent = proxi->parent;
 
-		mutex_lock(&parent->proxy_lock);
-		parent->recruit -= proxi->clients_per_proxy;
-		if (parent->recruit < 0)
-			parent->recruit = 0;
-		mutex_unlock(&parent->proxy_lock);
+		if (parent) {
+			mutex_lock(&parent->proxy_lock);
+			parent->recruit -= proxi->clients_per_proxy;
+			if (parent->recruit < 0)
+				parent->recruit = 0;
+			mutex_unlock(&parent->proxy_lock);
+		}
 	}
 
 	return ret;

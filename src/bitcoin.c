@@ -383,7 +383,7 @@ char *get_txn(connsock_t *cs, const char *hash)
 	}
 
 	ASPRINTF(&rpc_req, "{\"method\": \"getrawtransaction\", \"params\": [\"%s\"]}\n", hash);
-	val = json_rpc_call(cs, rpc_req);
+	val = json_rpc_response(cs, rpc_req);
 	dealloc(rpc_req);
 	if (unlikely(!val)) {
 		LOGWARNING("%s:%s Failed to get valid json response to get_txn", cs->url, cs->port);

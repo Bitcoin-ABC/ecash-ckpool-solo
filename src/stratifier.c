@@ -1752,6 +1752,8 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *
 		/* See if we can find it in our local bitcoind */
 		data = generator_get_txn(ckp, hash);
 		if (!data) {
+			txn_val = json_string(hash);
+			json_array_append_new(missing_txns, txn_val);
 			ret = false;
 			continue;
 		}
@@ -1767,10 +1769,11 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *
 			txn->refcount = REFCOUNT_REMOTE;
 			HASH_ADD_STR(sdata->txns, hash, txn);
 		} else {
-			txn_val = json_string(hash);
-			json_array_append_new(missing_txns, txn_val);
-			ret = false;
-			free(data);
+			txn->refcount = REFCOUNT_REMOTE;
+			txn->seen = true;
+			JSON_CPACK(txn_val, "{ss,ss}",
+				   "hash", hash, "data", txn->data);
+			json_array_append_new(txn_array, txn_val);
 		}
 		ck_wunlock(&sdata->workbase_lock);
 	}

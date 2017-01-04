@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2017 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -909,6 +909,11 @@ out:
 json_t *json_rpc_call(connsock_t *cs, const char *rpc_req)
 {
 	return _json_rpc_call(cs, rpc_req, false);
+}
+
+json_t *json_rpc_response(connsock_t *cs, const char *rpc_req)
+{
+	return _json_rpc_call(cs, rpc_req, true);
 }
 
 /* For when we are submitting information that is not important and don't care
