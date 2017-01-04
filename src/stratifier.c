@@ -872,22 +872,23 @@ static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char 
 		if (now_t != time_counter) {
 			double sdiff = sdata->stats.accounted_diff_shares;
 			pool_stats_t *stats = &sdata->stats;
-			char hashrate[16], ch;
+			char stamp[128], hashrate[16], ch;
 
 			/* Rate limit to 1 update per second */
 			time_counter = now_t;
 			suffix_string(stats->dsps1 * nonces, hashrate, 16, 3);
 			ch = status_chars[(counter++) & 0x3];
+			get_timestamp(stamp);
 			if (likely(sdata->current_workbase)) {
 				double bdiff = sdiff / sdata->current_workbase->network_diff * 100;
 
-				fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares  %.1f%% diff",
-					ch, hashrate, stats->sps1, stats->users, stats->workers,
-					sdiff, bdiff);
+				fprintf(stdout, "\33[2K\r%s %c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares  %.1f%% diff",
+					stamp, ch, hashrate, stats->sps1, stats->users,
+				        stats->workers, sdiff, bdiff);
 			} else {
-				fprintf(stdout, "\33[2K\r%c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares",
-					ch, hashrate, stats->sps1, stats->users, stats->workers,
-					sdiff);
+				fprintf(stdout, "\33[2K\r%s %c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares",
+					stamp, ch, hashrate, stats->sps1, stats->users,
+				        stats->workers, sdiff);
 			}
 			fflush(stdout);
 		}
