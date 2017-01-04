@@ -1381,9 +1381,12 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 	}
 	ck_wunlock(&sdata->workbase_lock);
 
-	JSON_CPACK(val, "{so}", "transaction", txn_array);
-	send_node_transactions(ckp, sdata, val);
-	json_decref(val);
+	if (json_array_size(txn_array)) {
+		JSON_CPACK(val, "{so}", "transaction", txn_array);
+		send_node_transactions(ckp, sdata, val);
+		json_decref(val);
+	} else
+		json_decref(txn_array);
 
 	if (added || purged) {
 		LOGINFO("Stratifier added %d %stransactions and purged %d", added,
