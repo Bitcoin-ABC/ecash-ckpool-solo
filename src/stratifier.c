@@ -1717,6 +1717,11 @@ static void request_txns(ckpool_t *ckp, sdata_t *sdata, json_t *txns)
 		index--;
 	}
 
+	if (!json_array_size(txns)) {
+		LOGDEBUG("Retrieved all transactions from bitcoin in request_txns");
+		return;
+	}
+
 	JSON_CPACK(val, "{so}", "hash", txns);
 	if (ckp->remote)
 		upstream_msgtype(ckp, val, SM_REQTXNS);
@@ -7389,6 +7394,54 @@ void parse_remote_txns(ckpool_t *ckp, const json_t *val)
 	add_node_txns(ckp, ckp->sdata, val);
 }
 
+static json_t *get_hash_transactions(sdata_t *sdata, const json_t *hashes)
+{
+	json_t *txn_array = json_array(), *arr_val;
+	int found = 0;
+	size_t index;
+
+	ck_rlock(&sdata->workbase_lock);
+	json_array_foreach(hashes, index, arr_val) {
+		const char *hash = json_string_value(arr_val);
+		json_t *txn_val;
+		txntable_t *txn;
+
+		HASH_FIND_STR(sdata->txns, hash, txn);
+		if (!txn)
+			continue;
+		JSON_CPACK(txn_val, "{ss,ss}",
+			   "hash", hash, "data", txn->data);
+		json_array_append_new(txn_array, txn_val);
+		found++;
+	}
+	ck_runlock(&sdata->workbase_lock);
+
+	return txn_array;
+}
+
+static void parse_remote_reqtxns(sdata_t *sdata, json_t *val, const int64_t client_id)
+{
+	json_t *hashes = json_object_get(val, "hash");
+	int requested, found;
+	json_t *txns;
+
+	if (unlikely(!hashes) || !json_is_array(hashes))
+		return;
+	requested = json_array_size(hashes);
+	if (unlikely(!requested))
+		return;
+
+	txns = get_hash_transactions(sdata, hashes);
+	found = json_array_size(txns);
+	if (!found)
+		return json_decref(txns);
+	/* Reuse val variable */
+	JSON_CPACK(val, "{ssso}", "method", stratum_msgs[SM_TRANSACTIONS], "transaction", txns);
+	stratum_add_send(sdata, val, client_id, SM_TRANSACTIONS);
+	LOGINFO("Sending %d found of %d requested txns to remote client %"PRId64,
+		found, requested, client_id);
+}
+
 static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratum_instance_t *client)
 {
 	json_t *method_val = json_object_get(val, "method");
@@ -7421,6 +7474,8 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 		parse_remote_shareerr(ckp, sdata, val, buf);
 	else if (!safecmp(method, stratum_msgs[SM_BLOCK]))
 		parse_remote_block(ckp, sdata, val, buf, client->id);
+	else if (!safecmp(method, stratum_msgs[SM_REQTXNS]))
+		parse_remote_reqtxns(sdata, val, client->id);
 	else if (!safecmp(method, "workers"))
 		parse_remote_workers(sdata, val, buf);
 	else if (!safecmp(method, "ping"))
