@@ -465,6 +465,8 @@ struct stratifier_data {
 	pool_stats_t stats;
 	/* Protects changes to pool stats */
 	mutex_t stats_lock;
+	/* Protects changes to unaccounted pool stats */
+	mutex_t uastats_lock;
 
 	/* Serialises sends/receives to ckdb if possible */
 	mutex_t ckdb_lock;
@@ -5839,13 +5841,13 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	int64_t next_blockid, optimal, mindiff;
 	tv_t now_t;
 
-	mutex_lock(&ckp_sdata->stats_lock);
+	mutex_lock(&ckp_sdata->uastats_lock);
 	if (valid) {
 		ckp_sdata->stats.unaccounted_shares++;
 		ckp_sdata->stats.unaccounted_diff_shares += diff;
 	} else
 		ckp_sdata->stats.unaccounted_rejects += diff;
-	mutex_unlock(&ckp_sdata->stats_lock);
+	mutex_unlock(&ckp_sdata->uastats_lock);
 
 	/* Count only accepted and stale rejects in diff calculation. */
 	if (valid) {
@@ -7092,10 +7094,10 @@ static void parse_remote_share(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 	worker = get_worker(sdata, user, workername);
 	check_best_diff(ckp, sdata, user, worker, sdiff, NULL);
 
-	mutex_lock(&sdata->stats_lock);
+	mutex_lock(&sdata->uastats_lock);
 	sdata->stats.unaccounted_shares++;
 	sdata->stats.unaccounted_diff_shares += diff;
-	mutex_unlock(&sdata->stats_lock);
+	mutex_unlock(&sdata->uastats_lock);
 
 	worker->shares += diff;
 	user->shares += diff;
@@ -8619,31 +8621,40 @@ static void *statsupdate(void *arg)
 		/* Update stats 32 times per minute to divide up userstats for
 		 * ckdb, displaying status every minute. */
 		for (i = 0; i < 32; i++) {
+			int64_t unaccounted_shares,
+				unaccounted_diff_shares,
+				unaccounted_rejects;
+
 			cksleep_ms_r(&stats->last_update, 1875);
 			cksleep_prepare_r(&stats->last_update);
 			update_workerstats(ckp, sdata);
 
-			mutex_lock(&sdata->stats_lock);
-			stats->accounted_shares += stats->unaccounted_shares;
-			stats->accounted_diff_shares += stats->unaccounted_diff_shares;
-			stats->accounted_rejects += stats->unaccounted_rejects;
-
-			decay_time(&stats->sps1, stats->unaccounted_shares, 1.875, MIN1);
-			decay_time(&stats->sps5, stats->unaccounted_shares, 1.875, MIN5);
-			decay_time(&stats->sps15, stats->unaccounted_shares, 1.875, MIN15);
-			decay_time(&stats->sps60, stats->unaccounted_shares, 1.875, HOUR);
-
-			decay_time(&stats->dsps1, stats->unaccounted_diff_shares, 1.875, MIN1);
-			decay_time(&stats->dsps5, stats->unaccounted_diff_shares, 1.875, MIN5);
-			decay_time(&stats->dsps15, stats->unaccounted_diff_shares, 1.875, MIN15);
-			decay_time(&stats->dsps60, stats->unaccounted_diff_shares, 1.875, HOUR);
-			decay_time(&stats->dsps360, stats->unaccounted_diff_shares, 1.875, HOUR6);
-			decay_time(&stats->dsps1440, stats->unaccounted_diff_shares, 1.875, DAY);
-			decay_time(&stats->dsps10080, stats->unaccounted_diff_shares, 1.875, WEEK);
-
+			mutex_lock(&sdata->uastats_lock);
+			unaccounted_shares = stats->unaccounted_shares;
+			unaccounted_diff_shares = stats->unaccounted_diff_shares;
+			unaccounted_rejects = stats->unaccounted_rejects;
 			stats->unaccounted_shares =
 			stats->unaccounted_diff_shares =
 			stats->unaccounted_rejects = 0;
+			mutex_unlock(&sdata->uastats_lock);
+
+			mutex_lock(&sdata->stats_lock);
+			stats->accounted_shares += unaccounted_shares;
+			stats->accounted_diff_shares += unaccounted_diff_shares;
+			stats->accounted_rejects += unaccounted_rejects;
+
+			decay_time(&stats->sps1, unaccounted_shares, 1.875, MIN1);
+			decay_time(&stats->sps5, unaccounted_shares, 1.875, MIN5);
+			decay_time(&stats->sps15, unaccounted_shares, 1.875, MIN15);
+			decay_time(&stats->sps60, unaccounted_shares, 1.875, HOUR);
+
+			decay_time(&stats->dsps1, unaccounted_diff_shares, 1.875, MIN1);
+			decay_time(&stats->dsps5, unaccounted_diff_shares, 1.875, MIN5);
+			decay_time(&stats->dsps15, unaccounted_diff_shares, 1.875, MIN15);
+			decay_time(&stats->dsps60, unaccounted_diff_shares, 1.875, HOUR);
+			decay_time(&stats->dsps360, unaccounted_diff_shares, 1.875, HOUR6);
+			decay_time(&stats->dsps1440, unaccounted_diff_shares, 1.875, DAY);
+			decay_time(&stats->dsps10080, unaccounted_diff_shares, 1.875, WEEK);
 			mutex_unlock(&sdata->stats_lock);
 		}
 	}
@@ -8873,6 +8884,7 @@ void *stratifier(void *arg)
 	}
 
 	mutex_init(&sdata->stats_lock);
+	mutex_init(&sdata->uastats_lock);
 	if (!ckp->passthrough || ckp->node)
 		create_pthread(&pth_statsupdate, statsupdate, ckp);
 
