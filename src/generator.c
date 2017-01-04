@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2017 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -880,6 +880,24 @@ bool generator_checkaddr(ckpool_t *ckp, const char *addr)
 	}
 	cs = &si->cs;
 	ret = validate_address(cs, addr);
+out:
+	return ret;
+}
+
+char *generator_get_txn(ckpool_t *ckp, const char *hash)
+{
+	gdata_t *gdata = ckp->gdata;
+	server_instance_t *si;
+	char *ret = NULL;
+	connsock_t *cs;
+
+	si = gdata->current_si;
+	if (unlikely(!si)) {
+		LOGWARNING("No live current server in generator_checkaddr");
+		goto out;
+	}
+	cs = &si->cs;
+	ret = get_txn(cs, hash);
 out:
 	return ret;
 }

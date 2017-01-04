@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2017 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -20,6 +20,7 @@ void generator_add_send(ckpool_t *ckp, json_t *val);
 json_t *generator_genbase(ckpool_t *ckp);
 int generator_getbest(ckpool_t *ckp, char *hash);
 bool generator_checkaddr(ckpool_t *ckp, const char *addr);
+char *generator_get_txn(ckpool_t *ckp, const char *hash);
 void generator_submitblock(ckpool_t *ckp, char *buf);
 void *generator(void *arg);
 

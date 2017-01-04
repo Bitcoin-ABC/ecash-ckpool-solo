@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2017 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -355,17 +355,50 @@ out:
 	return ret;
 }
 
-void submit_txn(connsock_t *cs, char *params)
+void submit_txn(connsock_t *cs, const char *params)
 {
 	char *rpc_req;
 	int len;
 
-	if (unlikely(!cs->alive))
+	if (unlikely(!cs->alive)) {
+		LOGDEBUG("Failed to submit_txn due to connsock dead");
 		return;
+	}
 
 	len = strlen(params) + 64;
 	rpc_req = ckalloc(len);
 	sprintf(rpc_req, "{\"method\": \"sendrawtransaction\", \"params\": [\"%s\"]}\n", params);
 	json_rpc_msg(cs, rpc_req);
 	dealloc(rpc_req);
+}
+
+char *get_txn(connsock_t *cs, const char *hash)
+{
+	char *rpc_req, *ret = NULL;
+	json_t *val, *res_val;
+
+	if (unlikely(!cs->alive)) {
+		LOGDEBUG("Failed to get_txn due to connsock dead");
+		goto out;
+	}
+
+	ASPRINTF(&rpc_req, "{\"method\": \"getrawtransaction\", \"params\": [\"%s\"]}\n", hash);
+	val = json_rpc_call(cs, rpc_req);
+	dealloc(rpc_req);
+	if (unlikely(!val)) {
+		LOGWARNING("%s:%s Failed to get valid json response to get_txn", cs->url, cs->port);
+		goto out;
+	}
+	res_val = json_object_get(val, "result");
+	if (unlikely(!res_val)) {
+		LOGWARNING("Failed to get result in json response to getrawtransaction");
+		goto out;
+	}
+	if (!json_is_null(res_val) && json_is_string(res_val)) {
+		ret = strdup(json_string_value(res_val));
+		LOGDEBUG("get_txn for hash %s got data %s", hash, ret);
+	} else
+		LOGDEBUG("get_txn did not retrieve data for hash %s", hash);
+out:
+	return ret;
 }

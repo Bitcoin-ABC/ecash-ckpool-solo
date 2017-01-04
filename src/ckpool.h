@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2017 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -299,6 +299,7 @@ enum stratum_msgtype {
 	SM_TRANSACTIONS,
 	SM_SHAREERR,
 	SM_WORKERSTATS,
+	SM_REQTXNS,
 	SM_NONE
 };
 
@@ -324,6 +325,7 @@ static const char __maybe_unused *stratum_msgs[] = {
 	"transactions",
 	"shareerr",
 	"workerstats",
+	"reqtxns",
 	""
 };
 
