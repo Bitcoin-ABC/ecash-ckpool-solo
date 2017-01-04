@@ -81,19 +81,11 @@ static void proclog(ckpool_t *ckp, char *msg)
 	free(msg);
 }
 
-/* Log everything to the logfile, but display warnings on the console as well */
-void logmsg(int loglevel, const char *fmt, ...)
+void get_timestamp(char *stamp)
 {
-	int logfd = global_ckp->logfd;
-	char *log, *buf = NULL;
-	char stamp[128];
 	struct tm tm;
 	tv_t now_tv;
-	va_list ap;
 	int ms;
-
-	if (global_ckp->loglevel < loglevel || !fmt)
-		return;
 
 	tv_time(&now_tv);
 	ms = (int)(now_tv.tv_usec / 1000);
@@ -105,6 +97,18 @@ void logmsg(int loglevel, const char *fmt, ...)
 			tm.tm_hour,
 			tm.tm_min,
 			tm.tm_sec, ms);
+}
+
+/* Log everything to the logfile, but display warnings on the console as well */
+void logmsg(int loglevel, const char *fmt, ...)
+{
+	int logfd = global_ckp->logfd;
+	char *log, *buf = NULL;
+	char stamp[128];
+	va_list ap;
+
+	if (global_ckp->loglevel < loglevel || !fmt)
+		return;
 
 	va_start(ap, fmt);
 	VASPRINTF(&buf, fmt, ap);
@@ -118,6 +122,7 @@ void logmsg(int loglevel, const char *fmt, ...)
 		fprintf(stderr, "Zero length string sent to logmsg\n");
 		goto out;
 	}
+	get_timestamp(stamp);
 	if (loglevel <= LOG_ERR && errno != 0)
 		ASPRINTF(&log, "%s %s with errno %d: %s\n", stamp, buf, errno, strerror(errno));
 	else
