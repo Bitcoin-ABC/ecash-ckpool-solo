@@ -390,10 +390,6 @@ char *get_txn(connsock_t *cs, const char *hash)
 		goto out;
 	}
 	res_val = json_object_get(val, "result");
-	if (unlikely(!res_val)) {
-		LOGWARNING("Failed to get result in json response to getrawtransaction");
-		goto out;
-	}
 	if (!json_is_null(res_val) && json_is_string(res_val)) {
 		ret = strdup(json_string_value(res_val));
 		LOGDEBUG("get_txn for hash %s got data %s", hash, ret);
