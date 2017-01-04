@@ -7419,27 +7419,49 @@ static json_t *get_hash_transactions(sdata_t *sdata, const json_t *hashes)
 	return txn_array;
 }
 
-static void parse_remote_reqtxns(sdata_t *sdata, json_t *val, const int64_t client_id)
+static json_t *get_reqtxns(sdata_t *sdata, json_t *val, bool downstream)
 {
 	json_t *hashes = json_object_get(val, "hash");
+	json_t *txns, *ret = NULL;
 	int requested, found;
-	json_t *txns;
 
 	if (unlikely(!hashes) || !json_is_array(hashes))
-		return;
+		goto out;
 	requested = json_array_size(hashes);
 	if (unlikely(!requested))
-		return;
+		goto out;
 
 	txns = get_hash_transactions(sdata, hashes);
 	found = json_array_size(txns);
-	if (!found)
-		return json_decref(txns);
-	/* Reuse val variable */
-	JSON_CPACK(val, "{ssso}", "method", stratum_msgs[SM_TRANSACTIONS], "transaction", txns);
-	stratum_add_send(sdata, val, client_id, SM_TRANSACTIONS);
-	LOGINFO("Sending %d found of %d requested txns to remote client %"PRId64,
-		found, requested, client_id);
+	if (found) {
+		JSON_CPACK(ret, "{ssso}", "method", stratum_msgs[SM_TRANSACTIONS], "transaction", txns);
+		LOGINFO("Sending %d found of %d requested txns %s", found, requested,
+			downstream ? "downstream" : "upstream");
+	} else
+		json_decref(txns);
+out:
+	return ret;
+}
+
+static void parse_remote_reqtxns(sdata_t *sdata, json_t *val, const int64_t client_id)
+{
+	json_t *ret = get_reqtxns(sdata, val, true);
+
+	if (!ret)
+		return;
+	stratum_add_send(sdata, ret, client_id, SM_TRANSACTIONS);
+}
+
+void parse_upstream_reqtxns(ckpool_t *ckp, json_t *val)
+{
+	json_t *ret = get_reqtxns(ckp->sdata, val, false);
+	char *msg;
+
+	if (!ret)
+		return;
+	msg = json_dumps(ret, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_COMPACT | JSON_EOL);
+	json_decref(ret);
+	connector_upstream_msg(ckp, msg);
 }
 
 static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratum_instance_t *client)

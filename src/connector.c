@@ -1205,6 +1205,8 @@ static void *urecv_process(void *arg)
 			parse_upstream_workinfo(ckp, val);
 		else if (!safecmp(method, stratum_msgs[SM_BLOCK]))
 			parse_upstream_block(ckp, val);
+		else if (!safecmp(method, stratum_msgs[SM_REQTXNS]))
+			parse_upstream_reqtxns(ckp, val);
 		else if (!safecmp(method, "pong"))
 			LOGDEBUG("Received upstream pong");
 		else
