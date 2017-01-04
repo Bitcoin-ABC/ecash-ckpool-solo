@@ -1267,6 +1267,9 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 
 static void broadcast_ping(sdata_t *sdata);
 
+#define REFCOUNT_REMOTE	100
+#define REFCOUNT_LOCAL	5
+
 /* Build a hashlist of all transactions, allowing us to compare with the list of
  * existing transactions to determine which need to be propagated */
 static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char *hash,
@@ -1281,9 +1284,9 @@ static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char
 	HASH_FIND_STR(sdata->txns, hash, txn);
 	if (txn) {
 		if (!local)
-			txn->refcount = 100;
-		else if (txn->refcount < 20)
-			txn->refcount = 20;
+			txn->refcount = REFCOUNT_REMOTE;
+		else if (txn->refcount < REFCOUNT_LOCAL)
+			txn->refcount = REFCOUNT_LOCAL;
 		txn->seen = found = true;
 	}
 	ck_runlock(&sdata->workbase_lock);
@@ -1295,9 +1298,9 @@ static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char
 	memcpy(txn->hash, hash, 65);
 	txn->data = strdup(data);
 	if (!local || ckp->node)
-		txn->refcount = 100;
+		txn->refcount = REFCOUNT_REMOTE;
 	else
-		txn->refcount = 20;
+		txn->refcount = REFCOUNT_LOCAL;
 	HASH_ADD_STR(*txns, hash, txn);
 
 	return true;
@@ -1686,44 +1689,10 @@ static void downstream_json(sdata_t *sdata, const json_t *val, const int64_t cli
 }
 
 /* Find any transactions that are missing from our transaction table during
- * rebuild_txns by requesting their data from our bitcoind or requesting them
- * from another server. */
+ * rebuild_txns by requesting their data from another server. */
 static void request_txns(ckpool_t *ckp, sdata_t *sdata, json_t *txns)
 {
-	json_t *val, *arr_val;
-	size_t index;
-
-	/* See if our bitcoind has the transactions first to avoid requesting
-	 * them from another server. */
-	json_array_foreach(txns, index, arr_val) {
-		const char *hash = json_string_value(arr_val);
-		char *data = generator_get_txn(ckp, hash);
-		txntable_t *txn;
-
-		if (!data)
-			continue;
-
-		ck_wlock(&sdata->workbase_lock);
-		HASH_FIND_STR(sdata->txns, hash, txn);
-		if (likely(!txn)) {
-			txn = ckzalloc(sizeof(txntable_t));
-			memcpy(txn->hash, hash, 65);
-			txn->data = data;
-			txn->refcount = 100;
-			HASH_ADD_STR(sdata->txns, hash, txn);
-		} else
-			free(data);
-		ck_wunlock(&sdata->workbase_lock);
-
-		/* We're removing this object so decrement index for next pass */
-		json_array_remove(txns, index);
-		index--;
-	}
-
-	if (!json_array_size(txns)) {
-		LOGDEBUG("Retrieved all transactions from bitcoin in request_txns");
-		return;
-	}
+	json_t *val;
 
 	JSON_CPACK(val, "{so}", "hash", txns);
 	if (ckp->remote)
@@ -1745,7 +1714,6 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *
 	json_t *txn_array, *missing_txns;
 	char hash[68] = {};
 	bool ret = false;
-	txntable_t *txn;
 	int i, len = 0;
 
 	if (likely(hashes))
@@ -1761,25 +1729,51 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *
 	txn_array = json_array();
 	missing_txns = json_array();
 
-	ck_rlock(&sdata->workbase_lock);
 	for (i = 0; i < wb->txns; i++) {
-		json_t *txn_val;
+		json_t *txn_val = NULL;
+		txntable_t *txn;
+		char *data;
 
 		memcpy(hash, hashes + i * 65, 64);
+
+		ck_wlock(&sdata->workbase_lock);
 		HASH_FIND_STR(sdata->txns, hash, txn);
-		if (unlikely(!txn)) {
-			txn_val = json_string(hash);
-			json_array_append_new(missing_txns, txn_val);
+		if (likely(txn)) {
+			txn->refcount = REFCOUNT_REMOTE;
+			txn->seen = true;
+			JSON_CPACK(txn_val, "{ss,ss}",
+				   "hash", hash, "data", txn->data);
+			json_array_append_new(txn_array, txn_val);
+		}
+		ck_wunlock(&sdata->workbase_lock);
+
+		if (likely(txn_val))
+			continue;
+		/* See if we can find it in our local bitcoind */
+		data = generator_get_txn(ckp, hash);
+		if (!data) {
 			ret = false;
 			continue;
 		}
-		txn->refcount = 100;
-		txn->seen = true;
-		JSON_CPACK(txn_val, "{ss,ss}",
-			   "hash", hash, "data", txn->data);
-		json_array_append_new(txn_array, txn_val);
+
+		/* We've found it, let's add it to the table */
+		ck_wlock(&sdata->workbase_lock);
+		/* One last check in case it got added while we dropped the lock */
+		HASH_FIND_STR(sdata->txns, hash, txn);
+		if (likely(!txn)) {
+			txn = ckzalloc(sizeof(txntable_t));
+			memcpy(txn->hash, hash, 65);
+			txn->data = data;
+			txn->refcount = REFCOUNT_REMOTE;
+			HASH_ADD_STR(sdata->txns, hash, txn);
+		} else {
+			txn_val = json_string(hash);
+			json_array_append_new(missing_txns, txn_val);
+			ret = false;
+			free(data);
+		}
+		ck_wunlock(&sdata->workbase_lock);
 	}
-	ck_runlock(&sdata->workbase_lock);
 
 	if (ret) {
 		LOGINFO("Rebuilt txns into workbase with %d transactions", (int)i);
