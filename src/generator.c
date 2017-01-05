@@ -814,9 +814,9 @@ static void reconnect_generator(ckpool_t *ckp)
 
 json_t *generator_genbase(ckpool_t *ckp)
 {
+	gbtbase_t gbt = {.target={}};
 	gdata_t *gdata = ckp->gdata;
 	server_instance_t *si;
-	gbtbase_t gbt = {};
 	json_t *val = NULL;
 	connsock_t *cs;
 
