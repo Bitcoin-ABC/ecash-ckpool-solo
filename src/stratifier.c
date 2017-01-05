@@ -46,6 +46,9 @@ struct pool_stats {
 	int users;
 	int disconnected;
 
+	int remote_workers;
+	int remote_users;
+
 	/* Absolute shares stats */
 	int64_t unaccounted_shares;
 	int64_t accounted_shares;
@@ -885,12 +888,12 @@ static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char 
 				double bdiff = sdiff / sdata->current_workbase->network_diff * 100;
 
 				fprintf(stdout, "\33[2K\r%s %c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares  %.1f%% diff",
-					stamp, ch, hashrate, stats->sps1, stats->users,
-				        stats->workers, sdiff, bdiff);
+					stamp, ch, hashrate, stats->sps1, stats->users + stats->remote_users,
+				        stats->workers + stats->remote_workers, sdiff, bdiff);
 			} else {
 				fprintf(stdout, "\33[2K\r%s %c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares",
-					stamp, ch, hashrate, stats->sps1, stats->users,
-				        stats->workers, sdiff);
+					stamp, ch, hashrate, stats->sps1, stats->users + stats->remote_users,
+				        stats->workers + stats->remote_workers, sdiff);
 			}
 			fflush(stdout);
 		}
@@ -4531,7 +4534,8 @@ static void get_poolstats(sdata_t *sdata, int *sockd)
 	mutex_lock(&sdata->stats_lock);
 	JSON_CPACK(val, "{si,si,si,si,si,sI,sf,sf,sf,sf,sI,sI,sf,sf,sf,sf,sf,sf,sf}",
 		   "start", stats->start_time.tv_sec, "update", stats->last_update.tv_sec,
-	    "workers", stats->workers, "users", stats->users, "disconnected", stats->disconnected,
+	    "workers", stats->workers + stats->remote_workers, "users", stats->users + stats->remote_users,
+	    "disconnected", stats->disconnected,
 	    "shares", stats->accounted_shares, "sps1", stats->sps1, "sps5", stats->sps5,
 	    "sps15", stats->sps15, "sps60", stats->sps60, "accepted", stats->accounted_diff_shares,
 	    "rejected", stats->accounted_rejects, "dsps1", stats->dsps1, "dsps5", stats->dsps5,
@@ -8302,11 +8306,11 @@ static void *statsupdate(void *arg)
 		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080, per_tdiff;
 		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
 		char suffix360[16], suffix1440[16], suffix10080[16];
+		int remote_users = 0, remote_workers = 0, idle_workers = 0;
 		log_entry_t *log_entries = NULL;
 		char_entry_t *char_list = NULL;
 		stratum_instance_t *client;
 		user_instance_t *user;
-		int idle_workers = 0;
 		char *fname, *s, *sp;
 		tv_t now, diff;
 		ts_t ts_now;
@@ -8458,8 +8462,15 @@ static void *statsupdate(void *arg)
 					"bestshare", user->best_diff,
 					"bestever", user->best_ever);
 
-			/* Reset the remote_workers count once per minute */
-			user->remote_workers = 0;
+			if (user->remote_workers) {
+				remote_workers += user->remote_workers;
+				/* Reset the remote_workers count once per minute */
+				user->remote_workers = 0;
+				/* We check this unlocked but transiently
+				 * wrong is harmless */
+				if (!user->workers)
+					remote_users++;
+			}
 
 			if (!idle) {
 				s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
@@ -8474,6 +8485,13 @@ static void *statsupdate(void *arg)
 			json_decref(val);
 			if (ckp->remote)
 				upstream_workers(ckp, user);
+		}
+
+		if (remote_workers) {
+			mutex_lock(&sdata->stats_lock);
+			stats->remote_workers = remote_workers;
+			stats->remote_users = remote_users;
+			mutex_unlock(&sdata->stats_lock);
 		}
 
 		/* Dump log entries out of instance_lock */
@@ -8510,8 +8528,8 @@ static void *statsupdate(void *arg)
 		JSON_CPACK(val, "{si,si,si,si,si,si}",
 				"runtime", diff.tv_sec,
 				"lastupdate", now.tv_sec,
-				"Users", stats->users,
-				"Workers", stats->workers,
+				"Users", stats->users + stats->remote_users,
+				"Workers", stats->workers + stats->remote_workers,
 				"Idle", idle_workers,
 				"Disconnected", stats->disconnected);
 		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
@@ -8606,8 +8624,8 @@ static void *statsupdate(void *arg)
 		JSON_CPACK(val, "{ss,si,si,si,sf,sf,sf,sf,ss,ss,ss,ss}",
 				"poolinstance", ckp->name,
 				"elapsed", diff.tv_sec,
-				"users", stats->users,
-				"workers", stats->workers,
+				"users", stats->users + stats->remote_users,
+				"workers", stats->workers + stats->remote_workers,
 				"hashrate", ghs1,
 				"hashrate5m", ghs5,
 				"hashrate1hr", ghs60,
@@ -8657,6 +8675,12 @@ static void *statsupdate(void *arg)
 			decay_time(&stats->dsps10080, unaccounted_diff_shares, 1.875, WEEK);
 			mutex_unlock(&sdata->stats_lock);
 		}
+
+		/* Reset remote workers every minute since we measure it once
+		 * every minute only. */
+		mutex_lock(&sdata->stats_lock);
+		stats->remote_workers = stats->remote_users = 0;
+		mutex_unlock(&sdata->stats_lock);
 	}
 
 	return NULL;
