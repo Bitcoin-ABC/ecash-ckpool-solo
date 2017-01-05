@@ -385,12 +385,12 @@ char *get_txn(connsock_t *cs, const char *hash)
 	ASPRINTF(&rpc_req, "{\"method\": \"getrawtransaction\", \"params\": [\"%s\"]}\n", hash);
 	val = json_rpc_response(cs, rpc_req);
 	dealloc(rpc_req);
-	if (unlikely(!val)) {
-		LOGWARNING("%s:%s Failed to get valid json response to get_txn", cs->url, cs->port);
+	if (!val) {
+		LOGDEBUG("%s:%s Failed to get valid json response to get_txn", cs->url, cs->port);
 		goto out;
 	}
 	res_val = json_object_get(val, "result");
-	if (!json_is_null(res_val) && json_is_string(res_val)) {
+	if (res_val && !json_is_null(res_val) && json_is_string(res_val)) {
 		ret = strdup(json_string_value(res_val));
 		LOGDEBUG("get_txn for hash %s got data %s", hash, ret);
 	} else
