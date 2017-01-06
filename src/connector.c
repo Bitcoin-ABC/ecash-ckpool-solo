@@ -73,6 +73,8 @@ struct client_instance {
 
 	/* Has this client already been told to redirect */
 	bool redirected;
+	/* Has this client been authorised in redirector mode */
+	bool authorised;
 
 	/* Time this client started blocking, 0 when not blocked */
 	time_t blocked_time;
@@ -454,7 +456,7 @@ static void drop_all_clients(cdata_t *cdata)
 	ck_wunlock(&cdata->lock);
 }
 
-static void send_client(cdata_t *cdata, int64_t id, char *buf);
+static void send_client(ckpool_t *ckp, cdata_t *cdata, int64_t id, char *buf);
 
 /* Look for shares being submitted via a redirector and add them to a linked
  * list for looking up the responses. */
@@ -533,7 +535,7 @@ reparse:
 		char *buf = strdup("Invalid JSON, disconnecting\n");
 
 		LOGINFO("Client id %"PRId64" sent invalid json message %s", client->id, client->buf);
-		send_client(cdata, client->id, buf);
+		send_client(ckp, cdata, client->id, buf);
 		return false;
 	} else {
 		if (client->passthrough) {
@@ -588,6 +590,19 @@ static client_instance_t *ref_client_by_id(cdata_t *cdata, int64_t id)
 	ck_wunlock(&cdata->lock);
 
 	return client;
+}
+
+static void redirect_client(ckpool_t *ckp, client_instance_t *client);
+
+static bool redirect_matches(cdata_t *cdata, client_instance_t *client)
+{
+	redirect_t *redirect;
+
+	ck_rlock(&cdata->lock);
+	HASH_FIND_STR(cdata->redirects, client->address_name, redirect);
+	ck_runlock(&cdata->lock);
+
+	return redirect;
 }
 
 static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
@@ -879,16 +894,17 @@ static void redirect_client(ckpool_t *ckp, client_instance_t *client)
 
 /* Look for accepted shares in redirector mode to know we can redirect this
  * client to a protected server. */
-static void test_redirector_shares(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client, const char *buf)
+static bool test_redirector_shares(cdata_t *cdata, client_instance_t *client, const char *buf)
 {
 	json_t *val = json_loads(buf, 0, NULL);
 	share_t *share, *found = NULL;
+	bool ret = false;
 	int64_t id;
 
 	if (!val) {
 		/* Can happen when responding to invalid json from client */
 		LOGINFO("Invalid json response to client %"PRId64 "%s", client->id, buf);
-		return;
+		return ret;
 	}
 	if (!json_get_int64(&id, val, "id")) {
 		LOGINFO("Failed to find response id");
@@ -923,7 +939,7 @@ static void test_redirector_shares(ckpool_t *ckp, cdata_t *cdata, client_instanc
 		}
 		LOGNOTICE("Found accepted share for client %"PRId64" - redirecting",
 			   client->id);
-		redirect_client(ckp, client);
+		ret = true;
 
 		/* Clear the list now since we don't need it any more */
 		ck_wlock(&cdata->lock);
@@ -935,15 +951,16 @@ static void test_redirector_shares(ckpool_t *ckp, cdata_t *cdata, client_instanc
 	}
 out:
 	json_decref(val);
+	return ret;
 }
 
 /* Send a client by id a heap allocated buffer, allowing this function to
  * free the ram. */
-static void send_client(cdata_t *cdata, const int64_t id, char *buf)
+static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *buf)
 {
-	ckpool_t *ckp = cdata->ckp;
 	sender_send_t *sender_send;
 	client_instance_t *client;
+	bool redirect = false;
 	int len;
 
 	if (unlikely(!buf)) {
@@ -994,20 +1011,17 @@ static void send_client(cdata_t *cdata, const int64_t id, char *buf)
 			free(buf);
 			return;
 		}
-		if (ckp->node) {
-			json_t *val = json_loads(buf, 0, NULL);
-
-			if (!val) // Can happen if client sent invalid json message
-				goto out;
-			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
-			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
-			json_object_set_new_nocheck(val, "server", json_integer(client->server));
-			stratifier_add_recv(ckp, val);
+		if (ckp->redirector && !client->redirected && client->authorised) {
+			/* If clients match the IP of clients that have already
+			 * been whitelisted as finding valid shares then
+			 * redirect them immediately. */
+			if (redirect_matches(cdata, client))
+				redirect = true;
+			else
+				redirect = test_redirector_shares(cdata, client, buf);
 		}
-		if (ckp->redirector && !client->redirected)
-			test_redirector_shares(ckp, cdata, client, buf);
 	}
-out:
+
 	sender_send = ckzalloc(sizeof(sender_send_t));
 	sender_send->client = client;
 	sender_send->buf = buf;
@@ -1018,6 +1032,32 @@ out:
 	DL_APPEND(cdata->sender_sends, sender_send);
 	pthread_cond_signal(&cdata->sender_cond);
 	mutex_unlock(&cdata->sender_lock);
+
+	/* Redirect after sending response to shares and authorise */
+	if (unlikely(redirect))
+		redirect_client(ckp, client);
+}
+
+static void send_client_json(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, json_t *json_msg)
+{
+	client_instance_t *client;
+	char *msg;
+
+	if (ckp->node && (client = ref_client_by_id(cdata, client_id))) {
+		json_t *val = json_deep_copy(json_msg);
+
+		json_object_set_new_nocheck(val, "client_id", json_integer(client_id));
+		json_object_set_new_nocheck(val, "address", json_string(client->address_name));
+		json_object_set_new_nocheck(val, "server", json_integer(client->server));
+		dec_instance_ref(cdata, client);
+		stratifier_add_recv(ckp, val);
+	}
+	if (ckp->passthrough && client_id)
+		json_object_del(json_msg, "node.method");
+
+	msg = json_dumps(json_msg, JSON_EOL | JSON_COMPACT);
+	send_client(ckp, cdata, client_id, msg);
+	json_decref(json_msg);
 }
 
 static bool client_exists(cdata_t *cdata, const int64_t id)
@@ -1033,12 +1073,12 @@ static bool client_exists(cdata_t *cdata, const int64_t id)
 
 static void passthrough_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
 {
-	char *buf;
+	json_t *val;
 
 	LOGINFO("Connector adding passthrough client %"PRId64, client->id);
 	client->passthrough = true;
-	ASPRINTF(&buf, "{\"result\": true}\n");
-	send_client(cdata, client->id, buf);
+	JSON_CPACK(val, "{sb}", "result", true);
+	send_client_json(ckp, cdata, client->id, val);
 	if (!ckp->rmem_warn)
 		set_recvbufsize(ckp, client->fd, 1048576);
 	if (!ckp->wmem_warn)
@@ -1047,13 +1087,14 @@ static void passthrough_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t 
 
 static void remote_server(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
 {
-	char *buf;
+	json_t *val;
 
 	LOGWARNING("Connector adding client %"PRId64" %s as remote trusted server",
 		   client->id, client->address_name);
 	client->remote = true;
-	ASPRINTF(&buf, "{\"result\": true, \"ckdb\": %s}\n", CKP_STANDALONE(ckp) ? "false" : "true");
-	send_client(cdata, client->id, buf);
+	JSON_CPACK(val, "{sbsb}",
+		   "result", true, "ckdb", CKP_STANDALONE(ckp) ? false : true);
+	send_client_json(ckp, cdata, client->id, val);
 	if (!ckp->rmem_warn)
 		set_recvbufsize(ckp, client->fd, 2097152);
 	if (!ckp->wmem_warn)
@@ -1253,8 +1294,9 @@ out:
 
 static void client_message_processor(ckpool_t *ckp, json_t *json_msg)
 {
+	cdata_t *cdata = ckp->cdata;
+	client_instance_t *client;
 	int64_t client_id;
-	char *msg;
 
 	/* Extract the client id from the json message and remove its entry */
 	client_id = json_integer_value(json_object_get(json_msg, "client_id"));
@@ -1264,9 +1306,18 @@ static void client_message_processor(ckpool_t *ckp, json_t *json_msg)
 	if (client_id > 0xffffffffll)
 		json_object_set_new_nocheck(json_msg, "client_id", json_integer(client_id & 0xffffffffll));
 
-	msg = json_dumps(json_msg, JSON_EOL | JSON_COMPACT);
-	send_client(ckp->cdata, client_id, msg);
-	json_decref(json_msg);
+	/* Flag redirector clients once they've been authorised */
+	if (ckp->redirector && (client = ref_client_by_id(cdata, client_id))) {
+		if (!client->redirected && !client->authorised) {
+			json_t *method_val = json_object_get(json_msg, "node.method");
+			const char *method = json_string_value(method_val);
+
+			if (!safecmp(method, stratum_msgs[SM_AUTHRESULT]))
+				client->authorised = true;
+		}
+		dec_instance_ref(cdata, client);
+	}
+	send_client_json(ckp, cdata, client_id, json_msg);
 }
 
 void connector_add_message(ckpool_t *ckp, json_t *val)
@@ -1277,7 +1328,7 @@ void connector_add_message(ckpool_t *ckp, json_t *val)
 }
 
 /* Send the passthrough the terminate node.method */
-static void drop_passthrough_client(cdata_t *cdata, const int64_t id)
+static void drop_passthrough_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id)
 {
 	int64_t client_id;
 	char *msg;
@@ -1287,7 +1338,7 @@ static void drop_passthrough_client(cdata_t *cdata, const int64_t id)
 	/* We have a direct connection to the passthrough's connector so we
 	 * can send it any regular commands. */
 	ASPRINTF(&msg, "dropclient=%"PRId64"\n", client_id);
-	send_client(cdata, id, msg);
+	send_client(ckp, cdata, id, msg);
 }
 
 char *connector_stats(void *data, const int runtime)
@@ -1408,7 +1459,7 @@ retry:
 		}
 		/* A passthrough client */
 		if (client_id > 0xffffffffll) {
-			drop_passthrough_client(cdata, client_id);
+			drop_passthrough_client(ckp, cdata, client_id);
 			goto retry;
 		}
 		client = ref_client_by_id(cdata, client_id);
