@@ -1378,6 +1378,8 @@ static void submit_transaction_array(ckpool_t *ckp, const json_t *arr)
 	}
 }
 
+static void check_incomplete_wbs(ckpool_t *ckp, sdata_t *sdata);
+
 static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool local)
 {
 	json_t *val, *txn_array = json_array(), *purged_txns = json_array();
@@ -1433,6 +1435,8 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 	json_decref(purged_txns);
 
 	if (added || purged) {
+		if (sdata->wbincomplete)
+			check_incomplete_wbs(ckp, sdata);
 		LOGINFO("Stratifier added %d %stransactions and purged %d", added,
 			local ? "" : "remote ", purged);
 	}
@@ -1522,7 +1526,8 @@ static void wb_merkle_bins(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t
 			binlen = binleft * 32;
 		}
 	}
-	LOGNOTICE("Stored %d transactions", wb->txns);
+	LOGNOTICE("Stored %s workbase with %d transactions", local ? "local" : "remote",
+		  wb->txns);
 
 	update_txns(ckp, sdata, txns, true);
 }
@@ -1749,9 +1754,9 @@ static void request_txns(ckpool_t *ckp, sdata_t *sdata, json_t *txns)
 }
 
 /* Rebuilds transactions from txnhashes to be able to construct wb_merkle_bins */
-static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *txnhashes)
+static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 {
-	const char *hashes = json_string_value(txnhashes);
+	const char *hashes = wb->txn_hashes;
 	json_t *txn_array, *missing_txns;
 	char hash[68] = {};
 	bool ret = false;
@@ -1822,17 +1827,13 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *
 	if (ret) {
 		LOGINFO("Rebuilt txns into workbase with %d transactions", (int)i);
 		wb_merkle_bins(ckp, sdata, wb, txn_array, false);
-		if (sdata->wbincomplete) {
-			LOGWARNING("Successfully resumed rebuilding transactions into workinfo");
-			sdata->wbincomplete = false;
-		}
 	} else {
 		if (!sdata->wbincomplete) {
 			sdata->wbincomplete = true;
 			if (ckp->proxy)
 				LOGWARNING("Unable to rebuild transactions to create workinfo, ignore displayed hashrate");
 			else
-				LOGWARNING("Unable to rebuild transactions to recreate remote workinfo, unable to submit block locally");
+				LOGWARNING("Unable to rebuild txns from remote workinfo, may be unable to submit block locally");
 		}
 		LOGNOTICE("Failed to find all txns in rebuild_txns");
 		request_txns(ckp, sdata, missing_txns);
@@ -1842,6 +1843,39 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, json_t *
 	json_decref(missing_txns);
 
 	return ret;
+}
+
+static void check_incomplete_wbs(ckpool_t *ckp, sdata_t *sdata)
+{
+	workbase_t *wb, *tmp;
+	int incomplete = 0;
+
+	ck_wlock(&sdata->workbase_lock);
+	HASH_ITER(hh, sdata->remote_workbases, wb, tmp) {
+		if (!wb->incomplete)
+			continue;
+		/* Remove the workbase from the hashlist so we can work on it */
+		HASH_DEL(sdata->remote_workbases, wb);
+		ck_wunlock(&sdata->workbase_lock);
+
+		if (rebuild_txns(ckp, sdata, wb)) {
+			LOGNOTICE("Rebuilt transactions on previously failed remote workinfo");
+			wb->incomplete = false;
+		} else
+			incomplete++;
+
+		/* Readd it to the hashlist */
+		ck_wlock(&sdata->workbase_lock);
+		HASH_ADD_I64(sdata->remote_workbases, id, wb);
+	}
+	ck_wunlock(&sdata->workbase_lock);
+
+	if (incomplete)
+		LOGNOTICE("%d remote workinfo still incomplete", incomplete);
+	else {
+		sdata->wbincomplete = false;
+		LOGWARNING("Successfully resumed rebuilding transactions into workinfo");
+	}
 }
 
 static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
@@ -1931,7 +1965,6 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t clie
 	workbase_t *wb = ckzalloc(sizeof(workbase_t));
 	sdata_t *sdata = ckp->sdata;
 	bool new_block = false;
-	json_t *txnhashes;
 	char header[228];
 
 	wb->ckp = ckp;
@@ -1954,21 +1987,19 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t clie
 	json_uint64cpy(&wb->coinbasevalue, val, "coinbasevalue");
 	json_intcpy(&wb->height, val, "height");
 	json_strdup(&wb->flags, val, "flags");
+
+	json_intcpy(&wb->txns, val, "txns");
+	json_strdup(&wb->txn_hashes, val, "txn_hashes");
 	if (!ckp->proxy) {
 		/* This is a workbase from a trusted remote */
-		json_intcpy(&wb->txns, val, "txns");
-		json_strdup(&wb->txn_hashes, val, "txn_hashes");
 		wb->merkle_array = json_object_dup(val, "merklehash");
 		json_intcpy(&wb->merkles, val, "merkles");
-		txnhashes = json_object_get(val, "txn_hashes");
-		if (!rebuild_txns(ckp, sdata, wb, txnhashes)) {
+		if (!rebuild_txns(ckp, sdata, wb)) {
 			wb->incomplete = true;
 			wb->txns = 0;
 		}
 	} else {
-		json_intcpy(&wb->txns, val, "txns");
-		txnhashes = json_object_get(val, "txn_hashes");
-		if (!rebuild_txns(ckp, sdata, wb, txnhashes)) {
+		if (!rebuild_txns(ckp, sdata, wb)) {
 			free(wb);
 			return;
 		}
