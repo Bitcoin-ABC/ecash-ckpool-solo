@@ -961,6 +961,7 @@ static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *b
 	sender_send_t *sender_send;
 	client_instance_t *client;
 	bool redirect = false;
+	int64_t pass_id;
 	int len;
 
 	if (unlikely(!buf)) {
@@ -983,11 +984,9 @@ static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *b
 
 	/* Grab a reference to this client until the sender_send has
 	 * completed processing. Is this a passthrough subclient ? */
-	if (id > 0xffffffffll) {
-		int64_t client_id, pass_id;
+	if ((pass_id = subclient(id))) {
+		int64_t client_id = id & 0xffffffffll;
 
-		client_id = id & 0xffffffffll;
-		pass_id = id >> 32;
 		/* Make sure the passthrough exists for passthrough subclients */
 		client = ref_client_by_id(cdata, pass_id);
 		if (unlikely(!client)) {
@@ -1060,9 +1059,15 @@ static void send_client_json(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, j
 	json_decref(json_msg);
 }
 
-static bool client_exists(cdata_t *cdata, const int64_t id)
+/* When testing if a client exists, passthrough clients don't exist when their
+ * parent no longer exists. */
+static bool client_exists(cdata_t *cdata, int64_t id)
 {
+	int64_t parent_id = subclient(id);
 	client_instance_t *client;
+
+	if (parent_id)
+		id = parent_id;
 
 	ck_rlock(&cdata->lock);
 	HASH_FIND_I64(cdata->clients, &id, client);
@@ -1303,7 +1308,7 @@ static void client_message_processor(ckpool_t *ckp, json_t *json_msg)
 	json_object_del(json_msg, "client_id");
 	/* Put client_id back in for a passthrough subclient, passing its
 	 * upstream client_id instead of the passthrough's. */
-	if (client_id > 0xffffffffll)
+	if (subclient(client_id))
 		json_object_set_new_nocheck(json_msg, "client_id", json_integer(client_id & 0xffffffffll));
 
 	/* Flag redirector clients once they've been authorised */
@@ -1458,7 +1463,7 @@ retry:
 			goto retry;
 		}
 		/* A passthrough client */
-		if (client_id > 0xffffffffll) {
+		if (subclient(client_id)) {
 			drop_passthrough_client(ckp, cdata, client_id);
 			goto retry;
 		}
@@ -1477,7 +1482,6 @@ retry:
 			LOGDEBUG("Connector failed to parse testclient command: %s", buf);
 			goto retry;
 		}
-		client_id &= 0xffffffffll;
 		if (client_exists(cdata, client_id))
 			goto retry;
 		LOGINFO("Connector detected non-existent client id: %"PRId64, client_id);

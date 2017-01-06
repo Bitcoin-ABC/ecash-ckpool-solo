@@ -2065,13 +2065,6 @@ share_diff(char *coinbase, const uchar *enonce1bin, const workbase_t *wb, const 
 	return diff_from_target(hash);
 }
 
-/* Subclients have client_ids in the high bits. Returns the value of the parent
- * client if one exists. */
-static inline int64_t subclient(const int64_t client_id)
-{
-	return (client_id >> 32);
-}
-
 /* Note recursive lock here - entered with workbase lock held, grabs instance lock */
 static void send_node_block(sdata_t *sdata, const char *enonce1, const char *nonce,
 			    const char *nonce2, const uint32_t ntime32, const int64_t jobid,
@@ -3287,18 +3280,6 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, bool lazil
 	} else if (unlikely(client->passthrough))
 		parent = true;
 
-	/* Tag any subclients of this parent to be dropped lazily */
-	if (parent) {
-		stratum_instance_t *tmp;
-
-		for (tmp = sdata->stratum_instances; tmp; tmp = tmp->hh.next) {
-			int64_t subid = subclient(tmp->id);
-
-			if (subid && subid == client->id)
-				tmp->dropped = true;
-		}
-	}
-
 	if (client->workername) {
 		if (user) {
 			ASPRINTF(msg, "Dropped client %s %s %suser %s worker %s %s",
@@ -3310,7 +3291,7 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, bool lazil
 				 lazily ? "lazily" : "");
 		}
 	} else {
-		ASPRINTF(msg, "Dropped workerless client %s %s %s",
+		ASPRINTF(msg, "Dropped %sworkerless client %s %s %s", parent ? "parent " : "",
 			 client->identity, client->address, lazily ? "lazily" : "");
 	}
 	__del_client(sdata, client);

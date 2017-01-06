@@ -393,4 +393,11 @@ static inline json_t *json_encode_errormsg(json_error_t __maybe_unused *err_val)
 static inline json_t *json_errormsg(const char __maybe_unused *fmt, ...) { return NULL; };
 static inline void send_api_response(json_t __maybe_unused *val, const int __maybe_unused sockd) {};
 
+/* Subclients have client_ids in the high bits. Returns the value of the parent
+ * client if one exists. */
+static inline int64_t subclient(const int64_t client_id)
+{
+	return (client_id >> 32);
+}
+
 #endif /* CKPOOL_H */
