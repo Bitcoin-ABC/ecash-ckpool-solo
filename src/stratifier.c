@@ -1380,6 +1380,12 @@ static void submit_transaction_array(ckpool_t *ckp, const json_t *arr)
 
 static void check_incomplete_wbs(ckpool_t *ckp, sdata_t *sdata);
 
+static void clear_txn(txntable_t *txn)
+{
+	free(txn->data);
+	free(txn);
+}
+
 static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool local)
 {
 	json_t *val, *txn_array = json_array(), *purged_txns = json_array();
@@ -1401,19 +1407,26 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 		HASH_DEL(sdata->txns, tmp);
 		txn_val = json_string(tmp->data);
 		json_array_append_new(purged_txns, txn_val);
-		dealloc(tmp->data);
-		dealloc(tmp);
+		clear_txn(tmp);
 		purged++;
 	}
 	/* Add the new transactions to the transaction table */
 	HASH_ITER(hh, txns, tmp, tmpa) {
+		txntable_t *found;
 		json_t *txn_val;
 
+		HASH_DEL(txns, tmp);
+		/* Check one last time this txn hasn't already been added in the
+		 * interim. */
+		HASH_FIND_STR(sdata->txns, tmp->hash, found);
+		if (found) {
+			clear_txn(tmp);
+			continue;
+		}
 		/* Propagate transaction here */
 		JSON_CPACK(txn_val, "{ss,ss}", "hash", tmp->hash, "data", tmp->data);
 		json_array_append_new(txn_array, txn_val);
 		/* Move to the sdata transaction table */
-		HASH_DEL(txns, tmp);
 		HASH_ADD_STR(sdata->txns, hash, tmp);
 		added++;
 	}
