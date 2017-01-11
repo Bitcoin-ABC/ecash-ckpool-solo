@@ -1238,6 +1238,8 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 			break;
 		if (wb == tmp)
 			continue;
+		if (wb->readcount)
+			continue;
 		/*  Age old workbases older than 10 minutes old */
 		if (tmp->gentime.tv_sec < wb->gentime.tv_sec - 600) {
 			HASH_DEL(sdata->workbases, tmp);
