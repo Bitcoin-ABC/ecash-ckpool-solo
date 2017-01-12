@@ -1780,14 +1780,19 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	bool ret = false;
 	int i, len = 0;
 
+	/* We'll only see this on testnet now */
+	if (unlikely(!wb->txns)) {
+		ret = true;
+		goto out;
+	}
 	if (likely(hashes))
 		len = strlen(hashes);
 	if (!hashes || !len)
-		return ret;
+		goto out;
 
 	if (unlikely(len < wb->txns * 65)) {
 		LOGERR("Truncated transactions in rebuild_txns only %d long", len);
-		return ret;
+		goto out;
 	}
 	ret = true;
 	txn_array = json_array();
@@ -1859,7 +1864,7 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 
 	json_decref(txn_array);
 	json_decref(missing_txns);
-
+out:
 	return ret;
 }
 
@@ -2012,10 +2017,8 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t clie
 		/* This is a workbase from a trusted remote */
 		wb->merkle_array = json_object_dup(val, "merklehash");
 		json_intcpy(&wb->merkles, val, "merkles");
-		if (!rebuild_txns(ckp, sdata, wb)) {
+		if (!rebuild_txns(ckp, sdata, wb))
 			wb->incomplete = true;
-			wb->txns = 0;
-		}
 	} else {
 		if (!rebuild_txns(ckp, sdata, wb)) {
 			free(wb);
