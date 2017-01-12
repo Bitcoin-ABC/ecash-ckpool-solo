@@ -6098,11 +6098,8 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
 	process_block(ckp, wb, coinbase, cblen, data, hash, swap32, blockhash);
-	if (!ckp->btcsolo) {
-		/* Solo doesn't do nodes and the locking is backwards here... */
-		send_node_block(sdata, client->enonce1, nonce, nonce2, ntime32, wb->id,
-				diff, client->id);
-	}
+	send_node_block(sdata, client->enonce1, nonce, nonce2, ntime32, wb->id,
+			diff, client->id);
 
 	JSON_CPACK(val, "{si,ss,ss,sI,ss,ss,sI,ss,ss,ss,sI,sf,ss,ss,ss,ss}",
 			"height", wb->height,
