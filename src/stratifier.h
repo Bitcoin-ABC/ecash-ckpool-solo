@@ -18,8 +18,6 @@ void parse_upstream_block(ckpool_t *ckp, json_t *val);
 void parse_upstream_reqtxns(ckpool_t *ckp, json_t *val);
 char *stratifier_stats(ckpool_t *ckp, void *data);
 void stratifier_add_recv(ckpool_t *ckp, json_t *val);
-void stratifier_block_solve(ckpool_t *ckp, const char *blockhash);
-void stratifier_block_reject(ckpool_t *ckp, const char *blockhash);
 void *stratifier(void *arg);
 
 #endif /* STRATIFIER_H */

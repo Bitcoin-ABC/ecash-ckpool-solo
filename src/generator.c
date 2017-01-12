@@ -312,13 +312,12 @@ static void clear_unix_msg(unix_msg_t **umsg)
 	}
 }
 
-void generator_submitblock(ckpool_t *ckp, char *buf)
+bool generator_submitblock(ckpool_t *ckp, char *buf)
 {
 	gdata_t *gdata = ckp->gdata;
 	server_instance_t *si;
 	bool warn = false;
 	connsock_t *cs;
-	bool ret;
 
 	while (unlikely(!(si = gdata->current_si))) {
 		if (!warn)
@@ -328,12 +327,7 @@ void generator_submitblock(ckpool_t *ckp, char *buf)
 	}
 	cs = &si->cs;
 	LOGNOTICE("Submitting block data!");
-	ret = submit_block(cs, buf + 64 + 1);
-	memset(buf + 64, 0, 1);
-	if (ret)
-		stratifier_block_solve(ckp, buf);
-	else
-		stratifier_block_reject(ckp, buf);
+	return submit_block(cs, buf + 64 + 1);
 }
 
 static void gen_loop(proc_instance_t *pi)

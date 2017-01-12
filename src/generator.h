@@ -21,7 +21,7 @@ json_t *generator_genbase(ckpool_t *ckp);
 int generator_getbest(ckpool_t *ckp, char *hash);
 bool generator_checkaddr(ckpool_t *ckp, const char *addr);
 char *generator_get_txn(ckpool_t *ckp, const char *hash);
-void generator_submitblock(ckpool_t *ckp, char *buf);
+bool generator_submitblock(ckpool_t *ckp, char *buf);
 void *generator(void *arg);
 
 #endif /* GENERATOR_H */
