@@ -2015,7 +2015,7 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t clie
 			wb->incomplete = true;
 	} else {
 		if (!rebuild_txns(ckp, sdata, wb)) {
-			free(wb);
+			clear_workbase(ckp, wb);
 			return;
 		}
 	}
