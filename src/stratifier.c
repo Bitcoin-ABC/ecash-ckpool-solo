@@ -1842,7 +1842,10 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	}
 
 	if (ret) {
-		LOGINFO("Rebuilt txns into workbase with %d transactions", (int)i);
+		LOGINFO("Rebuilt txns into workbase with %d transactions", i);
+		/* These two structures are regenerated so free their ram */
+		json_decref(wb->merkle_array);
+		dealloc(wb->txn_hashes);
 		wb_merkle_bins(ckp, sdata, wb, txn_array, false);
 	} else {
 		if (!sdata->wbincomplete) {
