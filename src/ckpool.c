@@ -899,7 +899,7 @@ out_empty:
 out:
 	if (warning) {
 		if (info_only)
-			LOGNOTICE("%s", warning);
+			LOGINFO("%s", warning);
 		else
 			LOGWARNING("%s", warning);
 		free(warning);
