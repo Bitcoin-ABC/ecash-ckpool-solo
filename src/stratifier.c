@@ -2166,14 +2166,13 @@ static void send_node_block(sdata_t *sdata, const char *enonce1, const char *non
 
 /* Process a block into a message for the generator to submit. Must hold
  * workbase readcount */
-static bool
-process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const int cblen,
+static char *
+process_block(const workbase_t *wb, const char *coinbase, const int cblen,
 	      const uchar *data, const uchar *hash, uchar *flip32, char *blockhash)
 {
 	char *gbt_block, varint[12];
 	int txns = wb->txns + 1;
 	char hexcoinbase[1024];
-	bool ret;
 
 	flip_32(flip32, hash);
 	__bin2hex(blockhash, flip32, 32);
@@ -2201,10 +2200,15 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 	strcat(gbt_block, hexcoinbase);
 	if (wb->txns)
 		realloc_strcat(&gbt_block, wb->txn_data);
+	return gbt_block;
+}
 
-	ret = generator_submitblock(ckp, gbt_block);
+/* Submit block data locally, absorbing and freeing gbt_block */
+static bool local_block_submit(ckpool_t *ckp, char *gbt_block, const uchar *flip32, int height)
+{
+	bool ret = generator_submitblock(ckp, gbt_block);
+
 	free(gbt_block);
-
 	/* Check failures that may be inconclusive but were submitted via other
 	 * means. */
 	if (!ret) {
@@ -2213,10 +2217,10 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 
 		swap_256(swap256, flip32);
 		__bin2hex(rhash, swap256, 32);
-		if (generator_get_blockhash(ckp, wb->height, heighthash)) {
+		if (generator_get_blockhash(ckp, height, heighthash)) {
 			ret = !strncmp(rhash, heighthash, 64);
 			LOGWARNING("Hash for block height %d confirms block was %s",
-				   wb->height, ret ? "ACCEPTED" : "REJECTED");
+				   height, ret ? "ACCEPTED" : "REJECTED");
 		}
 	}
 	return ret;
@@ -2266,8 +2270,8 @@ static void block_reject(json_t *val);
 
 static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 {
-	char *coinbase = NULL, *enonce1 = NULL, *nonce = NULL, *nonce2 = NULL;
-	uchar *enonce1bin = NULL, hash[32], swap[80], swap32[32];
+	char *coinbase = NULL, *enonce1 = NULL, *nonce = NULL, *nonce2 = NULL, *gbt_block;
+	uchar *enonce1bin = NULL, hash[32], swap[80], flip32[32];
 	char blockhash[68], cdfield[64];
 	json_t *bval, *bval_copy;
 	int enonce1len, cblen;
@@ -2321,7 +2325,8 @@ static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 
 	/* Fill in the hashes */
 	share_diff(coinbase, enonce1bin, wb, nonce2, ntime32, nonce, hash, swap, &cblen);
-	ret = process_block(ckp, wb, coinbase, cblen, swap, hash, swap32, blockhash);
+	gbt_block = process_block(wb, coinbase, cblen, swap, hash, flip32, blockhash);
+	ret = local_block_submit(ckp, gbt_block, flip32, wb->height);
 
 	JSON_CPACK(bval, "{si,ss,ss,sI,ss,ss,ss,sI,sf,ss,ss,ss,ss}",
 			 "height", wb->height,
@@ -6020,11 +6025,11 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 		const uchar *hash, const double diff, const char *coinbase, int cblen,
 		const char *nonce2, const char *nonce, const uint32_t ntime32, const bool stale)
 {
-	char blockhash[68], cdfield[64];
+	char blockhash[68], cdfield[64], *gbt_block;
 	sdata_t *sdata = client->sdata;
 	json_t *val = NULL, *val_copy;
 	ckpool_t *ckp = wb->ckp;
-	uchar swap32[32];
+	uchar flip32[32];
 	ts_t ts_now;
 	bool ret;
 
@@ -6040,7 +6045,7 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	ts_realtime(&ts_now);
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
-	ret = process_block(ckp, wb, coinbase, cblen, data, hash, swap32, blockhash);
+	gbt_block = process_block(wb, coinbase, cblen, data, hash, flip32, blockhash);
 	send_node_block(sdata, client->enonce1, nonce, nonce2, ntime32, wb->id,
 			diff, client->id);
 
@@ -6071,6 +6076,9 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 		ckdbq_add(ckp, ID_BLOCK, val);
 	}
 
+	/* Submit block locally after sending it to remote locations avoiding
+	 * the delay of local verification */
+	ret = local_block_submit(ckp, gbt_block, flip32, wb->height);
 	if (ret)
 		block_solve(ckp, val_copy);
 	else
@@ -7342,8 +7350,8 @@ static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 	if (unlikely(!wb))
 		LOGWARNING("Inadequate data locally to attempt submit of remote block");
 	else {
-		uchar swap[80], hash[32], hash1[32], swap32[32];
-		char *coinbase = alloca(cblen);
+		uchar swap[80], hash[32], hash1[32], flip32[32];
+		char *coinbase = alloca(cblen), *gbt_block;
 		char blockhash[68];
 
 		LOGWARNING("Possible remote block solve diff %lf !", diff);
@@ -7351,9 +7359,10 @@ static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 		hex2bin(swap, swaphex, 80);
 		sha256(swap, 80, hash1);
 		sha256(hash1, 32, hash);
-		/* Ignore the retrun value of process_block here as we rely on
-		 * the remote server to give us the ID_BLOCK responses */
-		process_block(ckp, wb, coinbase, cblen, swap, hash, swap32, blockhash);
+		gbt_block = process_block(wb, coinbase, cblen, swap, hash, flip32, blockhash);
+		/* Ignore the return value of local_block_submit here as we rely
+		 * on the remote server to give us the ID_BLOCK responses */
+		local_block_submit(ckp, gbt_block, flip32, wb->height);
 		put_remote_workbase(sdata, wb);
 	}
 
