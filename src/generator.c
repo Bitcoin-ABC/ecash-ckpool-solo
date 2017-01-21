@@ -330,6 +330,20 @@ bool generator_submitblock(ckpool_t *ckp, char *buf)
 	return submit_block(cs, buf + 64 + 1);
 }
 
+bool generator_get_blockhash(ckpool_t *ckp, int height, char *hash)
+{
+	gdata_t *gdata = ckp->gdata;
+	server_instance_t *si;
+	connsock_t *cs;
+
+	if (unlikely(!(si = gdata->current_si))) {
+		LOGWARNING("No live current server in generator_get_blockhash");
+		return false;
+	}
+	cs = &si->cs;
+	return get_blockhash(cs, height, hash);
+}
+
 static void gen_loop(proc_instance_t *pi)
 {
 	server_instance_t *si = NULL, *old_si;

@@ -2168,7 +2168,7 @@ static void send_node_block(sdata_t *sdata, const char *enonce1, const char *non
  * workbase readcount */
 static bool
 process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const int cblen,
-	      const uchar *data, const uchar *hash, uchar *swap32, char *blockhash)
+	      const uchar *data, const uchar *hash, uchar *flip32, char *blockhash)
 {
 	char *gbt_block, varint[12];
 	int txns = wb->txns + 1;
@@ -2176,8 +2176,8 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 	bool ret;
 
 	gbt_block = ckalloc(1024);
-	flip_32(swap32, hash);
-	__bin2hex(blockhash, swap32, 32);
+	flip_32(flip32, hash);
+	__bin2hex(blockhash, flip32, 32);
 
 	/* Message format: "hash,data" */
 	sprintf(gbt_block, "%s,", blockhash);
@@ -2205,6 +2205,21 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 
 	ret = generator_submitblock(ckp, gbt_block);
 	free(gbt_block);
+
+	/* Check failures that may be inconclusive but were submitted via other
+	 * means. */
+	if (!ret) {
+		char heighthash[68] = {}, rhash[68] = {};
+		uchar swap256[32];
+
+		swap_256(swap256, flip32);
+		__bin2hex(rhash, swap256, 32);
+		if (generator_get_blockhash(ckp, wb->height, heighthash)) {
+			ret = !strncmp(rhash, heighthash, 64);
+			LOGWARNING("Hash for block height %d confirms block was %s",
+				   wb->height, ret ? "ACCEPTED" : "REJECTED");
+		}
+	}
 	return ret;
 }
 
