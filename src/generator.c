@@ -327,7 +327,7 @@ bool generator_submitblock(ckpool_t *ckp, char *buf)
 	}
 	cs = &si->cs;
 	LOGNOTICE("Submitting block data!");
-	return submit_block(cs, buf + 64 + 1);
+	return submit_block(cs, buf);
 }
 
 bool generator_get_blockhash(ckpool_t *ckp, int height, char *hash)

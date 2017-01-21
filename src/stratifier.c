@@ -2175,13 +2175,12 @@ process_block(ckpool_t *ckp, const workbase_t *wb, const char *coinbase, const i
 	char hexcoinbase[1024];
 	bool ret;
 
-	gbt_block = ckalloc(1024);
 	flip_32(flip32, hash);
 	__bin2hex(blockhash, flip32, 32);
 
-	/* Message format: "hash,data" */
-	sprintf(gbt_block, "%s,", blockhash);
-	__bin2hex(gbt_block + 64 + 1, data, 80);
+	/* Message format: "data" */
+	gbt_block = ckzalloc(1024);
+	__bin2hex(gbt_block, data, 80);
 	if (txns < 0xfd) {
 		uint8_t val8 = txns;
 
