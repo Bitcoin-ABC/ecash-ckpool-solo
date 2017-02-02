@@ -737,10 +737,10 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 		wb->coinb2len += wb->coinb3len;
 		wb->coinb3len = 0;
 		dealloc(wb->coinb3bin);
-		wb->coinb2 = bin2hex(wb->coinb2bin, wb->coinb2len);
-		LOGDEBUG("Coinb2: %s", wb->coinb2);
-	} else
-		wb->coinb2 = strdup("");
+	}
+	/* Set this just for node compatibility, though it's unused */
+	wb->coinb2 = bin2hex(wb->coinb2bin, wb->coinb2len);
+	LOGDEBUG("Coinb2: %s", wb->coinb2);
 	/* Coinbases 2 +/- 3 templates complete */
 
 	snprintf(header, 225, "%s%s%s%s%s%s%s",
@@ -2058,15 +2058,10 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t clie
 	json_intcpy(&wb->coinb1len, val, "coinb1len");
 	wb->coinb1bin = ckzalloc(wb->coinb1len);
 	hex2bin(wb->coinb1bin, wb->coinb1, wb->coinb1len);
-	/* This check is needed because coinb2len is zero in btcsolo */
-	if (ckp->btcsolo)
-		wb->coinb2 = strdup("");
-	else {
-		json_strdup(&wb->coinb2, val, "coinb2");
-		json_intcpy(&wb->coinb2len, val, "coinb2len");
-		wb->coinb2bin = ckzalloc(wb->coinb2len);
-		hex2bin(wb->coinb2bin, wb->coinb2, wb->coinb2len);
-	}
+	json_strdup(&wb->coinb2, val, "coinb2");
+	json_intcpy(&wb->coinb2len, val, "coinb2len");
+	wb->coinb2bin = ckzalloc(wb->coinb2len);
+	hex2bin(wb->coinb2bin, wb->coinb2, wb->coinb2len);
 	json_intcpy(&wb->enonce1varlen, val, "enonce1varlen");
 	json_intcpy(&wb->enonce2varlen, val, "enonce2varlen");
 	ts_realtime(&wb->gentime);
@@ -6961,7 +6956,7 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 
 		/* Add this client as a passthrough in the connector and
 		 * add it to the list of mining nodes in the stratifier */
-		if (!ckp->nodeserver[client->server] || ckp->proxy || ckp->btcsolo) {
+		if (!ckp->nodeserver[client->server] || ckp->proxy) {
 			LOGNOTICE("Dropping client %s %s trying to authorise as node on non node server %d",
 				  client->identity, client->address, client->server);
 			connector_drop_client(ckp, client_id);
