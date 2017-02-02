@@ -137,7 +137,7 @@ struct connector_data {
 	int clients_generated;
 	int dead_generated;
 
-	int64_t client_id;
+	int64_t client_ids;
 
 	/* client message process queue */
 	ckmsgq_t *cmpq;
@@ -246,6 +246,20 @@ static void recycle_client(cdata_t *cdata, client_instance_t *client)
 	ck_wunlock(&cdata->lock);
 }
 
+/* Allows the stratifier to get a unique local virtualid for subclients */
+int64_t connector_newclientid(ckpool_t *ckp)
+{
+	int64_t ret;
+
+	cdata_t *cdata = ckp->cdata;
+
+	ck_wlock(&cdata->lock);
+	ret = cdata->client_ids++;
+	ck_wunlock(&cdata->lock);
+
+	return ret;
+}
+
 /* Accepts incoming connections on the server socket and generates client
  * instances */
 static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
@@ -313,7 +327,7 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 		cdata->nfds, fd, no_clients, client->address_name, port);
 
 	ck_wlock(&cdata->lock);
-	client->id = cdata->client_id++;
+	client->id = cdata->client_ids++;
 	HASH_ADD_I64(cdata->clients, id, client);
 	cdata->nfds++;
 	ck_wunlock(&cdata->lock);
@@ -1657,7 +1671,7 @@ void *connector(void *arg)
 	cdata->nfds = 0;
 	/* Set the client id to the highest serverurl count to distinguish
 	 * them from the server fds in epoll. */
-	cdata->client_id = ckp->serverurls;
+	cdata->client_ids = ckp->serverurls;
 	mutex_init(&cdata->sender_lock);
 	cond_init(&cdata->sender_cond);
 	create_pthread(&cdata->pth_sender, sender, cdata);
