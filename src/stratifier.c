@@ -1024,8 +1024,7 @@ static void send_node_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *
 
 	wb_val = json_object();
 
-	ck_rlock(&sdata->instance_lock);
-	json_set_int(wb_val, "jobid", wb->id);
+	json_set_int(wb_val, "jobid", wb->mapped_id);
 	json_set_string(wb_val, "target", wb->target);
 	json_set_double(wb_val, "diff", wb->diff);
 	json_set_int(wb_val, "version", wb->version);
@@ -1048,6 +1047,7 @@ static void send_node_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *
 	json_set_int(wb_val, "coinb2len", wb->coinb2len);
 	json_set_string(wb_val, "coinb2", wb->coinb2);
 
+	ck_rlock(&sdata->instance_lock);
 	DL_FOREACH(sdata->node_instances, client) {
 		ckmsg_t *client_msg;
 		smsg_t *msg;
@@ -1211,7 +1211,7 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 	ck_wlock(&sdata->workbase_lock);
 	ckp_sdata->workbases_generated++;
 	if (!ckp->proxy)
-		wb->id = sdata->workbase_id++;
+		wb->mapped_id = wb->id = sdata->workbase_id++;
 	else
 		sdata->workbase_id = wb->id;
 	if (strncmp(wb->prevhash, sdata->lasthash, 64)) {
@@ -1914,8 +1914,12 @@ static void check_incomplete_wbs(ckpool_t *ckp, sdata_t *sdata)
 
 static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 {
+	stratum_instance_t *client;
+	ckmsg_t *bulk_send = NULL;
 	workbase_t *tmp, *tmpa;
-	json_t *val;
+	json_t *val, *wb_val;
+	int messages = 0;
+	int64_t skip;
 
 	ts_realtime(&wb->gentime);
 
@@ -1948,47 +1952,61 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	/* Replace jobid with mapped id */
 	json_set_int64(val, "jobid", wb->mapped_id);
 
-	/* If this is the upstream pool, send a copy of this to all OTHER remote
-	 * trusted servers as well */
-	if (!ckp->remote) {
-		json_t *wb_val = json_deep_copy(val);
-		stratum_instance_t *client;
-		ckmsg_t *bulk_send = NULL;
-		int messages = 0;
+	wb_val = json_deep_copy(val);
 
-		/* Strip unnecessary fields and add extra fields needed */
-		strip_fields(ckp, wb_val);
-		json_set_int(wb_val, "txns", wb->txns);
-		json_set_string(wb_val, "txn_hashes", wb->txn_hashes);
-		json_set_int(wb_val, "merkles", wb->merkles);
+	/* Strip unnecessary fields and add extra fields needed */
+	strip_fields(ckp, wb_val);
+	json_set_int(wb_val, "txns", wb->txns);
+	json_set_string(wb_val, "txn_hashes", wb->txn_hashes);
+	json_set_int(wb_val, "merkles", wb->merkles);
 
-		ck_rlock(&sdata->instance_lock);
-		DL_FOREACH(sdata->remote_instances, client) {
-			ckmsg_t *client_msg;
-			json_t *json_msg;
-			smsg_t *msg;
+	skip = subclient(wb->client_id);
 
-			/* Don't send remote workinfo back to same remote */
-			if (client->id == wb->client_id)
-				continue;
-			json_msg = json_deep_copy(wb_val);
-			json_set_string(json_msg, "method", stratum_msgs[SM_WORKINFO]);
-			client_msg = ckalloc(sizeof(ckmsg_t));
-			msg = ckzalloc(sizeof(smsg_t));
-			msg->json_msg = json_msg;
-			msg->client_id = client->id;
-			client_msg->data = msg;
-			DL_APPEND(bulk_send, client_msg);
-			messages++;
-		}
-		ck_runlock(&sdata->instance_lock);
+	/* Send a copy of this to all OTHER remote trusted servers as well */
+	ck_rlock(&sdata->instance_lock);
+	DL_FOREACH(sdata->remote_instances, client) {
+		ckmsg_t *client_msg;
+		json_t *json_msg;
+		smsg_t *msg;
 
-		json_decref(wb_val);
+		/* Don't send remote workinfo back to the source remote */
+		if (client->id == wb->client_id)
+			continue;
+		json_msg = json_deep_copy(wb_val);
+		json_set_string(json_msg, "method", stratum_msgs[SM_WORKINFO]);
+		client_msg = ckalloc(sizeof(ckmsg_t));
+		msg = ckzalloc(sizeof(smsg_t));
+		msg->json_msg = json_msg;
+		msg->client_id = client->id;
+		client_msg->data = msg;
+		DL_APPEND(bulk_send, client_msg);
+		messages++;
+	}
+	DL_FOREACH(sdata->node_instances, client) {
+		ckmsg_t *client_msg;
+		json_t *json_msg;
+		smsg_t *msg;
 
-		if (bulk_send) {
-			LOGINFO("Sending remote workinfo to %d other remote servers", messages);
-			ssend_bulk_postpone(sdata, bulk_send, messages);
-		}
+		/* Don't send node workinfo back to the source node */
+		if (client->id == skip)
+			continue;
+		json_msg = json_deep_copy(wb_val);
+		json_set_string(json_msg, "node.method", stratum_msgs[SM_WORKINFO]);
+		client_msg = ckalloc(sizeof(ckmsg_t));
+		msg = ckzalloc(sizeof(smsg_t));
+		msg->json_msg = json_msg;
+		msg->client_id = client->id;
+		client_msg->data = msg;
+		DL_APPEND(bulk_send, client_msg);
+		messages++;
+	}
+	ck_runlock(&sdata->instance_lock);
+
+	json_decref(wb_val);
+
+	if (bulk_send) {
+		LOGINFO("Sending remote workinfo to %d other remote servers", messages);
+		ssend_bulk_postpone(sdata, bulk_send, messages);
 	}
 
 	ckdbq_add(ckp, ID_WORKINFO, val);
@@ -2128,53 +2146,80 @@ share_diff(char *coinbase, const uchar *enonce1bin, const workbase_t *wb, const 
 	return diff_from_target(hash);
 }
 
-/* Entered with workbase readcount, grabs instance lock */
-static void send_node_block(sdata_t *sdata, const char *enonce1, const char *nonce,
-			    const char *nonce2, const uint32_t ntime32, const int64_t jobid,
-			    const double diff, const int64_t client_id)
+static void add_remote_blockdata(ckpool_t *ckp, json_t *val, const int cblen, const char *coinbase,
+				 const uchar *data)
+{
+	char *buf;
+
+	json_set_string(val, "name", ckp->name);
+	json_set_int(val, "cblen", cblen);
+	buf = bin2hex(coinbase, cblen);
+	json_set_string(val, "coinbasehex", buf);
+	free(buf);
+	buf = bin2hex(data, 80);
+	json_set_string(val, "swaphex", buf);
+	free(buf);
+}
+
+/* Entered with workbase readcount, grabs instance_lock. client_id is where the
+ * block originated. */
+static void send_nodes_block(sdata_t *sdata, const json_t *block_val, const int64_t client_id)
 {
 	stratum_instance_t *client;
-	int64_t skip, messages = 0;
 	ckmsg_t *bulk_send = NULL;
+	int messages = 0;
+	int64_t skip;
 
 	/* Don't send the block back to a remote node if that's where it was
 	 * found. */
 	skip = subclient(client_id);
 
 	ck_rlock(&sdata->instance_lock);
+	DL_FOREACH(sdata->node_instances, client) {
+		ckmsg_t *client_msg;
+		json_t *json_msg;
+		smsg_t *msg;
+
+		if (client->id == skip)
+			continue;
+		json_msg = json_deep_copy(block_val);
+		json_set_string(json_msg, "node.method", stratum_msgs[SM_BLOCK]);
+		client_msg = ckalloc(sizeof(ckmsg_t));
+		msg = ckzalloc(sizeof(smsg_t));
+		msg->json_msg = json_msg;
+		msg->client_id = client->id;
+		client_msg->data = msg;
+		DL_APPEND(bulk_send, client_msg);
+		messages++;
+	}
+	ck_runlock(&sdata->instance_lock);
+
+	if (bulk_send) {
+		LOGNOTICE("Sending block to %d mining nodes", messages);
+		ssend_bulk_prepend(sdata, bulk_send, messages);
+	}
+
+}
+
+
+/* Entered with workbase readcount. */
+static void send_node_block(ckpool_t *ckp, sdata_t *sdata, const char *enonce1, const char *nonce,
+			    const char *nonce2, const uint32_t ntime32, const int64_t jobid,
+			    const double diff, const int64_t client_id,
+			    const char *coinbase, const int cblen, const uchar *data)
+{
 	if (sdata->node_instances) {
 		json_t *val = json_object();
 
-		json_set_string(val, "node.method", stratum_msgs[SM_BLOCK]);
 		json_set_string(val, "enonce1", enonce1);
 		json_set_string(val, "nonce", nonce);
 		json_set_string(val, "nonce2", nonce2);
 		json_set_uint32(val, "ntime32", ntime32);
 		json_set_int64(val, "jobid", jobid);
 		json_set_double(val, "diff", diff);
-		DL_FOREACH(sdata->node_instances, client) {
-			ckmsg_t *client_msg;
-			json_t *json_msg;
-			smsg_t *msg;
-
-			if (client->id == skip)
-				continue;
-			json_msg = json_deep_copy(val);
-			client_msg = ckalloc(sizeof(ckmsg_t));
-			msg = ckzalloc(sizeof(smsg_t));
-			msg->json_msg = json_msg;
-			msg->client_id = client->id;
-			client_msg->data = msg;
-			DL_APPEND(bulk_send, client_msg);
-			messages++;
-		}
+		add_remote_blockdata(ckp, val, cblen, coinbase, data);
+		send_nodes_block(sdata, val, client_id);
 		json_decref(val);
-	}
-	ck_runlock(&sdata->instance_lock);
-
-	if (bulk_send) {
-		LOGNOTICE("Sending block to mining nodes");
-		ssend_bulk_prepend(sdata, bulk_send, messages);
 	}
 }
 
@@ -2293,7 +2338,8 @@ static void block_reject(json_t *val);
 
 static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 {
-	char *coinbase = NULL, *enonce1 = NULL, *nonce = NULL, *nonce2 = NULL, *gbt_block;
+	char *coinbase = NULL, *enonce1 = NULL, *nonce = NULL, *nonce2 = NULL, *gbt_block,
+		*coinbasehex, *swaphex;
 	uchar *enonce1bin = NULL, hash[32], swap[80], flip32[32];
 	char blockhash[68], cdfield[64];
 	json_t *bval, *bval_copy;
@@ -2340,14 +2386,31 @@ static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 		LOGWARNING("Failed to find workbase with jobid %"PRId64" in node method block", id);
 		goto out;
 	}
-	/* Now we have enough to assemble a block */
-	coinbase = ckalloc(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len);
-	enonce1len = wb->enonce1constlen + wb->enonce1varlen;
-	enonce1bin = ckalloc(enonce1len);
-	hex2bin(enonce1bin, enonce1, enonce1len);
 
-	/* Fill in the hashes */
-	share_diff(coinbase, enonce1bin, wb, nonce2, ntime32, nonce, hash, swap, &cblen);
+	/* Get parameters if upstream pool supports them with new format */
+	json_get_string(&coinbasehex, val, "coinbasehex");
+	json_get_int(&cblen, val, "cblen");
+	json_get_string(&swaphex, val, "swaphex");
+	if (coinbasehex && cblen && swaphex) {
+		uchar hash1[32];
+
+		coinbase = alloca(cblen);
+		hex2bin(coinbase, coinbasehex, cblen);
+		hex2bin(swap, swaphex, 80);
+		sha256(swap, 80, hash1);
+		sha256(hash1, 32, hash);
+	} else {
+		/* Rebuild the old way if we can if the upstream pool is using
+		 * the old format only */
+		enonce1len = wb->enonce1constlen + wb->enonce1varlen;
+		enonce1bin = alloca(enonce1len);
+		hex2bin(enonce1bin, enonce1, enonce1len);
+		coinbase = alloca(wb->coinb1len + wb->enonce1constlen + wb->enonce1varlen + wb->enonce2varlen + wb->coinb2len);
+		/* Fill in the hashes */
+		share_diff(coinbase, enonce1bin, wb, nonce2, ntime32, nonce, hash, swap, &cblen);
+	}
+
+	/* Now we have enough to assemble a block */
 	gbt_block = process_block(wb, coinbase, cblen, swap, hash, flip32, blockhash);
 	ret = local_block_submit(ckp, gbt_block, flip32, wb->height);
 
@@ -2374,8 +2437,6 @@ static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 	else
 		block_reject(bval_copy);
 out:
-	free(enonce1bin);
-	free(coinbase);
 	free(nonce2);
 	free(nonce);
 	free(enonce1);
@@ -6017,21 +6078,6 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 	stratum_send_diff(sdata, client);
 }
 
-static void add_remote_blockdata(ckpool_t *ckp, json_t *val, const int cblen, const char *coinbase,
-				 const uchar *data)
-{
-	char *buf;
-
-	json_set_string(val, "name", ckp->name);
-	json_set_int(val, "cblen", cblen);
-	buf = bin2hex(coinbase, cblen);
-	json_set_string(val, "coinbasehex", buf);
-	free(buf);
-	buf = bin2hex(data, 80);
-	json_set_string(val, "swaphex", buf);
-	free(buf);
-}
-
 static void
 downstream_block(ckpool_t *ckp, sdata_t *sdata, const json_t *val, const int cblen,
 		 const char *coinbase, const uchar *data)
@@ -6074,11 +6120,10 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
 	gbt_block = process_block(wb, coinbase, cblen, data, hash, flip32, blockhash);
-	send_node_block(sdata, client->enonce1, nonce, nonce2, ntime32, wb->id,
-			diff, client->id);
+	send_node_block(ckp, sdata, client->enonce1, nonce, nonce2, ntime32, wb->id,
+			diff, client->id, coinbase, cblen, data);
 
 	val = json_object();
-	// JSON_CPACK(val, "{si,ss,ss,sI,ss,ss,sI,ss,ss,ss,sI,sf,ss,ss,ss,ss}",
 	json_set_int(val, "height", wb->height);
 	json_set_string(val,"blockhash", blockhash);
 	json_set_string(val,"confirmed", "n");
@@ -6092,6 +6137,7 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	json_set_string(val, "enonce1", client->enonce1);
 	json_set_string(val, "nonce2", nonce2);
 	json_set_string(val, "nonce", nonce);
+	json_set_uint32(val, "ntime32", ntime32);
 	json_set_int64(val, "reward", wb->coinbasevalue);
 	json_set_double(val, "diff", diff);
 	json_set_string(val, "createdate", cdfield);
@@ -7429,6 +7475,9 @@ static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 		sha256(swap, 80, hash1);
 		sha256(hash1, 32, hash);
 		gbt_block = process_block(wb, coinbase, cblen, swap, hash, flip32, blockhash);
+		/* Note nodes use jobid of the mapped_id instead of workinfoid */
+		json_set_int64(val, "jobid", wb->mapped_id);
+		send_nodes_block(sdata, val, client_id);
 		/* We rely on the remote server to give us the ID_BLOCK
 		 * responses, so only use this response to determine if we
 		 * should reset the best shares. */
