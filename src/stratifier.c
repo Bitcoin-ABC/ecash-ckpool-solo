@@ -530,7 +530,6 @@ struct stratifier_data {
 	ckmsgq_t *sshareq;	// Stratum share sends
 	ckmsgq_t *sauthq;	// Stratum authorisations
 	ckmsgq_t *stxnq;	// Transaction requests
-	ckmsg_t *postponed;	// List of messages postponed till next update
 
 	int user_instance_id;
 
@@ -947,32 +946,6 @@ static void ssend_bulk_prepend(sdata_t *sdata, ckmsg_t *bulk_send, const int mes
 	mutex_unlock(ssends->lock);
 }
 
-/* List of messages we intentionally want to postpone till after the next bulk
- * update - eg. workinfo which is large and we don't want to delay updates */
-static void ssend_bulk_postpone(sdata_t *sdata, ckmsg_t *bulk_send, const int messages)
-{
-	ckmsgq_t *ssends = sdata->ssends;
-
-	mutex_lock(ssends->lock);
-	DL_CONCAT(sdata->postponed, bulk_send);
-	ssends->messages += messages;
-	mutex_unlock(ssends->lock);
-}
-
-/* Send any postponed bulk messages */
-static void send_postponed(sdata_t *sdata)
-{
-	ckmsgq_t *ssends = sdata->ssends;
-
-	mutex_lock(ssends->lock);
-	if (sdata->postponed) {
-		DL_CONCAT(ssends->msgs, sdata->postponed);
-		sdata->postponed = NULL;
-		pthread_cond_signal(ssends->cond);
-	}
-	mutex_unlock(ssends->lock);
-}
-
 /* Strip fields that will be recreated upstream or won't be used to minimise
  * bandwidth. */
 static void strip_fields(ckpool_t *ckp, json_t *val)
@@ -1083,15 +1056,9 @@ static void send_node_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *
 
 	json_decref(wb_val);
 
-	/* We send workinfo postponed till after the stratum updates are sent
-	 * out to minimise any lag seen by clients getting updates. It means
-	 * the remote node will know about the block change later which will
-	 * make it think clients are sending invalid shares (which won't count)
-	 * and potentially not be able to submit a block locally if it doesn't
-	 * have the workinfo in time. */
 	if (bulk_send) {
 		LOGINFO("Sending workinfo to mining nodes");
-		ssend_bulk_postpone(sdata, bulk_send, messages);
+		ssend_bulk_append(sdata, bulk_send, messages);
 	}
 }
 
@@ -1705,7 +1672,6 @@ out:
 
 #define SSEND_PREPEND	0
 #define SSEND_APPEND	1
-#define SSEND_POSTPONE	2
 
 /* Downstream a json message to all remote servers except for the one matching
  * client_id */
@@ -1745,9 +1711,6 @@ static void downstream_json(sdata_t *sdata, const json_t *val, const int64_t cli
 			case SSEND_APPEND:
 				ssend_bulk_append(sdata, bulk_send, messages);
 				break;
-			case SSEND_POSTPONE:
-				ssend_bulk_postpone(sdata, bulk_send, messages);
-				break;
 		}
 	}
 }
@@ -1767,7 +1730,7 @@ static void request_txns(ckpool_t *ckp, sdata_t *sdata, json_t *txns)
 		/* We don't know which remote sent the transaction hash so ask
 		 * all of them for it */
 		json_set_string(val, "method", stratum_msgs[SM_REQTXNS]);
-		downstream_json(sdata, val, 0, SSEND_POSTPONE);
+		downstream_json(sdata, val, 0, SSEND_APPEND);
 	}
 }
 
@@ -2006,7 +1969,7 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 
 	if (bulk_send) {
 		LOGINFO("Sending remote workinfo to %d other remote servers", messages);
-		ssend_bulk_postpone(sdata, bulk_send, messages);
+		ssend_bulk_append(sdata, bulk_send, messages);
 	}
 
 	ckdbq_add(ckp, ID_WORKINFO, val);
@@ -3687,8 +3650,6 @@ static void stratum_broadcast(sdata_t *sdata, json_t *val, const int msg_type)
 
 	if (likely(bulk_send))
 		ssend_bulk_append(sdata, bulk_send, messages);
-	if (msg_type == SM_UPDATE)
-		send_postponed(sdata);
 }
 
 static void stratum_add_send(sdata_t *sdata, json_t *val, const int64_t client_id,
@@ -6730,8 +6691,6 @@ static void stratum_broadcast_updates(sdata_t *sdata, bool clean)
 		__dec_instance_ref(client);
 	}
 	ck_wunlock(&sdata->instance_lock);
-
-	send_postponed(sdata);
 }
 
 static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_val, const char *err_msg)
