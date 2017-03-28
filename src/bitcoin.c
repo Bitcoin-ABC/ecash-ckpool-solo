@@ -395,6 +395,7 @@ char *get_txn(connsock_t *cs, const char *hash)
 		LOGDEBUG("get_txn for hash %s got data %s", hash, ret);
 	} else
 		LOGDEBUG("get_txn did not retrieve data for hash %s", hash);
+	json_decref(val);
 out:
 	return ret;
 }

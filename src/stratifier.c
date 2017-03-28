@@ -1248,6 +1248,19 @@ static void broadcast_ping(sdata_t *sdata);
 #define REFCOUNT_REMOTE	100
 #define REFCOUNT_LOCAL	5
 
+/* Submit the transactions in node/remote mode so the local btcd has all the
+ * transactions that will go into the next blocksolve. */
+static void submit_transaction(ckpool_t *ckp, const char *hash)
+{
+	char *buf;
+
+	if (unlikely(!ckp->generator_ready))
+		return;
+	ASPRINTF(&buf, "submittxn:%s", hash);
+	send_proc(ckp->generator,buf);
+	free(buf);
+}
+
 /* Build a hashlist of all transactions, allowing us to compare with the list of
  * existing transactions to determine which need to be propagated */
 static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char *hash,
@@ -1274,7 +1287,15 @@ static bool add_txn(ckpool_t *ckp, sdata_t *sdata, txntable_t **txns, const char
 
 	txn = ckzalloc(sizeof(txntable_t));
 	memcpy(txn->hash, hash, 65);
-	txn->data = strdup(data);
+	/* Get the data from our local bitcoind as a way of confirming it
+	 * already knows about this transaction. */
+	txn->data = generator_get_txn(ckp, hash);
+	if (!txn->data) {
+		/* If our local bitcoind hasn't seen this transaction,
+		 * submit it for mempools to be ~synchronised */
+		submit_transaction(ckp, data);
+		txn->data = strdup(data);
+	}
 	if (!local || ckp->node)
 		txn->refcount = REFCOUNT_REMOTE;
 	else
@@ -1325,19 +1346,6 @@ static void send_node_transactions(ckpool_t *ckp, sdata_t *sdata, const json_t *
 		LOGINFO("Sending transactions to mining nodes");
 		ssend_bulk_append(sdata, bulk_send, messages);
 	}
-}
-
-/* Submit the transactions in node/remote mode so the local btcd has all the
- * transactions that will go into the next blocksolve. */
-static void submit_transaction(ckpool_t *ckp, const char *hash)
-{
-	char *buf;
-
-	if (unlikely(!ckp->generator_ready))
-		return;
-	ASPRINTF(&buf, "submittxn:%s", hash);
-	send_proc(ckp->generator,buf);
-	free(buf);
 }
 
 static void submit_transaction_array(ckpool_t *ckp, const json_t *arr)
@@ -1811,6 +1819,7 @@ static bool rebuild_txns(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	}
 
 	if (ret) {
+		wb->incomplete = false;
 		LOGINFO("Rebuilt txns into workbase with %d transactions", i);
 		/* These two structures are regenerated so free their ram */
 		json_decref(wb->merkle_array);
@@ -1855,10 +1864,9 @@ static void check_incomplete_wbs(ckpool_t *ckp, sdata_t *sdata)
 		HASH_DEL(sdata->remote_workbases, wb);
 		ck_wunlock(&sdata->workbase_lock);
 
-		if (rebuild_txns(ckp, sdata, wb)) {
+		if (rebuild_txns(ckp, sdata, wb))
 			LOGNOTICE("Rebuilt transactions on previously failed remote workinfo");
-			wb->incomplete = false;
-		} else
+		else
 			incomplete++;
 
 		/* Readd it to the hashlist */
@@ -1912,10 +1920,14 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	ck_wunlock(&sdata->workbase_lock);
 
 	val = generate_workinfo(ckp, wb, __func__);
-	/* Replace jobid with mapped id */
-	json_set_int64(val, "jobid", wb->mapped_id);
 
 	wb_val = json_deep_copy(val);
+
+	/* Set jobid with mapped id for other nodes and remotes */
+	json_set_int64(wb_val, "jobid", wb->mapped_id);
+
+	/* Replace workinfoid to mapped id for ckdb */
+	json_set_int64(val, "workinfoid", wb->mapped_id);
 
 	/* Strip unnecessary fields and add extra fields needed */
 	strip_fields(ckp, wb_val);
@@ -4690,7 +4702,8 @@ retry:
 		json_t *val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
 
 		/* This is a message for a node */
-		ckmsgq_add(sdata->srecvs, val);
+		if (likely(val))
+			ckmsgq_add(sdata->srecvs, val);
 		goto retry;
 	}
 	if (cmdmatch(buf, "ping")) {
@@ -7311,16 +7324,19 @@ void parse_upstream_workinfo(ckpool_t *ckp, json_t *val)
 }
 
 /* Remap the remote client id to the local one and submit to ckdb */
-static void parse_remote_workerstats(ckpool_t *ckp, json_t *val, const int64_t remote_id)
+static void parse_remote_workerstats(ckpool_t *ckp, const json_t *val, const int64_t remote_id)
 {
 	int64_t client_id;
+	json_t *res;
 
-	json_get_int64(&client_id, val, "clientid");
+	/* Create copy for ckdb to absorb */
+	res = json_deep_copy(val);
+	json_get_int64(&client_id, res, "clientid");
 	/* Encode remote server client_id into remote client's id */
 	client_id = (remote_id << 32) | (client_id & 0xffffffffll);
-	json_set_int64(val, "clientid", client_id);
+	json_set_int64(res, "clientid", client_id);
 
-	ckdbq_add(ckp, ID_WORKERSTATS, val);
+	ckdbq_add(ckp, ID_WORKERSTATS, res);
 }
 
 #define parse_remote_workinfo(ckp, val, client_id) add_node_base(ckp, val, true, client_id)
@@ -7362,7 +7378,7 @@ static void parse_remote_auth(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 }
 
 /* Get the remote worker count once per minute from all the remote servers */
-static void parse_remote_workers(sdata_t *sdata, json_t *val, const char *buf)
+static void parse_remote_workers(sdata_t *sdata, const json_t *val, const char *buf)
 {
 	json_t *username_val = json_object_get(val, "username");
 	user_instance_t *user;
@@ -7389,7 +7405,7 @@ static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 			       const int64_t client_id)
 {
 	json_t *workername_val = json_object_get(val, "workername"),
-		*name_val = json_object_get(val, "name");
+		*name_val = json_object_get(val, "name"), *res;
 	const char *workername, *name, *coinbasehex, *swaphex, *cnfrm;
 	workbase_t *wb = NULL;
 	double diff = 0;
@@ -7453,12 +7469,12 @@ static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 	free(msg);
 out_add:
 	/* Make a duplicate for use by ckdbq_add */
-	val = json_deep_copy(val);
-	remap_workinfo_id(sdata, val, client_id);
+	res = json_deep_copy(val);
+	remap_workinfo_id(sdata, res, client_id);
 	if (!ckp->remote)
-		downstream_json(sdata, val, client_id, SSEND_PREPEND);
+		downstream_json(sdata, res, client_id, SSEND_PREPEND);
 
-	ckdbq_add(ckp, ID_BLOCK, val);
+	ckdbq_add(ckp, ID_BLOCK, res);
 }
 
 void parse_upstream_block(ckpool_t *ckp, json_t *val)
@@ -7502,12 +7518,8 @@ static void add_node_txns(ckpool_t *ckp, sdata_t *sdata, const json_t *val)
 			continue;
 		}
 
-		if (!add_txn(ckp, sdata, &txns, hash, data, false))
-			continue;
-
-		/* Submit transactions if we haven't seen them before */
-		submit_transaction(ckp, data);
-		added++;
+		if (add_txn(ckp, sdata, &txns, hash, data, false))
+			added++;
 	}
 
 	if (added)
@@ -7544,7 +7556,7 @@ static json_t *get_hash_transactions(sdata_t *sdata, const json_t *hashes)
 	return txn_array;
 }
 
-static json_t *get_reqtxns(sdata_t *sdata, json_t *val, bool downstream)
+static json_t *get_reqtxns(sdata_t *sdata, const json_t *val, bool downstream)
 {
 	json_t *hashes = json_object_get(val, "hash");
 	json_t *txns, *ret = NULL;
@@ -7568,7 +7580,7 @@ out:
 	return ret;
 }
 
-static void parse_remote_reqtxns(sdata_t *sdata, json_t *val, const int64_t client_id)
+static void parse_remote_reqtxns(sdata_t *sdata, const json_t *val, const int64_t client_id)
 {
 	json_t *ret = get_reqtxns(sdata, val, true);
 
@@ -7779,6 +7791,11 @@ static void srecv_process(ckpool_t *ckp, json_t *val)
 	smsg_t *msg;
 	int server;
 
+	if (unlikely(!val)) {
+		LOGWARNING("srecv_process received NULL val!");
+		return;
+	}
+
 	msg = ckzalloc(sizeof(smsg_t));
 	msg->json_msg = val;
 	val = json_object_get(msg->json_msg, "client_id");
@@ -7848,10 +7865,15 @@ out:
 	free(buf);
 }
 
-void stratifier_add_recv(ckpool_t *ckp, json_t *val)
+void _stratifier_add_recv(ckpool_t *ckp, json_t *val, const char *file, const char *func, const int line)
 {
-	sdata_t *sdata = ckp->sdata;
+	sdata_t *sdata;
 
+	if (unlikely(!val)) {
+		LOGWARNING("_stratifier_add_recv received NULL val from %s %s:%d", file, func, line);
+		return;
+	}
+	sdata = ckp->sdata;
 	ckmsgq_add(sdata->srecvs, val);
 }
 
