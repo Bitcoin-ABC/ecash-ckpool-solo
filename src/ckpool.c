@@ -458,6 +458,10 @@ retry:
 		LOGWARNING("Received ckdb flush message");
 		send_proc(ckp->stratifier, buf);
 		send_unix_msg(sockd, "flushing");
+	} else if (cmdmatch(buf, "resetshares")) {
+		LOGWARNING("Resetting best shares");
+		send_proc(ckp->stratifier, buf);
+		send_unix_msg(sockd, "resetting");
 	} else {
 		LOGINFO("Listener received unhandled message: %s", buf);
 		send_unix_msg(sockd, "unknown");

@@ -4827,6 +4827,8 @@ retry:
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
 	} else if (cmdmatch(buf, "ckdbflush")) {
 		ckdbq_flush(sdata);
+	} else if (cmdmatch(buf, "resetshares")) {
+		reset_bestshares(sdata);
 	} else
 		LOGWARNING("Unhandled stratifier message: %s", buf);
 	goto retry;
