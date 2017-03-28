@@ -3887,6 +3887,19 @@ static void remap_workinfo_id(sdata_t *sdata, json_t *val, const int64_t client_
 	json_set_int64(val, "workinfoid", mapped_id);
 }
 
+static void block_share_summary(sdata_t *sdata)
+{
+	double bdiff, sdiff;
+
+	if (unlikely(!sdata->current_workbase || !sdata->current_workbase->network_diff))
+		return;
+
+	sdiff = sdata->stats.accounted_diff_shares;
+	bdiff = sdiff / sdata->current_workbase->network_diff * 100;
+	LOGWARNING("Block solved after %.0lf shares at %.1f%% diff",
+		   sdiff, bdiff);
+}
+
 static void block_solve(ckpool_t *ckp, json_t *val)
 {
 	char *msg, *workername = NULL;
@@ -3942,18 +3955,12 @@ static void block_solve(ckpool_t *ckp, json_t *val)
 		LOGWARNING("Worker %s:%s", workername, s);
 		dealloc(s);
 	}
-	if (likely(sdata->current_workbase)) {
-		double bdiff, sdiff = sdata->stats.accounted_diff_shares;
-
-		bdiff = sdiff / sdata->current_workbase->network_diff * 100;
-		LOGWARNING("Block solved after %.0lf shares at %.1f%% diff",
-			   sdiff, bdiff);
-	}
 	stratum_broadcast_message(sdata, msg);
 	free(msg);
 
 	free(workername);
 
+	block_share_summary(sdata);
 	reset_bestshares(sdata);
 }
 
@@ -7451,8 +7458,10 @@ static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 		/* We rely on the remote server to give us the ID_BLOCK
 		 * responses, so only use this response to determine if we
 		 * should reset the best shares. */
-		if (local_block_submit(ckp, gbt_block, flip32, wb->height))
+		if (local_block_submit(ckp, gbt_block, flip32, wb->height)) {
+			block_share_summary(sdata);
 			reset_bestshares(sdata);
+		}
 		put_remote_workbase(sdata, wb);
 	}
 
