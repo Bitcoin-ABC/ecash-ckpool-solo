@@ -1853,14 +1853,15 @@ static void __add_to_remote_workbases(sdata_t *sdata, workbase_t *wb)
 
 static void check_incomplete_wbs(ckpool_t *ckp, sdata_t *sdata)
 {
-	workbase_t *wb, *tmp;
+	workbase_t *wb, *tmp, *removed = NULL;
 	int incomplete = 0;
 
 	ck_wlock(&sdata->workbase_lock);
 	HASH_ITER(hh, sdata->remote_workbases, wb, tmp) {
 		if (!wb->incomplete || wb->readcount)
 			continue;
-		/* Remove the workbase from the hashlist so we can work on it */
+		/* Remove the workbase from the hashlist so we can work on it
+		 * without holding the lock */
 		HASH_DEL(sdata->remote_workbases, wb);
 		ck_wunlock(&sdata->workbase_lock);
 
@@ -1869,8 +1870,15 @@ static void check_incomplete_wbs(ckpool_t *ckp, sdata_t *sdata)
 		else
 			incomplete++;
 
-		/* Readd it to the hashlist */
+		/* Add it to a list of removed workbases, to be returned once
+		 * we exit this HASH_ITER loop. */
+		HASH_ADD(hh, removed, id, sizeof(int64_t) * 2, wb);
+
 		ck_wlock(&sdata->workbase_lock);
+	}
+	/* Return all removed workbases to remote_workbase hashlist */
+	HASH_ITER(hh, removed, wb, tmp) {
+		HASH_DEL(removed, wb);
 		__add_to_remote_workbases(sdata, wb);
 	}
 	ck_wunlock(&sdata->workbase_lock);
