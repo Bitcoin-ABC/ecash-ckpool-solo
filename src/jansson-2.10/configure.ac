@@ -107,12 +107,7 @@ AC_SUBST([AM_CFLAGS])
 AC_CONFIG_FILES([
         jansson.pc
         Makefile
-        doc/Makefile
         src/Makefile
         src/jansson_config.h
-        test/Makefile
-        test/bin/Makefile
-        test/suites/Makefile
-        test/suites/api/Makefile
 ])
 AC_OUTPUT
