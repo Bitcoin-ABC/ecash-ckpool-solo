@@ -136,17 +136,19 @@ size_t utf8_check_full(const char *buffer, size_t size, int32_t *codepoint)
     return 1;
 }
 
-const char *utf8_iterate(const char *buffer, size_t bufsize, int32_t *codepoint)
+const char *utf8_iterate(const char *buffer, size_t bufsize, int32_t *codepoint, int noutf8)
 {
-    size_t count;
+    size_t count = 1;
     int32_t value;
 
     if(!bufsize)
         return buffer;
 
-    count = utf8_check_first(buffer[0]);
-    if(count <= 0)
-        return NULL;
+    if (!noutf8) {
+	    count = utf8_check_first(buffer[0]);
+	    if(count <= 0)
+	        return NULL;
+    }
 
     if(count == 1)
         value = (unsigned char)buffer[0];

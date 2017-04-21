@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2009-2016 Petri Lehtinen <petri@digip.org>
+ * Copyright (c) 2015,2017 Con Kolivas <kernel@kolivas.org>
  *
  * Jansson is free software; you can redistribute it and/or modify
  * it under the terms of the MIT license. See LICENSE for details.
@@ -116,7 +117,7 @@ static int dump_string(const char *str, size_t len, json_dump_callback_t dump, v
 
         while(end < lim)
         {
-            end = utf8_iterate(pos, lim - pos, &codepoint);
+            end = utf8_iterate(pos, lim - pos, &codepoint, flags & JSON_NO_UTF8);
             if(!end)
                 return -1;
 
@@ -444,10 +445,11 @@ char *json_dumps(const json_t *json, size_t flags)
 
     if(json_dump_callback(json, dump_to_strbuffer, (void *)&strbuff, flags))
         result = NULL;
+    else if (flags & JSON_EOL)
+	result = jsonp_eolstrsteal(&strbuff);
     else
-        result = jsonp_strdup(strbuffer_value(&strbuff));
+	result = jsonp_strsteal(&strbuff);
 
-    strbuffer_close(&strbuff);
     return result;
 }
 
