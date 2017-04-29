@@ -77,6 +77,7 @@ struct pool_stats {
 	double dsps1440;
 	double dsps10080;
 
+	uint64_t network_diff;
 	int64_t best_diff;
 };
 
@@ -1165,7 +1166,9 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 	int len, ret;
 
 	ts_realtime(&wb->gentime);
-	wb->network_diff = diff_from_nbits(wb->headerbin + 72);
+	/* Stats network_diff is not protected by lock but is not a critical
+	 * value */
+	sdata->stats.network_diff = wb->network_diff = diff_from_nbits(wb->headerbin + 72);
 
 	len = strlen(ckp->logdir) + 8 + 1 + 16 + 1;
 	wb->logdir = ckzalloc(len);
@@ -8459,7 +8462,8 @@ static void *statsupdate(void *arg)
 	sleep(1);
 
 	while (42) {
-		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080, per_tdiff;
+		double ghs, ghs1, ghs5, ghs15, ghs60, ghs360, ghs1440, ghs10080,
+			per_tdiff, percent;
 		char suffix1[16], suffix5[16], suffix15[16], suffix60[16], cdfield[64];
 		char suffix360[16], suffix1440[16], suffix10080[16];
 		int remote_users = 0, remote_workers = 0, idle_workers = 0;
@@ -8715,20 +8719,17 @@ static void *statsupdate(void *arg)
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
 
-		sprintf(suffix1, "%.1f", stats->sps1);
-		sprintf(suffix5, "%.1f", stats->sps5);
-		sprintf(suffix15, "%.1f", stats->sps15);
-		sprintf(suffix60, "%.1f", stats->sps60);
-
-		JSON_CPACK(val, "{sI,sI,sI,ss,ss,ss,ss}",
+		percent = round(stats->accounted_diff_shares * 1000 / stats->network_diff) / 10;
+		JSON_CPACK(val, "{sf,sI,sI,sI,sf,sf,sf,sf}",
+			        "diff", percent,
 				"accepted", stats->accounted_diff_shares,
 				"rejected", stats->accounted_rejects,
 				"bestshare", stats->best_diff,
-				"SPS1m", suffix1,
-				"SPS5m", suffix5,
-				"SPS15m", suffix15,
-				"SPS1h", suffix60);
-		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
+				"SPS1m", stats->sps1,
+				"SPS5m", stats->sps5,
+				"SPS15m", stats->sps15,
+				"SPS1h", stats->sps60);
+		s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_REAL_PRECISION(3));
 		json_decref(val);
 		LOGNOTICE("Pool:%s", s);
 		fprintf(fp, "%s\n", s);
@@ -8882,17 +8883,6 @@ static void *ckdb_heartbeat(void *arg)
 	return NULL;
 }
 
-static void json_double_string(double *dbl, json_t *val, const char *key)
-{
-	char *string;
-
-	json_get_string(&string, val, key);
-	if (!string)
-		return;
-	sscanf(string, "%lf", dbl);
-	free(string);
-}
-
 static void read_poolstats(ckpool_t *ckp, int *tvsec_diff)
 {
 	char *s = alloca(4096), *pstats, *dsps, *sps;
@@ -8955,10 +8945,10 @@ static void read_poolstats(ckpool_t *ckp, int *tvsec_diff)
 		LOGINFO("Failed to json decode sps line from pool logfile: %s", dsps);
 		return;
 	}
-	json_double_string(&stats->sps1, val, "SPS1m");
-	json_double_string(&stats->sps5, val, "SPS5m");
-	json_double_string(&stats->sps15, val, "SPS15m");
-	json_double_string(&stats->sps60, val, "SPS1h");
+	json_get_double(&stats->sps1, val, "SPS1m");
+	json_get_double(&stats->sps5, val, "SPS5m");
+	json_get_double(&stats->sps15, val, "SPS15m");
+	json_get_double(&stats->sps60, val, "SPS1h");
 	json_get_int64(&stats->accounted_diff_shares, val, "accepted");
 	json_get_int64(&stats->accounted_rejects, val, "rejected");
 	json_get_int64(&stats->best_diff, val, "bestshare");
@@ -9063,6 +9053,9 @@ void *stratifier(void *arg)
 	create_pthread(&pth_heartbeat, ckdb_heartbeat, ckp);
 	read_poolstats(ckp, &tvsec_diff);
 	read_userstats(ckp, sdata, tvsec_diff);
+
+	/* Set diff impossibly large until we know the network diff */
+	sdata->stats.network_diff = ~0ULL;
 
 	cklock_init(&sdata->txn_lock);
 	cklock_init(&sdata->workbase_lock);
