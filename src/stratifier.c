@@ -8534,7 +8534,7 @@ static void *statsupdate(void *arg)
 
 		while ((user = next_user(sdata, user)) != NULL) {
 			worker_instance_t *worker;
-			bool idle = false;
+			bool idle = false, store;
 			json_t *user_array;
 
 			if (!user->authorised)
@@ -8546,7 +8546,7 @@ static void *statsupdate(void *arg)
 
 			/* Decay times per worker */
 			while ((worker = next_worker(sdata, user, worker)) != NULL) {
-				bool store = false;
+				store = false;
 
 				per_tdiff = tvdiff(&now, &worker->last_share);
 				if (per_tdiff > 60) {
@@ -8554,30 +8554,29 @@ static void *statsupdate(void *arg)
 					worker->idle = true;
 				} else
 					store = true;
-				ghs = worker->dsps1 * nonces;
-				suffix_string(ghs, suffix1, 16, 0);
-				store |= ghs > 0;
-
-				ghs = worker->dsps5 * nonces;
-				suffix_string(ghs, suffix5, 16, 0);
-				store |= ghs > 0;
-
-				ghs = worker->dsps60 * nonces;
-				suffix_string(ghs, suffix60, 16, 0);
-				store |= ghs > 0;
 
 				ghs = worker->dsps1440 * nonces;
 				suffix_string(ghs, suffix1440, 16, 0);
 				store |= ghs > 0;
-
-				ghs = worker->dsps10080 * nonces;
-				suffix_string(ghs, suffix10080, 16, 0);
 
 				/* Drop storage of workers idle for many days */
 				if (!store) {
 					LOGDEBUG("Skipping worker %s", worker->workername);
 					continue;
 				}
+
+				ghs = worker->dsps1 * nonces;
+				suffix_string(ghs, suffix1, 16, 0);
+
+				ghs = worker->dsps5 * nonces;
+				suffix_string(ghs, suffix5, 16, 0);
+
+				ghs = worker->dsps60 * nonces;
+				suffix_string(ghs, suffix60, 16, 0);
+
+				ghs = worker->dsps10080 * nonces;
+				suffix_string(ghs, suffix10080, 16, 0);
+
 				LOGDEBUG("Storing worker %s", worker->workername);
 
 				JSON_CPACK(val, "{ss,ss,ss,ss,ss,ss,si,sI,sf,sI}",
@@ -8595,12 +8594,26 @@ static void *statsupdate(void *arg)
 				val = NULL;
 			}
 
+			store = false;
+
 			/* Decay times per user */
 			per_tdiff = tvdiff(&now, &user->last_share);
 			if (per_tdiff > 60) {
 				decay_user(user, 0, &now);
 				idle = true;
+			} else
+				store = true;
+
+			ghs = user->dsps1440 * nonces;
+			suffix_string(ghs, suffix1440, 16, 0);
+			store |= ghs > 0;
+
+			/* Drop storage of users idle for many days */
+			if (!store) {
+				LOGDEBUG("Skipping user %s", user->username);
+				continue;
 			}
+
 			ghs = user->dsps1 * nonces;
 			suffix_string(ghs, suffix1, 16, 0);
 
@@ -8609,9 +8622,6 @@ static void *statsupdate(void *arg)
 
 			ghs = user->dsps60 * nonces;
 			suffix_string(ghs, suffix60, 16, 0);
-
-			ghs = user->dsps1440 * nonces;
-			suffix_string(ghs, suffix1440, 16, 0);
 
 			ghs = user->dsps10080 * nonces;
 			suffix_string(ghs, suffix10080, 16, 0);
