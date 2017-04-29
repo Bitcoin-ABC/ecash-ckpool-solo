@@ -223,7 +223,6 @@ struct user_instance {
 	double dsps10080;
 	tv_t last_share;
 	tv_t last_decay;
-	tv_t last_update;
 
 	bool authorised; /* Has this username ever been authorised? */
 	time_t auth_time;
@@ -251,7 +250,6 @@ struct worker_instance {
 	double dsps10080;
 	tv_t last_share;
 	tv_t last_decay;
-	tv_t last_update;
 	time_t start_time;
 
 	double best_diff; /* Best share found by this worker */
@@ -5255,113 +5253,141 @@ static void decay_user(user_instance_t *user, double diff, tv_t *now_t)
 	copy_tv(&user->last_decay, now_t);
 }
 
-/* Enter holding a reference count */
-static void read_userstats(ckpool_t *ckp, user_instance_t *user)
+static user_instance_t *get_create_user(sdata_t *sdata, const char *username, bool *new_user);
+static worker_instance_t *get_create_worker(sdata_t *sdata, user_instance_t *user,
+					    const char *workername, bool *new_worker);
+
+/* Load the statistics of and create all known users at startup */
+static void read_userstats(ckpool_t *ckp, sdata_t *sdata, int tvsec_diff)
 {
-	int tvsec_diff = 0, ret;
-	char s[512];
+	char dnam[512], s[512], *username, *buf;
+	int ret, users = 0, workers = 0;
+	user_instance_t *user;
+	struct dirent *dir;
+	struct stat fdbuf;
+	bool new_user;
 	json_t *val;
 	FILE *fp;
 	tv_t now;
+	DIR *d;
+	int fd;
 
-	snprintf(s, 511, "%s/users/%s", ckp->logdir, user->username);
-	fp = fopen(s, "re");
-	if (!fp) {
-		LOGINFO("User %s does not have a logfile to read", user->username);
-		return;
-	}
-	memset(s, 0, 512);
-	ret = fread(s, 1, 511, fp);
-	fclose(fp);
-	if (ret < 1) {
-		LOGINFO("Failed to read user %s logfile", user->username);
-		return;
-	}
-	val = json_loads(s, 0, NULL);
-	if (!val) {
-		LOGINFO("Failed to json decode user %s logfile: %s", user->username, s);
+	snprintf(dnam, 511, "%susers", ckp->logdir);
+	d = opendir(dnam);
+	if (!d) {
+		LOGNOTICE("No user directory found");
 		return;
 	}
 
 	tv_time(&now);
-	copy_tv(&user->last_share, &now);
-	copy_tv(&user->last_decay, &now);
-	user->dsps1 = dsps_from_key(val, "hashrate1m");
-	user->dsps5 = dsps_from_key(val, "hashrate5m");
-	user->dsps60 = dsps_from_key(val, "hashrate1hr");
-	user->dsps1440 = dsps_from_key(val, "hashrate1d");
-	user->dsps10080 = dsps_from_key(val, "hashrate7d");
-	json_get_int64(&user->last_update.tv_sec, val, "lastupdate");
-	json_get_int64(&user->shares, val, "shares");
-	json_get_double(&user->best_diff, val, "bestshare");
-	json_get_int64(&user->best_ever, val, "bestever");
-	if (user->best_diff > user->best_ever)
-		user->best_ever = user->best_diff;
-	LOGINFO("Successfully read user %s stats %f %f %f %f %f %f %ld", user->username,
-		user->dsps1, user->dsps5, user->dsps60, user->dsps1440,
-		user->dsps10080, user->best_diff, user->best_ever);
-	json_decref(val);
-	if (user->last_update.tv_sec)
-		tvsec_diff = now.tv_sec - user->last_update.tv_sec - 60;
-	if (tvsec_diff > 60) {
-		LOGINFO("Old user stats indicate not logged for %d seconds, decaying stats",
-			tvsec_diff);
-		decay_user(user, 0, &now);
-	}
-}
 
-/* Enter holding a reference count */
-static void read_workerstats(ckpool_t *ckp, worker_instance_t *worker)
-{
-	int tvsec_diff = 0, ret;
-	char s[512];
-	json_t *val;
-	FILE *fp;
-	tv_t now;
+	while ((dir = readdir(d)) != NULL) {
+		json_t *worker_array, *arr_val;
+		size_t index;
 
-	snprintf(s, 511, "%s/workers/%s", ckp->logdir, worker->workername);
-	fp = fopen(s, "re");
-	if (!fp) {
-		LOGINFO("Worker %s does not have a logfile to read", worker->workername);
-		return;
-	}
-	memset(s, 0, 512);
-	ret = fread(s, 1, 511, fp);
-	fclose(fp);
-	if (ret < 1) {
-		LOGINFO("Failed to read worker %s logfile", worker->workername);
-		return;
-	}
-	val = json_loads(s, 0, NULL);
-	if (!val) {
-		LOGINFO("Failed to json decode worker %s logfile: %s", worker->workername, s);
-		return;
-	}
+		username = basename(dir->d_name);
+		if (!strcmp(username, "/") || !strcmp(username, ".") || !strcmp(username, ".."))
+			continue;
 
-	tv_time(&now);
-	copy_tv(&worker->last_share, &now);
-	copy_tv(&worker->last_decay, &now);
-	worker->dsps1 = dsps_from_key(val, "hashrate1m");
-	worker->dsps5 = dsps_from_key(val, "hashrate5m");
-	worker->dsps60 = dsps_from_key(val, "hashrate1hr");
-	worker->dsps1440 = dsps_from_key(val, "hashrate1d");
-	worker->dsps10080 = dsps_from_key(val, "hashrate7d");
-	json_get_double(&worker->best_diff, val, "bestshare");
-	json_get_int64(&worker->best_ever, val, "bestever");
-	if (worker->best_diff > worker->best_ever)
-		worker->best_ever = worker->best_diff;
-	json_get_int64(&worker->last_update.tv_sec, val, "lastupdate");
-	json_get_int64(&worker->shares, val, "shares");
-	LOGINFO("Successfully read worker %s stats %f %f %f %f %f %ld", worker->workername,
-		worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440, worker->best_diff, worker->best_ever);
-	json_decref(val);
-	if (worker->last_update.tv_sec)
-		tvsec_diff = now.tv_sec - worker->last_update.tv_sec - 60;
-	if (tvsec_diff > 60) {
-		LOGINFO("Old worker stats indicate not logged for %d seconds, decaying stats",
-			tvsec_diff);
-		decay_worker(worker, 0, &now);
+		new_user = false;
+		user = get_create_user(sdata, username, &new_user);
+		if (unlikely(!new_user)) {
+			/* All users should be new at this stage */
+			LOGWARNING("Duplicate user in read_userstats %s", username);
+			continue;
+		}
+		users++;
+		snprintf(s, 511, "%s/%s", dnam, username);
+		fp = fopen(s, "re");
+		if (unlikely(!fp)) {
+			/* Permission problems should be the only reason this happens */
+			LOGWARNING("Failed to load user %s logfile to read", username);
+			continue;
+		}
+		fd = fileno(fp);
+		if (unlikely(fstat(fd, &fdbuf))) {
+			LOGERR("Failed to fstat user %s logfile", username);
+			fclose(fp);
+			continue;
+		}
+		/* We don't know how big the logfile will be so allocate
+		 * according to file size */
+		buf = ckzalloc(fdbuf.st_size + 1);
+		ret = fread(buf, 1, fdbuf.st_size, fp);
+		fclose(fp);
+		if (ret < 1) {
+			LOGNOTICE("Failed to read user %s logfile", username);
+			dealloc(buf);
+			continue;
+		}
+		val = json_loads(buf, 0, NULL);
+		if (!val) {
+			LOGNOTICE("Failed to json decode user %s logfile: %s", username, buf);
+			dealloc(buf);
+			continue;
+		}
+		dealloc(buf);
+
+		/* Assume any user with logs was authorised */
+		user->authorised = true;
+		copy_tv(&user->last_share, &now);
+		copy_tv(&user->last_decay, &now);
+		user->dsps1 = dsps_from_key(val, "hashrate1m");
+		user->dsps5 = dsps_from_key(val, "hashrate5m");
+		user->dsps60 = dsps_from_key(val, "hashrate1hr");
+		user->dsps1440 = dsps_from_key(val, "hashrate1d");
+		user->dsps10080 = dsps_from_key(val, "hashrate7d");
+		json_get_int64(&user->shares, val, "shares");
+		json_get_double(&user->best_diff, val, "bestshare");
+		json_get_int64(&user->best_ever, val, "bestever");
+		if (user->best_diff > user->best_ever)
+			user->best_ever = user->best_diff;
+		LOGINFO("Successfully read user %s stats %f %f %f %f %f %f %ld", user->username,
+			user->dsps1, user->dsps5, user->dsps60, user->dsps1440,
+			user->dsps10080, user->best_diff, user->best_ever);
+		if (tvsec_diff > 60)
+			decay_user(user, 0, &now);
+
+		worker_array = json_object_get(val, "worker");
+		json_array_foreach(worker_array, index, arr_val) {
+			const char *workername = json_string_value(json_object_get(arr_val, "workername"));
+			worker_instance_t *worker;
+			bool new_worker = false;
+
+			if (unlikely(!workername || !strlen(workername)) ||
+			    !strstr(workername, username)) {
+				LOGWARNING("Invalid workername in read_userstats %s", workername);
+				continue;
+			}
+			worker = get_create_worker(sdata, user, workername, &new_worker);
+			if (unlikely(!new_worker)) {
+				LOGWARNING("Duplicate worker in read_userstats %s", workername);
+				continue;
+			}
+			workers++;
+			copy_tv(&worker->last_share, &now);
+			copy_tv(&worker->last_decay, &now);
+			worker->dsps1 = dsps_from_key(val, "hashrate1m");
+			worker->dsps5 = dsps_from_key(val, "hashrate5m");
+			worker->dsps60 = dsps_from_key(val, "hashrate1hr");
+			worker->dsps1440 = dsps_from_key(val, "hashrate1d");
+			worker->dsps10080 = dsps_from_key(val, "hashrate7d");
+			json_get_double(&worker->best_diff, val, "bestshare");
+			json_get_int64(&worker->best_ever, val, "bestever");
+			if (worker->best_diff > worker->best_ever)
+				worker->best_ever = worker->best_diff;
+			json_get_int64(&worker->shares, val, "shares");
+			LOGINFO("Successfully read worker %s stats %f %f %f %f %f %ld", worker->workername,
+				worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440, worker->best_diff, worker->best_ever);
+			if (tvsec_diff > 60)
+				decay_worker(worker, 0, &now);
+		}
+		json_decref(val);
 	}
+	closedir(d);
+
+	if (likely(users))
+		LOGWARNING("Loaded %d users and %d workers", users, workers);
 }
 
 #define DEFAULT_AUTH_BACKOFF	(3)  /* Set initial backoff to 3 seconds */
@@ -5379,7 +5405,7 @@ static user_instance_t *__create_user(sdata_t *sdata, const char *username)
 
 
 /* Find user by username or create one if it doesn't already exist */
-static user_instance_t *get_create_user(ckpool_t *ckp, sdata_t *sdata, const char *username, bool *new_user)
+static user_instance_t *get_create_user(sdata_t *sdata, const char *username, bool *new_user)
 {
 	user_instance_t *user;
 
@@ -5391,9 +5417,6 @@ static user_instance_t *get_create_user(ckpool_t *ckp, sdata_t *sdata, const cha
 	}
 	ck_wunlock(&sdata->instance_lock);
 
-	if (CKP_STANDALONE(ckp) && *new_user)
-		read_userstats(ckp, user);
-
 	return user;
 }
 
@@ -5401,7 +5424,7 @@ static user_instance_t *get_user(sdata_t *sdata, const char *username)
 {
 	bool dummy = false;
 
-	return get_create_user(sdata->ckp, sdata, username, &dummy);
+	return get_create_user(sdata, username, &dummy);
 }
 
 static worker_instance_t *__create_worker(user_instance_t *user, const char *workername)
@@ -5430,7 +5453,7 @@ static worker_instance_t *__get_worker(user_instance_t *user, const char *worker
 
 /* Find worker amongst a user's workers by workername or create one if it
  * doesn't yet exist. */
-static worker_instance_t *get_create_worker(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user,
+static worker_instance_t *get_create_worker(sdata_t *sdata, user_instance_t *user,
 					    const char *workername, bool *new_worker)
 {
 	worker_instance_t *worker;
@@ -5443,9 +5466,6 @@ static worker_instance_t *get_create_worker(ckpool_t *ckp, sdata_t *sdata, user_
 	}
 	ck_wunlock(&sdata->instance_lock);
 
-	if (CKP_STANDALONE(ckp) && *new_worker)
-		read_workerstats(ckp, worker);
-
 	return worker;
 }
 
@@ -5453,7 +5473,7 @@ static worker_instance_t *get_worker(sdata_t *sdata, user_instance_t *user, cons
 {
 	bool dummy = false;
 
-	return get_create_worker(sdata->ckp, sdata, user, workername, &dummy);
+	return get_create_worker(sdata, user, workername, &dummy);
 }
 
 /* Braindead check to see if this btcaddress is an M of N script address which
@@ -5484,8 +5504,8 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	if (unlikely(len > 127))
 		username[127] = '\0';
 
-	user = get_create_user(ckp, sdata, username, &new_user);
-	worker = get_create_worker(ckp, sdata, user, workername, &new_worker);
+	user = get_create_user(sdata, username, &new_user);
+	worker = get_create_worker(sdata, user, workername, &new_worker);
 
 	/* Create one worker instance for combined data from workers of the
 	 * same name */
@@ -7143,7 +7163,7 @@ static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workerna
 	if (unlikely(len > 127))
 		username[127] = '\0';
 
-	user = get_create_user(ckp, sdata, username, &new_user);
+	user = get_create_user(sdata, username, &new_user);
 
 	if (!ckp->proxy && (new_user || !user->btcaddress) && (len > 26 && len < 35)) {
 		/* Is this a btc address based username? */
@@ -8542,23 +8562,16 @@ static void *statsupdate(void *arg)
 				ghs = worker->dsps10080 * nonces;
 				suffix_string(ghs, suffix10080, 16, 0);
 
-				copy_tv(&worker->last_update, &now);
-
-				JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,sI,sf,sI}",
+				JSON_CPACK(val, "{ss,ss,ss,ss,ss,ss,sI,sf,sI}",
+						"workername", worker->workername,
 						"hashrate1m", suffix1,
 						"hashrate5m", suffix5,
 						"hashrate1hr", suffix60,
 						"hashrate1d", suffix1440,
 						"hashrate7d", suffix10080,
-						"lastupdate", now.tv_sec,
 						"shares", worker->shares,
 						"bestshare", worker->best_diff,
 						"bestever", worker->best_ever);
-
-				ASPRINTF(&fname, "%s/workers/%s", ckp->logdir, worker->workername);
-				s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL);
-				add_log_entry(&log_entries, &fname, &s);
-				json_set_string(val, "workername", worker->workername);
 				json_array_append_new(user_array, val);
 				val = NULL;
 			}
@@ -8584,15 +8597,12 @@ static void *statsupdate(void *arg)
 			ghs = user->dsps10080 * nonces;
 			suffix_string(ghs, suffix10080, 16, 0);
 
-			copy_tv(&user->last_update, &now);
-
-			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,si,sI,sf,sI}",
+			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,sI,sf,sI}",
 					"hashrate1m", suffix1,
 					"hashrate5m", suffix5,
 					"hashrate1hr", suffix60,
 					"hashrate1d", suffix1440,
 					"hashrate7d", suffix10080,
-					"lastupdate", now.tv_sec,
 					"workers", user->workers + user->remote_workers,
 					"shares", user->shares,
 					"bestshare", user->best_diff,
@@ -8866,15 +8876,15 @@ static void json_double_string(double *dbl, json_t *val, const char *key)
 	free(string);
 }
 
-static void read_poolstats(ckpool_t *ckp)
+static void read_poolstats(ckpool_t *ckp, int *tvsec_diff)
 {
 	char *s = alloca(4096), *pstats, *dsps, *sps;
 	sdata_t *sdata = ckp->sdata;
 	pool_stats_t *stats = &sdata->stats;
-	int tvsec_diff = 0, ret;
 	tv_t now, last;
 	json_t *val;
 	FILE *fp;
+	int ret;
 
 	snprintf(s, 4095, "%s/pool/pool.status", ckp->logdir);
 	fp = fopen(s, "re");
@@ -8939,22 +8949,22 @@ static void read_poolstats(ckpool_t *ckp)
 
 	LOGINFO("Successfully read pool sps: %s", sps);
 	if (last.tv_sec)
-		tvsec_diff = now.tv_sec - last.tv_sec - 60;
-	if (tvsec_diff > 60) {
+		*tvsec_diff = now.tv_sec - last.tv_sec - 60;
+	if (*tvsec_diff > 60) {
 		LOGNOTICE("Old pool stats indicate pool down for %d seconds, decaying stats",
-			  tvsec_diff);
-		decay_time(&stats->sps1, 0, tvsec_diff, MIN1);
-		decay_time(&stats->sps5, 0, tvsec_diff, MIN5);
-		decay_time(&stats->sps15, 0, tvsec_diff, MIN15);
-		decay_time(&stats->sps60, 0, tvsec_diff, HOUR);
+			  *tvsec_diff);
+		decay_time(&stats->sps1, 0, *tvsec_diff, MIN1);
+		decay_time(&stats->sps5, 0, *tvsec_diff, MIN5);
+		decay_time(&stats->sps15, 0, *tvsec_diff, MIN15);
+		decay_time(&stats->sps60, 0, *tvsec_diff, HOUR);
 
-		decay_time(&stats->dsps1, 0, tvsec_diff, MIN1);
-		decay_time(&stats->dsps5, 0, tvsec_diff, MIN5);
-		decay_time(&stats->dsps15, 0, tvsec_diff, MIN15);
-		decay_time(&stats->dsps60, 0, tvsec_diff, HOUR);
-		decay_time(&stats->dsps360, 0, tvsec_diff, HOUR6);
-		decay_time(&stats->dsps1440, 0, tvsec_diff, DAY);
-		decay_time(&stats->dsps10080, 0, tvsec_diff, WEEK);
+		decay_time(&stats->dsps1, 0, *tvsec_diff, MIN1);
+		decay_time(&stats->dsps5, 0, *tvsec_diff, MIN5);
+		decay_time(&stats->dsps15, 0, *tvsec_diff, MIN15);
+		decay_time(&stats->dsps60, 0, *tvsec_diff, HOUR);
+		decay_time(&stats->dsps360, 0, *tvsec_diff, HOUR6);
+		decay_time(&stats->dsps1440, 0, *tvsec_diff, DAY);
+		decay_time(&stats->dsps10080, 0, *tvsec_diff, WEEK);
 	}
 }
 
@@ -8962,10 +8972,10 @@ void *stratifier(void *arg)
 {
 	proc_instance_t *pi = (proc_instance_t *)arg;
 	pthread_t pth_blockupdate, pth_statsupdate, pth_heartbeat;
+	int threads, tvsec_diff = 0;
 	ckpool_t *ckp = pi->ckp;
 	int64_t randomiser;
 	sdata_t *sdata;
-	int threads;
 
 	rename_proc(pi->processname);
 	LOGWARNING("%s stratifier starting", ckp->name);
@@ -9034,7 +9044,8 @@ void *stratifier(void *arg)
 	sdata->srecvs = create_ckmsgqs(ckp, "sreceiver", &srecv_process, threads);
 	sdata->ckdbq = create_ckmsgqs(ckp, "ckdbqueue", &ckdbq_process, threads);
 	create_pthread(&pth_heartbeat, ckdb_heartbeat, ckp);
-	read_poolstats(ckp);
+	read_poolstats(ckp, &tvsec_diff);
+	read_userstats(ckp, sdata, tvsec_diff);
 
 	cklock_init(&sdata->txn_lock);
 	cklock_init(&sdata->workbase_lock);
