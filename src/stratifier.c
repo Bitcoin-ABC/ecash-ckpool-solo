@@ -8538,59 +8538,7 @@ static void *statsupdate(void *arg)
 			if (!user->authorised)
 				continue;
 
-			user_array = json_array();
-			worker = NULL;
 			tv_time(&now);
-
-			/* Decay times per worker */
-			while ((worker = next_worker(sdata, user, worker)) != NULL) {
-				store = false;
-
-				per_tdiff = tvdiff(&now, &worker->last_share);
-				if (per_tdiff > 60) {
-					decay_worker(worker, 0, &now);
-					worker->idle = true;
-				} else
-					store = true;
-
-				ghs = worker->dsps1440 * nonces;
-				suffix_string(ghs, suffix1440, 16, 0);
-				store |= ghs > 0;
-
-				/* Drop storage of workers idle for many days */
-				if (!store) {
-					LOGDEBUG("Skipping worker %s", worker->workername);
-					continue;
-				}
-
-				ghs = worker->dsps1 * nonces;
-				suffix_string(ghs, suffix1, 16, 0);
-
-				ghs = worker->dsps5 * nonces;
-				suffix_string(ghs, suffix5, 16, 0);
-
-				ghs = worker->dsps60 * nonces;
-				suffix_string(ghs, suffix60, 16, 0);
-
-				ghs = worker->dsps10080 * nonces;
-				suffix_string(ghs, suffix10080, 16, 0);
-
-				LOGDEBUG("Storing worker %s", worker->workername);
-
-				JSON_CPACK(val, "{ss,ss,ss,ss,ss,ss,si,sI,sf,sI}",
-						"workername", worker->workername,
-						"hashrate1m", suffix1,
-						"hashrate5m", suffix5,
-						"hashrate1hr", suffix60,
-						"hashrate1d", suffix1440,
-						"hashrate7d", suffix10080,
-					        "lastshare", worker->last_share.tv_sec,
-						"shares", worker->shares,
-						"bestshare", worker->best_diff,
-						"bestever", worker->best_ever);
-				json_array_append_new(user_array, val);
-				val = NULL;
-			}
 
 			store = false;
 
@@ -8652,6 +8600,60 @@ static void *statsupdate(void *arg)
 				dealloc(s);
 				add_msg_entry(&char_list, &sp);
 			}
+			user_array = json_array();
+			worker = NULL;
+
+			/* Decay times per worker */
+			while ((worker = next_worker(sdata, user, worker)) != NULL) {
+				json_t *wval;
+
+				store = false;
+
+				per_tdiff = tvdiff(&now, &worker->last_share);
+				if (per_tdiff > 60) {
+					decay_worker(worker, 0, &now);
+					worker->idle = true;
+				} else
+					store = true;
+
+				ghs = worker->dsps1440 * nonces;
+				suffix_string(ghs, suffix1440, 16, 0);
+				store |= ghs > 0;
+
+				/* Drop storage of workers idle for many days */
+				if (!store) {
+					LOGDEBUG("Skipping worker %s", worker->workername);
+					continue;
+				}
+
+				ghs = worker->dsps1 * nonces;
+				suffix_string(ghs, suffix1, 16, 0);
+
+				ghs = worker->dsps5 * nonces;
+				suffix_string(ghs, suffix5, 16, 0);
+
+				ghs = worker->dsps60 * nonces;
+				suffix_string(ghs, suffix60, 16, 0);
+
+				ghs = worker->dsps10080 * nonces;
+				suffix_string(ghs, suffix10080, 16, 0);
+
+				LOGDEBUG("Storing worker %s", worker->workername);
+
+				JSON_CPACK(wval, "{ss,ss,ss,ss,ss,ss,si,sI,sf,sI}",
+						"workername", worker->workername,
+						"hashrate1m", suffix1,
+						"hashrate5m", suffix5,
+						"hashrate1hr", suffix60,
+						"hashrate1d", suffix1440,
+						"hashrate7d", suffix10080,
+					        "lastshare", worker->last_share.tv_sec,
+						"shares", worker->shares,
+						"bestshare", worker->best_diff,
+						"bestever", worker->best_ever);
+				json_array_append_new(user_array, wval);
+			}
+
 			json_object_set_new_nocheck(val, "worker", user_array);
 			ASPRINTF(&fname, "%s/users/%s", ckp->logdir, user->username);
 			s = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_EOL |
