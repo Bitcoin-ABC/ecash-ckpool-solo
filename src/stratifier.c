@@ -5368,16 +5368,16 @@ static void read_userstats(ckpool_t *ckp, sdata_t *sdata, int tvsec_diff)
 			workers++;
 			copy_tv(&worker->last_share, &now);
 			copy_tv(&worker->last_decay, &now);
-			worker->dsps1 = dsps_from_key(val, "hashrate1m");
-			worker->dsps5 = dsps_from_key(val, "hashrate5m");
-			worker->dsps60 = dsps_from_key(val, "hashrate1hr");
-			worker->dsps1440 = dsps_from_key(val, "hashrate1d");
-			worker->dsps10080 = dsps_from_key(val, "hashrate7d");
-			json_get_double(&worker->best_diff, val, "bestshare");
-			json_get_int64(&worker->best_ever, val, "bestever");
+			worker->dsps1 = dsps_from_key(arr_val, "hashrate1m");
+			worker->dsps5 = dsps_from_key(arr_val, "hashrate5m");
+			worker->dsps60 = dsps_from_key(arr_val, "hashrate1hr");
+			worker->dsps1440 = dsps_from_key(arr_val, "hashrate1d");
+			worker->dsps10080 = dsps_from_key(arr_val, "hashrate7d");
+			json_get_double(&worker->best_diff, arr_val, "bestshare");
+			json_get_int64(&worker->best_ever, arr_val, "bestever");
 			if (worker->best_diff > worker->best_ever)
 				worker->best_ever = worker->best_diff;
-			json_get_int64(&worker->shares, val, "shares");
+			json_get_int64(&worker->shares, arr_val, "shares");
 			LOGINFO("Successfully read worker %s stats %f %f %f %f %f %ld", worker->workername,
 				worker->dsps1, worker->dsps5, worker->dsps60, worker->dsps1440, worker->best_diff, worker->best_ever);
 			if (tvsec_diff > 60)
