@@ -8536,33 +8536,28 @@ static void *statsupdate(void *arg)
 
 		while ((user = next_user(sdata, user)) != NULL) {
 			worker_instance_t *worker;
-			bool idle = false, store;
 			json_t *user_array;
+			bool idle = false;
 
 			if (!user->authorised)
 				continue;
 
 			tv_time(&now);
 
-			store = false;
-
 			/* Decay times per user */
 			per_tdiff = tvdiff(&now, &user->last_share);
 			if (per_tdiff > 60) {
+				/* Drop storage of users idle for 1 week */
+				if (per_tdiff > 600000) {
+					LOGDEBUG("Skipping user %s", user->username);
+					continue;
+				}
 				decay_user(user, 0, &now);
 				idle = true;
-			} else
-				store = true;
+			}
 
 			ghs = user->dsps1440 * nonces;
 			suffix_string(ghs, suffix1440, 16, 0);
-			store |= ghs > 0;
-
-			/* Drop storage of users idle for many days */
-			if (!store) {
-				LOGDEBUG("Skipping user %s", user->username);
-				continue;
-			}
 
 			ghs = user->dsps1 * nonces;
 			suffix_string(ghs, suffix1, 16, 0);
@@ -8611,24 +8606,19 @@ static void *statsupdate(void *arg)
 			while ((worker = next_worker(sdata, user, worker)) != NULL) {
 				json_t *wval;
 
-				store = false;
-
 				per_tdiff = tvdiff(&now, &worker->last_share);
 				if (per_tdiff > 60) {
+					/* Drop storage of workers idle for 1 week */
+					if (per_tdiff > 600000) {
+						LOGDEBUG("Skipping worker %s", worker->workername);
+						continue;
+					}
 					decay_worker(worker, 0, &now);
 					worker->idle = true;
-				} else
-					store = true;
+				}
 
 				ghs = worker->dsps1440 * nonces;
 				suffix_string(ghs, suffix1440, 16, 0);
-				store |= ghs > 0;
-
-				/* Drop storage of workers idle for many days */
-				if (!store) {
-					LOGDEBUG("Skipping worker %s", worker->workername);
-					continue;
-				}
 
 				ghs = worker->dsps1 * nonces;
 				suffix_string(ghs, suffix1, 16, 0);
