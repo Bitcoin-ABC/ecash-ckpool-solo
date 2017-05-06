@@ -1524,7 +1524,6 @@ static void block_update(ckpool_t *ckp, int *prio)
 	bool ret = false;
 	txntable_t *txns;
 	workbase_t *wb;
-	time_t now_t;
 
 retry:
 	wb = generator_getbase(ckp);
@@ -1570,12 +1569,6 @@ retry:
 	generate_coinbase(ckp, wb);
 
 	add_base(ckp, sdata, wb, &new_block);
-	/* Reset the update time to avoid stacked low priority notifies. Bring
-	 * forward the next notify in case of a new block. */
-	now_t = time(NULL);
-	if (new_block)
-		now_t -= ckp->update_interval / 2;
-	sdata->update_time = now_t;
 
 	if (new_block)
 		LOGNOTICE("Block hash changed to %s", sdata->lastswaphash);
@@ -1589,7 +1582,13 @@ retry:
 	 * propagation. */
 	if (likely(txns))
 		update_txns(ckp, sdata, txns, true);
+	/* Reset the update time to avoid stacked low priority notifies. Bring
+	 * forward the next notify in case of a new block. */
+	sdata->update_time = time(NULL);
+	if (new_block)
+		sdata->update_time -= ckp->update_interval / 2;
 out:
+
 	cksem_post(&sdata->update_sem);
 
 	/* Send a ping to miners if we fail to get a base to keep them
