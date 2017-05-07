@@ -625,7 +625,7 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 	/* Coinb2 address goes here, takes up 23~25 bytes + 1 byte for length */
 
 	wb->coinb3len = 0;
-	wb->coinb3bin = ckzalloc(256);
+	wb->coinb3bin = ckzalloc(256 + wb->insert_witness * (8 + witnessdata_size));
 
 	if (ckp->donvalid) {
 		u64 = (uint64_t *)wb->coinb3bin;
