@@ -6279,8 +6279,10 @@ static void check_best_diff(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user
 		best_user = true;
 	}
 	if (best_ever) {
+		/* Don't set pool best diff if it's a block since we will have
+		 * reset it to zero. */
 		mutex_lock(&sdata->stats_lock);
-		if (unlikely(sdiff > sdata->stats.best_diff))
+		if (unlikely(sdiff > sdata->stats.best_diff && sdiff < sdata->current_workbase->network_diff))
 			sdata->stats.best_diff = sdiff;
 		mutex_unlock(&sdata->stats_lock);
 	}
