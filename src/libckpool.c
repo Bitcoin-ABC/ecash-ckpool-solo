@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2016 Con Kolivas
+ * Copyright 2014-2018 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -1730,7 +1730,54 @@ char *http_base64(const char *src)
 	return (str);
 }
 
-void address_to_pubkeytxn(char *pkh, const char *addr)
+static const int8_t charset_rev[128] = {
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	15, -1, 10, 17, 21, 20, 26, 30,  7,  5, -1, -1, -1, -1, -1, -1,
+	-1, 29, -1, 24, 13, 25,  9,  8, 23, -1, 18, 22, 31, 27, 19, -1,
+	1,  0,  3, 16, 11, 28, 12, 14,  6,  4,  2, -1, -1, -1, -1, -1,
+	-1, 29, -1, 24, 13, 25,  9,  8, 23, -1, 18, 22, 31, 27, 19, -1,
+	1,  0,  3, 16, 11, 28, 12, 14,  6,  4,  2, -1, -1, -1, -1, -1
+};
+
+/* It's assumed that there is no chance of sending invalid chars to these
+ * functions as they should have been checked beforehand. */
+static void bech32_decode(uint8_t *data, int *data_len, const char *input)
+{
+	int input_len = strlen(input), hrp_len, i;
+
+	*data_len = 0;
+	while (*data_len < input_len && input[(input_len - 1) - *data_len] != '1')
+		++(*data_len);
+	hrp_len = input_len - (1 + *data_len);
+	*(data_len) -= 6;
+	for (i = hrp_len + 1; i < input_len; i++) {
+		int v = (input[i] & 0x80) ? -1 : charset_rev[(int)input[i]];
+
+		if (i + 6 < input_len)
+			data[i - (1 + hrp_len)] = v;
+	}
+}
+
+static void convert_bits(char *out, int *outlen, const uint8_t *in,
+			 int inlen)
+{
+	const int outbits = 8, inbits = 5;
+	uint32_t val = 0, maxv = (((uint32_t)1) << outbits) - 1;
+	int bits = 0;
+
+	while (inlen--) {
+		val = (val << inbits) | *(in++);
+		bits += inbits;
+		while (bits >= outbits) {
+			bits -= outbits;
+			out[(*outlen)++] = (val >> bits) & maxv;
+		}
+	}
+}
+
+static int address_to_pubkeytxn(char *pkh, const char *addr)
 {
 	char b58bin[25] = {};
 
@@ -1741,17 +1788,45 @@ void address_to_pubkeytxn(char *pkh, const char *addr)
 	memcpy(&pkh[3], &b58bin[1], 20);
 	pkh[23] = 0x88;
 	pkh[24] = 0xac;
+	return 25;
 }
 
-void address_to_scripttxn(char *pkh, const char *addr)
+static int address_to_scripttxn(char *psh, const char *addr)
 {
 	char b58bin[25] = {};
 
 	b58tobin(b58bin, addr);
-	pkh[0] = 0xa9;
-	pkh[1] = 0x14;
-	memcpy(&pkh[2], &b58bin[1], 20);
-	pkh[22] = 0x87;
+	psh[0] = 0xa9;
+	psh[1] = 0x14;
+	memcpy(&psh[2], &b58bin[1], 20);
+	psh[22] = 0x87;
+	return 23;
+}
+
+static int segaddress_to_txn(char *p2h, const char *addr)
+{
+	int data_len, witdata_len = 0;
+	char *witdata = &p2h[2];
+	uint8_t data[84];
+
+	bech32_decode(data, &data_len, addr);
+	p2h[0] = data[0];
+	/* Witness version is > 0 */
+	if (p2h[0])
+		p2h[0] += 0x50;
+	convert_bits(witdata, &witdata_len, data + 1, data_len - 1);
+	p2h[1] = witdata_len;
+	return witdata_len + 2;
+}
+
+/* Convert an address to a transaction and return the length of the transaction */
+int address_to_txn(char *p2h, const char *addr, const bool script, const bool segwit)
+{
+	if (segwit)
+		return segaddress_to_txn(p2h, addr);
+	if (script)
+		return address_to_scripttxn(p2h, addr);
+	return address_to_pubkeytxn(p2h, addr);
 }
 
 /*  For encoding nHeight into coinbase, return how many bytes were used */
