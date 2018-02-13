@@ -6137,8 +6137,8 @@ out_nouserwb:
 }
 
 /* Needs to be entered with workbase readcount and client holding a ref count. */
-static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, const workbase_t *wb, const char *nonce2,
-			      const uint32_t ntime32, const uint32_t version_mask,
+static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, const workbase_t *wb,
+			      const char *nonce2, const uint32_t ntime32, uint32_t version_mask,
 			      const char *nonce, uchar *hash, const bool stale)
 {
 	unsigned char merkle_root[32], merkle_sha[64];
@@ -6179,6 +6179,13 @@ static double submission_diff(sdata_t *sdata, const stratum_instance_t *client, 
 	/* Copy the cached header binary and insert the merkle root */
 	memcpy(data, wb->headerbin, 80);
 	memcpy(data + 36, merkle_root, 32);
+
+	/* Update nVersion when version_mask is in use */
+	if (version_mask) {
+		version_mask = htobe32(version_mask);
+		data32 = (uint32_t *)data;
+		*data32 |= version_mask;
+	}
 
 	/* Insert the nonce value into the data */
 	hex2bin(&benonce32, nonce, 4);
