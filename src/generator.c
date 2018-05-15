@@ -1784,7 +1784,7 @@ static void send_json_msgq(gdata_t *gdata, cs_msg_t **csmsgq)
 		 * to avoid sending parts of different messages */
 		if (proxy->sending  && proxy->sending != csmsg)
 			continue;
-		while (csmsg->len) {
+		while (csmsg->len > 0) {
 			int fd;
 
 			if (unlikely(!proxy->alive)) {
@@ -1799,7 +1799,7 @@ static void send_json_msgq(gdata_t *gdata, cs_msg_t **csmsgq)
 			if (ret < 1) {
 				if (!ret || errno == EAGAIN || errno == EWOULDBLOCK)
 					break;
-				csmsg->len = 0;
+				csmsg->len = ret = 0;
 				LOGNOTICE("Proxy %d:%d %s failed to send msg in send_json_msgq, dropping",
 					  proxy->id, proxy->subid, proxy->url);
 				disable_subproxy(gdata, proxy->parent, proxy);
@@ -1807,7 +1807,7 @@ static void send_json_msgq(gdata_t *gdata, cs_msg_t **csmsgq)
 			csmsg->ofs += ret;
 			csmsg->len -= ret;
 		}
-		if (!csmsg->len) {
+		if (csmsg->len < 1) {
 			proxy->sending = NULL;
 			DL_DELETE(*csmsgq, csmsg);
 			free(csmsg->buf);
