@@ -1625,10 +1625,17 @@ void *connector(void *arg)
 		for (i = 0; i < ckp->serverurls; i++) {
 			char oldurl[INET6_ADDRSTRLEN], oldport[8];
 			char *serverurl = ckp->serverurl[i];
+			int port;
 
 			if (!url_from_serverurl(serverurl, newurl, newport)) {
 				LOGWARNING("Failed to extract resolved url from %s", serverurl);
 				goto out;
+			}
+			port = atoi(newport);
+			/* All high port servers are treated as highdiff ports */
+			if (port > 4000) {
+				LOGNOTICE("Highdiff server %s", serverurl);
+				ckp->server_highdiff[i] = true;
 			}
 			sockd = ckp->oldconnfd[i];
 			if (url_from_socket(sockd, oldurl, oldport)) {

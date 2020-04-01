@@ -1342,6 +1342,7 @@ static bool parse_serverurls(ckpool_t *ckp, const json_t *arr_val)
 	}
 	ckp->serverurls = arr_size;
 	ckp->serverurl = ckalloc(sizeof(char *) * arr_size);
+	ckp->server_highdiff = ckzalloc(sizeof(bool) * arr_size);
 	ckp->nodeserver = ckzalloc(sizeof(bool) * arr_size);
 	ckp->trusted = ckzalloc(sizeof(bool) * arr_size);
 	for (i = 0; i < arr_size; i++) {
@@ -1501,6 +1502,7 @@ static void parse_config(ckpool_t *ckp)
 	json_get_string(&ckp->upstream, json_conf, "upstream");
 	json_get_int64(&ckp->mindiff, json_conf, "mindiff");
 	json_get_int64(&ckp->startdiff, json_conf, "startdiff");
+	json_get_int64(&ckp->highdiff, json_conf, "highdiff");
 	json_get_int64(&ckp->maxdiff, json_conf, "maxdiff");
 	json_get_string(&ckp->logdir, json_conf, "logdir");
 	json_get_int(&ckp->maxclients, json_conf, "maxclients");
@@ -1846,6 +1848,8 @@ int main(int argc, char **argv)
 		ckp.mindiff = 1;
 	if (!ckp.startdiff)
 		ckp.startdiff = 42;
+	if (!ckp.highdiff)
+		ckp.highdiff = 1000000;
 	if (!ckp.logdir)
 		ckp.logdir = strdup("logs");
 	if (!ckp.serverurls)

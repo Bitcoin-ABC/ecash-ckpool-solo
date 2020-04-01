@@ -3477,6 +3477,8 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, con
 	if (server >= ckp->serverurls)
 		server = 0;
 	client->server = server;
+	if (ckp->server_highdiff[server])
+		client->suggest_diff = ckp->highdiff;
 	client->diff = client->old_diff = ckp->startdiff;
 	client->ckp = ckp;
 	tv_time(&client->ldc);

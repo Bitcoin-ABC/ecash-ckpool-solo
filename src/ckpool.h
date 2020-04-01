@@ -240,6 +240,7 @@ struct ckpool_instance {
 	/* Difficulty settings */
 	int64_t mindiff; // Default 1
 	int64_t startdiff; // Default 42
+	int64_t highdiff; // Default 1000000
 	int64_t maxdiff; // No default
 
 	/* Coinbase data */
@@ -256,6 +257,7 @@ struct ckpool_instance {
 	server_instance_t **servers;
 	char **serverurl; // Array of URLs to bind our server/proxy to
 	int serverurls; // Number of server bindings
+	bool *server_highdiff; // If this server is highdiff
 	bool *nodeserver; // If this server URL serves node information
 	bool *trusted; // If this server URL accepts trusted remote nodes
 	char *upstream; // Upstream pool in trusted remote mode
