@@ -3477,9 +3477,12 @@ static stratum_instance_t *__stratum_add_instance(ckpool_t *ckp, int64_t id, con
 	if (server >= ckp->serverurls)
 		server = 0;
 	client->server = server;
-	if (ckp->server_highdiff[server])
-		client->suggest_diff = ckp->highdiff;
 	client->diff = client->old_diff = ckp->startdiff;
+	if (ckp->server_highdiff[server]) {
+		client->suggest_diff = ckp->highdiff;
+		if (client->suggest_diff > client->diff)
+			client->diff = client->old_diff = client->suggest_diff;
+	}
 	client->ckp = ckp;
 	tv_time(&client->ldc);
 	/* Points to ckp sdata in ckpool mode, but is changed later in proxy
