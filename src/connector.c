@@ -1116,7 +1116,7 @@ static void remote_server(ckpool_t *ckp, cdata_t *cdata, client_instance_t *clie
 		   client->id, client->address_name);
 	client->remote = true;
 	JSON_CPACK(val, "{sbsb}",
-		   "result", true, "ckdb", CKP_STANDALONE(ckp) ? false : true);
+		   "result", true, "ckdb", true);
 	send_client_json(ckp, cdata, client->id, val);
 	if (!ckp->rmem_warn)
 		set_recvbufsize(ckp, client->fd, 2097152);

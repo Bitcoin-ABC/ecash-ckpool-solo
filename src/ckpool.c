@@ -1559,7 +1559,6 @@ static void prepare_child(ckpool_t *ckp, proc_instance_t *pi, void *process, cha
 
 #ifdef USE_CKDB
 static struct option long_options[] = {
-	{"standalone",	no_argument,		0,	'A'},
 	{"btcsolo",	no_argument,		0,	'B'},
 	{"config",	required_argument,	0,	'c'},
 	{"daemonise",	no_argument,		0,	'D'},
@@ -1645,16 +1644,12 @@ int main(int argc, char **argv)
 		ckp.initial_args[ckp.args] = strdup(argv[ckp.args]);
 	ckp.initial_args[ckp.args] = NULL;
 
-	while ((c = getopt_long(argc, argv, "ABc:Dd:g:HhkLl:Nn:PpqRS:s:tu", long_options, &i)) != -1) {
+	while ((c = getopt_long(argc, argv, "Bc:Dd:g:HhkLl:Nn:PpqRS:s:tu", long_options, &i)) != -1) {
 		switch (c) {
-			case 'A':
-				ckp.standalone = true;
-				break;
 			case 'B':
 				if (ckp.proxy)
 					quit(1, "Cannot set both proxy and btcsolo mode");
 				ckp.btcsolo = true;
-				ckp.standalone = true;
 				break;
 			case 'c':
 				ckp.config = optarg;
@@ -1705,7 +1700,7 @@ int main(int argc, char **argv)
 			case 'N':
 				if (ckp.proxy || ckp.redirector || ckp.userproxy || ckp.passthrough)
 					quit(1, "Cannot set another proxy type or redirector and node mode");
-				ckp.standalone = ckp.proxy = ckp.passthrough = ckp.node = true;
+				ckp.proxy = ckp.passthrough = ckp.node = true;
 				break;
 			case 'n':
 				ckp.name = optarg;
@@ -1713,7 +1708,7 @@ int main(int argc, char **argv)
 			case 'P':
 				if (ckp.proxy || ckp.redirector || ckp.userproxy || ckp.node)
 					quit(1, "Cannot set another proxy type or redirector and passthrough mode");
-				ckp.standalone = ckp.proxy = ckp.passthrough = true;
+				ckp.proxy = ckp.passthrough = true;
 				break;
 			case 'p':
 				if (ckp.passthrough || ckp.redirector || ckp.userproxy || ckp.node)
@@ -1726,7 +1721,7 @@ int main(int argc, char **argv)
 			case 'R':
 				if (ckp.proxy || ckp.passthrough || ckp.userproxy || ckp.node)
 					quit(1, "Cannot set a proxy type or passthrough and redirector modes");
-				ckp.standalone = ckp.proxy = ckp.passthrough = ckp.redirector = true;
+				ckp.proxy = ckp.passthrough = ckp.redirector = true;
 				break;
 			case 'S':
 				ckp.ckdb_sockdir = strdup(optarg);
@@ -1737,7 +1732,7 @@ int main(int argc, char **argv)
 			case 't':
 				if (ckp.proxy)
 					quit(1, "Cannot set a proxy type and trusted remote mode");
-				ckp.standalone = ckp.remote = true;
+				ckp.remote = true;
 				break;
 			case 'u':
 				if (ckp.proxy || ckp.redirector || ckp.passthrough || ckp.node)
@@ -1784,23 +1779,6 @@ int main(int argc, char **argv)
 		realloc_strcat(&ckp.socket_dir, ckp.name);
 	}
 	trail_slash(&ckp.socket_dir);
-
-	if (!CKP_STANDALONE(&ckp)) {
-		if (!ckp.ckdb_name)
-			ckp.ckdb_name = "ckdb";
-		if (!ckp.ckdb_sockdir) {
-			ckp.ckdb_sockdir = strdup("/opt/");
-			realloc_strcat(&ckp.ckdb_sockdir, ckp.ckdb_name);
-		}
-		trail_slash(&ckp.ckdb_sockdir);
-
-		ret = mkdir(ckp.ckdb_sockdir, 0750);
-		if (ret && errno != EEXIST)
-			quit(1, "Failed to make directory %s", ckp.ckdb_sockdir);
-
-		ckp.ckdb_sockname = ckp.ckdb_sockdir;
-		realloc_strcat(&ckp.ckdb_sockname, "listener");
-	}
 
 	/* Ignore sigpipe */
 	signal(SIGPIPE, SIG_IGN);

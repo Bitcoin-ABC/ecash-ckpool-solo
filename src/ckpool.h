@@ -208,9 +208,6 @@ struct ckpool_instance {
 	/* Are we running as a proxy */
 	bool proxy;
 
-	/* Are we running without ckdb */
-	bool standalone;
-
 	/* Are we running in btcsolo mode */
 	bool btcsolo;
 
@@ -336,12 +333,6 @@ static const char __maybe_unused *stratum_msgs[] = {
 	"mining.configure",
 	""
 };
-
-#ifdef USE_CKDB
-#define CKP_STANDALONE(CKP) ((CKP)->standalone == true)
-#else
-#define CKP_STANDALONE(CKP) ((CKP) == (CKP)) /* Always true, silences unused warn */
-#endif
 
 #define SAFE_HASH_OVERHEAD(HASHLIST) (HASHLIST ? HASH_OVERHEAD(hh, HASHLIST) : 0)
 

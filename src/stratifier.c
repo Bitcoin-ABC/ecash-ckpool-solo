@@ -852,16 +852,7 @@ static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char 
 		}
 	}
 
-	if (CKP_STANDALONE(ckp))
-		return json_decref(val);
-
-	json_msg = ckdb_msg(ckp, sdata, val, idtype);
-	if (unlikely(!json_msg)) {
-		LOGWARNING("Failed to dump json from %s %s:%d", file, func, line);
-		return;
-	}
-
-	ckmsgq_add(sdata->ckdbq, json_msg);
+	return json_decref(val);
 }
 
 #define ckdbq_add(ckp, idtype, val) _ckdbq_add(ckp, idtype, val, __FILE__, __func__, __LINE__)
@@ -1051,20 +1042,7 @@ static void send_ageworkinfo(ckpool_t *ckp, const int64_t id)
 	ts_t ts_now;
 	json_t *val;
 
-	if (CKP_STANDALONE(ckp))
-		return;
-
-	ts_realtime(&ts_now);
-	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
-
-	JSON_CPACK(val, "{sI,ss,ss,ss,ss,ss}",
-			"workinfoid", id,
-			"poolinstance", ckp->name,
-			"createdate", cdfield,
-			"createby", "code",
-			"createcode", __func__,
-			"createinet", ckp->serverurl[0]);
-	ckdbq_add(ckp, ID_AGEWORKINFO, val);
+	return;
 }
 
 /* Entered with instance_lock held, make sure wb can't be pulled from us */
@@ -4036,10 +4014,6 @@ char *stratifier_stats(ckpool_t *ckp, void *data)
 	/* Don't know exactly how big the string is so just count the pointer for now */
 	ckmsgq_stats(sdata->srecvs, sizeof(char *), &subval);
 	json_set_object(val, "srecvs", subval);
-	if (!CKP_STANDALONE(ckp)) {
-		ckmsgq_stats(sdata->ckdbq, sizeof(char *), &subval);
-		json_set_object(val, "ckdbq", subval);
-	}
 	ckmsgq_stats(sdata->stxnq, sizeof(json_params_t), &subval);
 	json_set_object(val, "stxnq", subval);
 
@@ -5848,25 +5822,8 @@ static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_
 			goto out;
 		}
 	}
-	if (CKP_STANDALONE(ckp)) {
-		if (!ckp->btcsolo || client->user_instance->btcaddress)
-			ret = true;
-	} else {
-		/* Preauth workers for the first 10 minutes after the user is
-		 * first authorised by ckdb to avoid floods of worker auths.
-		 * *errnum is implied zero already so ret will be set true */
-		if (!user->auth_time || time(NULL) - user->auth_time > 600)
-			*errnum = send_recv_auth(client);
-		if (!*errnum)
-			ret = true;
-		else if (*errnum < 0 && user->secondaryuserid) {
-			/* This user has already been authorised but ckdb is
-			 * offline so we assume they already exist but add the
-			 * auth request to the queued messages. */
-			queue_delayed_auth(client);
-			ret = true;
-		}
-	}
+	if (!ckp->btcsolo || client->user_instance->btcaddress)
+		ret = true;
 
 	/* We do the preauth etc. in remote mode, and leave final auth to
 	 * upstream pool to complete. */
@@ -6319,7 +6276,7 @@ static void check_best_diff(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user
 			sdata->stats.best_diff = sdiff;
 		mutex_unlock(&sdata->stats_lock);
 	}
-	if (likely(!CKP_STANDALONE(ckp) || (!best_user && !best_worker) || !client))
+	if (likely((!best_user && !best_worker) || !client))
 		return;
 	snprintf(buf, 511, "New best %sshare for %s: %lf", best_ever ? "ever " : "",
 		 best_user ? "user" : "worker", sdiff);
@@ -6541,8 +6498,6 @@ out_nowb:
 	else
 		json_set_int64(val, "clientid", client->id);
 	json_set_string(val, "enonce1", client->enonce1);
-	if (!CKP_STANDALONE(ckp))
-		json_set_string(val, "secondaryuserid", user->secondaryuserid);
 	json_set_string(val, "nonce2", nonce2);
 	json_set_string(val, "nonce", nonce);
 	json_set_string(val, "ntime", ntime);
@@ -6607,7 +6562,7 @@ out:
 	}
 
 	if (!share) {
-		if (!CKP_STANDALONE(ckp) || ckp->remote) {
+		if (ckp->remote) {
 			val = json_object();
 			if (ckp->remote)
 				json_set_int64(val, "clientid", client->virtualid);
@@ -7664,11 +7619,6 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 	if (unlikely(!method_val || !method)) {
 		LOGWARNING("Failed to get method from remote message %s", buf);
 		goto out;
-	}
-	if (!CKP_STANDALONE(ckp)) {
-		/* Rename the pool instance to match main pool (for now?) */
-		json_set_string(val, "poolinstance", ckp->name);
-		json_set_string(val, "createby", "remote");
 	}
 
 	if (likely(!safecmp(method, stratum_msgs[SM_SHARE])))
@@ -9053,10 +9003,6 @@ void *stratifier(void *arg)
 	sdata->sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
 	sdata->stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
 	sdata->srecvs = create_ckmsgqs(ckp, "sreceiver", &srecv_process, threads);
-	if (!CKP_STANDALONE(ckp)) {
-		sdata->ckdbq = create_ckmsgqs(ckp, "ckdbqueue", &ckdbq_process, threads);
-		create_pthread(&pth_heartbeat, ckdb_heartbeat, ckp);
-	}
 	read_poolstats(ckp, &tvsec_diff);
 	read_userstats(ckp, sdata, tvsec_diff);
 
