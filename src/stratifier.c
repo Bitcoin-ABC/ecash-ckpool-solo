@@ -768,23 +768,11 @@ static void ssend_bulk_prepend(sdata_t *sdata, ckmsg_t *bulk_send, const int mes
 	mutex_unlock(ssends->lock);
 }
 
-/* Strip fields that will be recreated upstream or won't be used to minimise
- * bandwidth. */
-static void strip_fields(ckpool_t *ckp, json_t *val)
-{
-	json_object_del(val, "poolinstance");
-	json_object_del(val, "createby");
-	json_object_del(val, "createdate");
-	json_object_del(val, "createcode");
-	json_object_del(val, "createinet");
-}
-
 /* Send a json msg to an upstream trusted remote server */
 static void upstream_json(ckpool_t *ckp, json_t *val)
 {
 	char *msg;
 
-	strip_fields(ckp, val);
 	msg = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER | JSON_COMPACT | JSON_EOL);
 	/* Connector absorbs and frees msg */
 	connector_upstream_msg(ckp, msg);
@@ -909,9 +897,6 @@ static json_t *generate_workinfo(ckpool_t *ckp, const workbase_t *wb, const char
 
 static void send_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *wb)
 {
-	json_t *val = generate_workinfo(ckp, wb, __func__);
-
-	json_decref(val);
 	if (!ckp->proxy)
 		send_node_workinfo(ckp, sdata, wb);
 }
@@ -1658,9 +1643,9 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	stratum_instance_t *client;
 	ckmsg_t *bulk_send = NULL;
 	workbase_t *tmp, *tmpa;
-	json_t *val, *wb_val;
 	int messages = 0;
 	int64_t skip;
+	json_t *val;
 
 	ts_realtime(&wb->gentime);
 
@@ -1689,19 +1674,16 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 
 	val = generate_workinfo(ckp, wb, __func__);
 
-	wb_val = json_deep_copy(val);
-
 	/* Set jobid with mapped id for other nodes and remotes */
-	json_set_int64(wb_val, "jobid", wb->mapped_id);
+	json_set_int64(val, "jobid", wb->mapped_id);
 
 	/* Replace workinfoid to mapped id for ckdb */
 	json_set_int64(val, "workinfoid", wb->mapped_id);
 
 	/* Strip unnecessary fields and add extra fields needed */
-	strip_fields(ckp, wb_val);
-	json_set_int(wb_val, "txns", wb->txns);
-	json_set_string(wb_val, "txn_hashes", wb->txn_hashes);
-	json_set_int(wb_val, "merkles", wb->merkles);
+	json_set_int(val, "txns", wb->txns);
+	json_set_string(val, "txn_hashes", wb->txn_hashes);
+	json_set_int(val, "merkles", wb->merkles);
 
 	skip = subclient(wb->client_id);
 
@@ -1715,7 +1697,7 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 		/* Don't send remote workinfo back to the source remote */
 		if (client->id == wb->client_id)
 			continue;
-		json_msg = json_deep_copy(wb_val);
+		json_msg = json_deep_copy(val);
 		json_set_string(json_msg, "method", stratum_msgs[SM_WORKINFO]);
 		client_msg = ckalloc(sizeof(ckmsg_t));
 		msg = ckzalloc(sizeof(smsg_t));
@@ -1733,7 +1715,7 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 		/* Don't send node workinfo back to the source node */
 		if (client->id == skip)
 			continue;
-		json_msg = json_deep_copy(wb_val);
+		json_msg = json_deep_copy(val);
 		json_set_string(json_msg, "node.method", stratum_msgs[SM_WORKINFO]);
 		client_msg = ckalloc(sizeof(ckmsg_t));
 		msg = ckzalloc(sizeof(smsg_t));
@@ -1745,14 +1727,12 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	}
 	ck_runlock(&sdata->instance_lock);
 
-	json_decref(wb_val);
+	json_decref(val);
 
 	if (bulk_send) {
 		LOGINFO("Sending remote workinfo to %d other remote servers", messages);
 		ssend_bulk_append(sdata, bulk_send, messages);
 	}
-
-	json_decref(val);
 }
 
 static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t client_id)
@@ -5654,7 +5634,6 @@ downstream_block(ckpool_t *ckp, sdata_t *sdata, const json_t *val, const int cbl
 	json_t *block_val = json_deep_copy(val);
 
 	/* Strip unnecessary fields and add extra fields needed */
-	strip_fields(ckp, block_val);
 	json_set_string(block_val, "method", stratum_msgs[SM_BLOCK]);
 	add_remote_blockdata(ckp, block_val, cblen, coinbase, data);
 	downstream_json(sdata, block_val, 0, SSEND_PREPEND);
