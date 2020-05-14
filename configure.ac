@@ -74,30 +74,9 @@ JANSSON_LIBS="jansson-2.10/src/.libs/libjansson.a"
 
 AC_SUBST(JANSSON_LIBS)
 
-AC_ARG_WITH([ckdb],
-	[AC_HELP_STRING([--with-ckdb],[Compile ckpool with ckdb database support (default disabled)])],
-	[ckdb=$withval],[ckdb=no]
-	)
-
 AC_SEARCH_LIBS(clock_nanosleep, rt, , "Error: Required library rt not found." && exit 1)
 AC_SEARCH_LIBS(exp, m, , echo "Error: Required library math not found." && exit 1)
 AC_SEARCH_LIBS(pthread_mutex_trylock, pthread, , "Error: Required library pthreads not found." && exit 1)
-
-if test "x$ckdb" != "xno"; then
-	AC_SEARCH_LIBS(PQdb, pq, , echo "Error: Required library pq
-		not found. Install it or disable support by removing --with-ckdb" && exit 1)
-	AC_SEARCH_LIBS(BN_init, crypto, , echo "Error: Required library crypto
-		not found. Install them or disable support by removing --with-ckdb" && exit 1)
-	AC_SEARCH_LIBS(SSL_accept, ssl, , echo "Error: Required libraries ssl
-		not found. Install them or disable support by removing --with-ckdb" && exit 1)
-	AC_SEARCH_LIBS(cblas_dgemm, gslcblas, ,echo "Error: Required library gslcblas
-		not found. Install them or disable support by removing --with-ckdb" && exit 1)
-	AC_SEARCH_LIBS(gsl_blas_dgemm, gsl, , echo "Error: Required library gsl
-		not found. Install them or disable support by removing --with-ckdb" && exit 1)
-	AC_DEFINE([USE_CKDB], [1], [Defined to 1 if ckdb support required])
-fi
-AM_CONDITIONAL([WANT_CKDB], [test "x$ckdb" != "xno"])
-AC_SUBST(DB_LIBS)
 
 AC_OUTPUT([Makefile] [src/Makefile])
 
