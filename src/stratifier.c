@@ -740,8 +740,6 @@ static void age_share_hashtable(sdata_t *sdata, const int64_t wb_id)
 		LOGINFO("Aged %d shares from share hashtable", aged);
 }
 
-#define ckdbq_add(ckp, idtype, val) json_decref(val)
-
 /* Append a bulk list already created to the ssends list */
 static void ssend_bulk_append(sdata_t *sdata, ckmsg_t *bulk_send, const int messages)
 {
@@ -914,18 +912,9 @@ static void send_workinfo(ckpool_t *ckp, sdata_t *sdata, const workbase_t *wb)
 {
 	json_t *val = generate_workinfo(ckp, wb, __func__);
 
-	ckdbq_add(ckp, ID_WORKINFO, val);
+	json_decref(val);
 	if (!ckp->proxy)
 		send_node_workinfo(ckp, sdata, wb);
-}
-
-static void send_ageworkinfo(ckpool_t *ckp, const int64_t id)
-{
-	char cdfield[64];
-	ts_t ts_now;
-	json_t *val;
-
-	return;
 }
 
 /* Entered with instance_lock held, make sure wb can't be pulled from us */
@@ -1033,7 +1022,6 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 			ck_wunlock(&sdata->workbase_lock);
 
 			/* Drop lock to avoid recursive locks */
-			send_ageworkinfo(ckp, tmp->id);
 			age_share_hashtable(sdata, tmp->id);
 			clear_workbase(ckp, tmp);
 
@@ -1692,8 +1680,6 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 			HASH_DEL(sdata->remote_workbases, tmp);
 			ck_wunlock(&sdata->workbase_lock);
 
-			/* Drop lock to send this */
-			send_ageworkinfo(ckp, tmp->mapped_id);
 			clear_workbase(ckp, tmp);
 
 			ck_wlock(&sdata->workbase_lock);
@@ -1767,7 +1753,7 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 		ssend_bulk_append(sdata, bulk_send, messages);
 	}
 
-	ckdbq_add(ckp, ID_WORKINFO, val);
+	json_decref(val);
 }
 
 static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t client_id)
@@ -2200,7 +2186,7 @@ static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 	put_workbase(sdata, wb);
 
 	bval_copy = json_deep_copy(bval);
-	ckdbq_add(ckp, ID_BLOCK, bval);
+	json_decref(bval);
 	if (ret)
 		block_solve(ckp, bval_copy);
 	else
@@ -3738,7 +3724,7 @@ static void block_solve(ckpool_t *ckp, json_t *val)
 	if (ckp->remote)
 		upstream_json_msgtype(ckp, val, SM_BLOCK);
 	else
-		ckdbq_add(ckp, ID_BLOCK, val);
+		json_decref(val);
 
 	if (!workername) {
 		ASPRINTF(&msg, "Block solved by %s!", ckp->name);
@@ -5744,7 +5730,7 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 		upstream_json_msgtype(ckp, val, SM_BLOCK);
 	} else {
 		downstream_block(ckp, sdata, val, cblen, coinbase, data);
-		ckdbq_add(ckp, ID_BLOCK, val);
+		json_decref(val);
 	}
 
 	/* Submit block locally after sending it to remote locations avoiding
@@ -6182,7 +6168,7 @@ out_nowb:
 	if (ckp->remote)
 		upstream_json_msgtype(ckp, val, SM_SHARE);
 	else
-		ckdbq_add(ckp, ID_SHARES, val);
+		json_decref(val);
 out:
 	if (!sdata->wbincomplete && ((!result && !submit) || !share)) {
 		/* Is this the first in a run of invalids? */
@@ -6229,7 +6215,7 @@ out:
 			json_set_string(val, "createby", "code");
 			json_set_string(val, "createcode", __func__);
 			json_set_string(val, "createinet", ckp->serverurl[client->server]);
-			ckdbq_add(ckp, ID_SHAREERR, val);
+			json_decref(val);
 		}
 		LOGINFO("Invalid share from client %s: %s", client->identity, client->workername);
 	}
@@ -6850,7 +6836,7 @@ static void parse_remote_share(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 		json_set_string(val, "secondaryuserid", user->secondaryuserid);
 	remap_workinfo_id(sdata, val, client_id);
 
-	ckdbq_add(ckp, ID_SHARES, val);
+	json_decref(val);
 }
 
 static void parse_remote_shareerr(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf,
@@ -6874,7 +6860,7 @@ static void parse_remote_shareerr(ckpool_t *ckp, sdata_t *sdata, json_t *val, co
 		json_set_string(val, "secondaryuserid", user->secondaryuserid);
 	remap_workinfo_id(sdata, val, client_id);
 
-	ckdbq_add(ckp, ID_SHAREERR, val);
+	json_decref(val);
 }
 
 static void send_auth_response(sdata_t *sdata, const int64_t client_id, const bool ret,
@@ -6987,7 +6973,7 @@ static void parse_remote_workerstats(ckpool_t *ckp, const json_t *val, const int
 	client_id = (remote_id << 32) | (client_id & 0xffffffffll);
 	json_set_int64(res, "clientid", client_id);
 
-	ckdbq_add(ckp, ID_WORKERSTATS, res);
+	json_decref(res);
 }
 
 #define parse_remote_workinfo(ckp, val, client_id) add_node_base(ckp, val, true, client_id)
@@ -7127,7 +7113,7 @@ out_add:
 	if (!ckp->remote)
 		downstream_json(sdata, res, client_id, SSEND_PREPEND);
 
-	ckdbq_add(ckp, ID_BLOCK, res);
+	json_decref(res);
 }
 
 void parse_upstream_block(ckpool_t *ckp, json_t *val)
@@ -7801,20 +7787,6 @@ out:
 	discard_json_params(jp);
 }
 
-/* Called 32 times per min, we send the updated stats to ckdb of those users
- * who have gone 1 minute between updates. This ends up staggering stats to
- * avoid floods of stat data coming at once. */
-static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
-{
-	json_entry_t *json_list = NULL, *entry, *tmpentry;
-	user_instance_t *user, *tmp;
-	char cdfield[64];
-	time_t now_t;
-	ts_t ts_now;
-
-	return;
-}
-
 static void add_log_entry(log_entry_t **entries, char **fname, char **buf)
 {
 	log_entry_t *entry = ckalloc(sizeof(log_entry_t));
@@ -8235,7 +8207,7 @@ static void *statsupdate(void *arg)
 				"createby", "code",
 				"createcode", __func__,
 				"createinet", ckp->serverurl[0]);
-		ckdbq_add(ckp, ID_POOLSTATS, val);
+		json_decref(val);
 
 		/* Update stats 32 times per minute to divide up userstats for
 		 * ckdb, displaying status every minute. */
@@ -8251,7 +8223,6 @@ static void *statsupdate(void *arg)
 			/* Calculate how long it's really been for accurate
 			 * stats update */
 			per_tdiff = tvdiff(&now, &diff);
-			update_workerstats(ckp, sdata);
 
 			mutex_lock(&sdata->uastats_lock);
 			unaccounted_shares = stats->unaccounted_shares;
@@ -8387,7 +8358,7 @@ static void read_poolstats(ckpool_t *ckp, int *tvsec_diff)
 void *stratifier(void *arg)
 {
 	proc_instance_t *pi = (proc_instance_t *)arg;
-	pthread_t pth_blockupdate, pth_statsupdate, pth_heartbeat;
+	pthread_t pth_blockupdate, pth_statsupdate;
 	int threads, tvsec_diff = 0;
 	ckpool_t *ckp = pi->ckp;
 	int64_t randomiser;
