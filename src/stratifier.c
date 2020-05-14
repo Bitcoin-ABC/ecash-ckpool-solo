@@ -1677,7 +1677,7 @@ static void add_remote_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb)
 	/* Set jobid with mapped id for other nodes and remotes */
 	json_set_int64(val, "jobid", wb->mapped_id);
 
-	/* Replace workinfoid to mapped id for ckdb */
+	/* Replace workinfoid to mapped id */
 	json_set_int64(val, "workinfoid", wb->mapped_id);
 
 	/* Strip unnecessary fields and add extra fields needed */
@@ -6796,22 +6796,11 @@ static void parse_remote_share(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 	copy_tv(&user->last_share, &now_t);
 
 	LOGINFO("Added %.0lf remote shares to worker %s", diff, workername);
-
-	/* Remove unwanted entry, add extra info and submit it to ckdb */
-	json_object_del(val, "method");
-	/* Create a new copy for use by ckdbq_add */
-	val = json_deep_copy(val);
-	if (likely(user->secondaryuserid))
-		json_set_string(val, "secondaryuserid", user->secondaryuserid);
-	remap_workinfo_id(sdata, val, client_id);
-
-	json_decref(val);
 }
 
 static void parse_remote_shareerr(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf,
 				  const int64_t client_id)
 {
-	user_instance_t *user = NULL;
 	const char *workername;
 
 	workername = json_string_value(json_object_get(val, "workername"));
@@ -6819,17 +6808,8 @@ static void parse_remote_shareerr(ckpool_t *ckp, sdata_t *sdata, json_t *val, co
 		LOGWARNING("Failed to find workername in parse_remote_shareerr %s", buf);
 		return;
 	}
-	user = generate_remote_user(ckp, workername);
-
-	/* Remove unwanted entry, add extra info and submit it to ckdb */
-	json_object_del(val, "method");
-	/* Create a new copy for use by ckdbq_add */
-	val = json_deep_copy(val);
-	if (likely(user->secondaryuserid))
-		json_set_string(val, "secondaryuserid", user->secondaryuserid);
-	remap_workinfo_id(sdata, val, client_id);
-
-	json_decref(val);
+	/* Return value ignored */
+	generate_remote_user(ckp, workername);
 }
 
 static void send_auth_response(sdata_t *sdata, const int64_t client_id, const bool ret,
@@ -6929,22 +6909,6 @@ void parse_upstream_workinfo(ckpool_t *ckp, json_t *val)
 	add_node_base(ckp, val, true, 0);
 }
 
-/* Remap the remote client id to the local one and submit to ckdb */
-static void parse_remote_workerstats(ckpool_t *ckp, const json_t *val, const int64_t remote_id)
-{
-	int64_t client_id;
-	json_t *res;
-
-	/* Create copy for ckdb to absorb */
-	res = json_deep_copy(val);
-	json_get_int64(&client_id, res, "clientid");
-	/* Encode remote server client_id into remote client's id */
-	client_id = (remote_id << 32) | (client_id & 0xffffffffll);
-	json_set_int64(res, "clientid", client_id);
-
-	json_decref(res);
-}
-
 #define parse_remote_workinfo(ckp, val, client_id) add_node_base(ckp, val, true, client_id)
 
 static void parse_remote_auth(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratum_instance_t *remote,
@@ -7005,8 +6969,7 @@ static void parse_remote_workers(sdata_t *sdata, const json_t *val, const char *
 	LOGDEBUG("Adding %d remote workers to user %s", workers, username);
 }
 
-/* Attempt to submit a remote block locally by recreating it from its workinfo
- * in addition to sending it to ckdb */
+/* Attempt to submit a remote block locally by recreating it from its workinfo */
 static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf,
 			       const int64_t client_id)
 {
@@ -7076,7 +7039,7 @@ static void parse_remote_block(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 	stratum_broadcast_message(sdata, msg);
 	free(msg);
 out_add:
-	/* Make a duplicate for use by ckdbq_add */
+	/* Make a duplicate for use downstream */
 	res = json_deep_copy(val);
 	remap_workinfo_id(sdata, res, client_id);
 	if (!ckp->remote)
@@ -7226,8 +7189,6 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 		parse_remote_share(ckp, sdata, val, buf, client->id);
 	else if (!safecmp(method, stratum_msgs[SM_TRANSACTIONS]))
 		add_node_txns(ckp, sdata, val);
-	else if (!safecmp(method, stratum_msgs[SM_WORKERSTATS]))
-		parse_remote_workerstats(ckp, val, client->id);
 	else if (!safecmp(method, stratum_msgs[SM_WORKINFO]))
 		parse_remote_workinfo(ckp, val, client->id);
 	else if (!safecmp(method, stratum_msgs[SM_AUTH]))
@@ -8178,8 +8139,8 @@ static void *statsupdate(void *arg)
 				"createinet", ckp->serverurl[0]);
 		json_decref(val);
 
-		/* Update stats 32 times per minute to divide up userstats for
-		 * ckdb, displaying status every minute. */
+		/* Update stats 32 times per minute to divide up userstats,
+		 * displaying status every minute. */
 		for (i = 0; i < 32; i++) {
 			int64_t unaccounted_shares,
 				unaccounted_diff_shares,
