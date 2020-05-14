@@ -33,3 +33,6 @@ ckpmsg_LDADD = libckpool.a @JANSSON_LIBS@
 
 notifier_SOURCES = notifier.c
 notifier_LDADD = libckpool.a @JANSSON_LIBS@
+
+install-exec-hook:
+	setcap CAP_NET_BIND_SERVICE=+eip $(bindir)/ckpool
