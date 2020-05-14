@@ -383,34 +383,6 @@ struct txntable {
 #define ID_ADDRAUTH 8
 #define ID_HEARTBEAT 9
 
-static const char *ckdb_ids[] = {
-	"authorise",
-	"workinfo",
-	"ageworkinfo",
-	"shares",
-	"shareerror",
-	"poolstats",
-	"workerstats",
-	"block",
-	"addrauth",
-	"heartbeat"
-};
-
-static const char *ckdb_seq_names[] = {
-	"seqauthorise",
-	"seqworkinfo",
-	"seqageworkinfo",
-	"seqshares",
-	"seqshareerror",
-	"seqpoolstats",
-	"seqworkerstats",
-	"seqblock",
-	"seqaddrauth",
-	"seqheartbeat"
-};
-
-#define ID_COUNT (sizeof(ckdb_ids)/sizeof(char *))
-
 struct stratifier_data {
 	ckpool_t *ckp;
 
@@ -425,16 +397,6 @@ struct stratifier_data {
 	/* Protects changes to unaccounted pool stats */
 	mutex_t uastats_lock;
 
-	/* Serialises sends/receives to ckdb if possible */
-	mutex_t ckdb_lock;
-	/* Protects sequence numbers */
-	mutex_t ckdb_msg_lock;
-	/* Incrementing global sequence number */
-	uint64_t ckdb_seq;
-	/* Incrementing ckdb_ids[] sequence numbers */
-	uint64_t ckdb_seq_ids[ID_COUNT];
-
-	bool ckdb_offline;
 	bool verbose;
 
 	uint64_t enonce1_64;
@@ -472,7 +434,6 @@ struct stratifier_data {
 	ckmsgq_t *updateq;	// Generator base work updates
 	ckmsgq_t *ssends;	// Stratum sends
 	ckmsgq_t *srecvs;	// Stratum receives
-	ckmsgq_t *ckdbq;	// ckdb
 	ckmsgq_t *sshareq;	// Stratum share sends
 	ckmsgq_t *sauthq;	// Stratum authorisations
 	ckmsgq_t *stxnq;	// Transaction requests
@@ -779,79 +740,9 @@ static void age_share_hashtable(sdata_t *sdata, const int64_t wb_id)
 		LOGINFO("Aged %d shares from share hashtable", aged);
 }
 
-static char *status_chars = "|/-\\";
-
-/* Absorbs the json and generates a ckdb json message, logs it to the ckdb
- * log and returns the malloced message. */
-static char *ckdb_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, const int idtype)
-{
-	char *json_msg;
-	char logname[512];
-	char *ret = NULL;
-	uint64_t seqall;
-
-	json_set_int(val, "seqstart", ckp->starttime);
-	json_set_int(val, "seqpid", ckp->startpid);
-	/* Set the atomically incrementing sequence numbers */
-	mutex_lock(&sdata->ckdb_msg_lock);
-	seqall = sdata->ckdb_seq++;
-	json_set_int(val, "seqall", seqall);
-	json_set_int(val, ckdb_seq_names[idtype], sdata->ckdb_seq_ids[idtype]++);
-	mutex_unlock(&sdata->ckdb_msg_lock);
-
-	json_msg = json_dumps(val, JSON_COMPACT);
-	if (unlikely(!json_msg))
-		goto out;
-	ASPRINTF(&ret, "%s.%"PRIu64".json=%s", ckdb_ids[idtype], seqall, json_msg);
-	free(json_msg);
-out:
-	json_decref(val);
-	snprintf(logname, 511, "%s%s", ckp->logdir, ckp->ckdb_name);
-	rotating_log(logname, ret);
-	return ret;
-}
-
 static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char *file,
 		       const char *func, const int line)
 {
-	sdata_t *sdata = ckp->sdata;
-	static time_t time_counter;
-	static int counter = 0;
-	char *json_msg;
-
-	if (unlikely(!val)) {
-		LOGWARNING("Invalid json sent to ckdbq_add from %s %s:%d", file, func, line);
-		return;
-	}
-
-	if (!ckp->quiet) {
-		time_t now_t = time(NULL);
-
-		if (now_t != time_counter) {
-			double sdiff = sdata->stats.accounted_diff_shares;
-			pool_stats_t *stats = &sdata->stats;
-			char stamp[128], hashrate[16], ch;
-
-			/* Rate limit to 1 update per second */
-			time_counter = now_t;
-			suffix_string(stats->dsps1 * nonces, hashrate, 16, 3);
-			ch = status_chars[(counter++) & 0x3];
-			get_timestamp(stamp);
-			if (likely(sdata->current_workbase)) {
-				double bdiff = sdiff / sdata->current_workbase->network_diff * 100;
-
-				fprintf(stdout, "\33[2K\r%s %c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares  %.1f%% diff",
-					stamp, ch, hashrate, stats->sps1, stats->users + stats->remote_users,
-				        stats->workers + stats->remote_workers, sdiff, bdiff);
-			} else {
-				fprintf(stdout, "\33[2K\r%s %c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares",
-					stamp, ch, hashrate, stats->sps1, stats->users + stats->remote_users,
-				        stats->workers + stats->remote_workers, sdiff);
-			}
-			fflush(stdout);
-		}
-	}
-
 	return json_decref(val);
 }
 
@@ -2475,7 +2366,6 @@ static sdata_t *duplicate_sdata(const sdata_t *sdata)
 	/* Use the same work queues for all subproxies */
 	dsdata->ssends = sdata->ssends;
 	dsdata->srecvs = sdata->srecvs;
-	dsdata->ckdbq = sdata->ckdbq;
 	dsdata->sshareq = sdata->sshareq;
 	dsdata->sauthq = sdata->sauthq;
 	dsdata->stxnq = sdata->stxnq;
@@ -4589,27 +4479,6 @@ static void get_uptime(sdata_t *sdata, int *sockd)
 	send_api_response(val, *sockd);
 }
 
-/* For emergency use only, flushes all pending ckdbq messages */
-static void ckdbq_flush(sdata_t *sdata)
-{
-	ckmsgq_t *ckdbq = sdata->ckdbq;
-	int flushed = 0;
-
-	mutex_lock(ckdbq->lock);
-	while (ckdbq->msgs) {
-		ckmsg_t *msg = ckdbq->msgs;
-
-		DL_DELETE(ckdbq->msgs, msg);
-		free(msg->data);
-		free(msg);
-		ckdbq->messages--;
-		flushed++;
-	}
-	mutex_unlock(ckdbq->lock);
-
-	LOGWARNING("Flushed %d messages from ckdb queue", flushed);
-}
-
 static void stratum_loop(ckpool_t *ckp, proc_instance_t *pi)
 {
 	sdata_t *sdata = ckp->sdata;
@@ -4765,8 +4634,6 @@ retry:
 		del_proxy(ckp, sdata, buf);
 	} else if (cmdmatch(buf, "loglevel")) {
 		sscanf(buf, "loglevel=%d", &ckp->loglevel);
-	} else if (cmdmatch(buf, "ckdbflush")) {
-		ckdbq_flush(sdata);
 	} else if (cmdmatch(buf, "resetshares")) {
 		reset_bestshares(sdata);
 	} else
@@ -5478,216 +5345,6 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 	}
 
 	return user;
-}
-
-static void set_worker_mindiff(ckpool_t *ckp, const char *workername, int mindiff)
-{
-	stratum_instance_t *client;
-	sdata_t *sdata = ckp->sdata;
-	worker_instance_t *worker;
-	user_instance_t *user;
-
-	/* Find the user first */
-	user = user_by_workername(sdata, workername);
-
-	/* Then find the matching worker user */
-	worker = get_worker(sdata, user, workername);
-
-	if (mindiff < 1) {
-		if (likely(!mindiff)) {
-			worker->mindiff = 0;
-			return;
-		}
-		LOGINFO("Worker %s requested invalid diff %d", worker->workername, mindiff);
-		return;
-	}
-	if (mindiff < ckp->mindiff)
-		mindiff = ckp->mindiff;
-	if (mindiff == worker->mindiff)
-		return;
-	worker->mindiff = mindiff;
-
-	/* Iterate over all the workers from this user to find any with the
-	 * matching worker that are currently live and send them a new diff
-	 * if we can. Otherwise it will only act as a clamp on next share
-	 * submission. */
-	ck_rlock(&sdata->instance_lock);
-	DL_FOREACH2(user->clients, client, user_next) {
-		if (client->worker_instance != worker)
-			continue;
-		/* Per connection suggest diff overrides worker mindiff ugh */
-		if (mindiff < client->suggest_diff)
-			continue;
-		if (mindiff == client->diff)
-			continue;
-		client->diff_change_job_id = sdata->workbase_id + 1;
-		client->old_diff = client->diff;
-		client->diff = mindiff;
-		stratum_send_diff(sdata, client);
-	}
-	ck_runlock(&sdata->instance_lock);
-}
-
-static void parse_worker_diffs(ckpool_t *ckp, json_t *worker_array)
-{
-	const char *workername;
-	json_t *worker_entry;
-	size_t index;
-	int mindiff;
-
-	json_array_foreach(worker_array, index, worker_entry) {
-		workername = json_string_value(json_object_get(worker_entry, "workername"));
-		if (!workername)
-			continue;
-		json_get_int(&mindiff, worker_entry, "difficultydefault");
-		set_worker_mindiff(ckp, workername, mindiff);
-	}
-}
-
-/* Send this to the database and parse the response to authorise a user
- * and get SUID parameters back. We don't add these requests to the sdata->ckdbqueue
- * since we have to wait for the response but this is done from the authoriser
- * thread so it won't hold anything up but other authorisations. Needs to be
- * entered with client holding a ref count. */
-static int send_recv_auth(stratum_instance_t *client)
-{
-	user_instance_t *user = client->user_instance;
-	ckpool_t *ckp = client->ckp;
-	sdata_t *sdata = ckp->sdata;
-	char *buf = NULL, *json_msg;
-	bool contended = false;
-	size_t responselen = 0;
-	char cdfield[64];
-	int ret = 1;
-	json_t *val;
-	ts_t now;
-
-	ts_realtime(&now);
-	sprintf(cdfield, "%lu,%lu", now.tv_sec, now.tv_nsec);
-
-	val = json_object();
-	json_set_string(val, "username", user->username);
-	json_set_string(val, "workername", client->workername);
-	json_set_string(val, "poolinstance", ckp->name);
-	json_set_string(val, "useragent", client->useragent);
-	json_set_int(val, "clientid", client->id);
-	json_set_string(val,"enonce1", client->enonce1);
-	json_set_bool(val, "preauth", false);
-	json_set_string(val, "createdate", cdfield);
-	json_set_string(val, "createby", "code");
-	json_set_string(val, "createcode", __func__);
-	json_set_string(val, "createinet", client->address);
-	if (user->btcaddress)
-		json_msg = ckdb_msg(ckp, sdata, val, ID_ADDRAUTH);
-	else
-		json_msg = ckdb_msg(ckp, sdata, val, ID_AUTH);
-	if (unlikely(!json_msg)) {
-		LOGWARNING("Failed to dump json in send_recv_auth");
-		goto out;
-	}
-
-	/* We want responses from ckdb serialised and not interleaved with
-	 * other requests. Wait up to 3 seconds for exclusive access to ckdb
-	 * and if we don't receive it treat it as a delayed auth if possible */
-	if (likely(!mutex_timedlock(&sdata->ckdb_lock, 3))) {
-		buf = ckdb_msg_call(ckp, json_msg);
-		mutex_unlock(&sdata->ckdb_lock);
-	} else
-		contended = true;
-
-	free(json_msg);
-	/* Leave ample room for response based on buf length */
-	if (likely(buf))
-		responselen = strlen(buf);
-	if (likely(responselen > 0)) {
-		char *cmd = NULL, *secondaryuserid = NULL, *response;
-		json_error_t err_val;
-		json_t *val = NULL;
-		int offset = 0;
-
-		LOGINFO("Got ckdb response: %s", buf);
-		response = alloca(responselen);
-		memset(response, 0, responselen);
-		if (unlikely(sscanf(buf, "%*d.%*d.%c%n", response, &offset) < 1)) {
-			LOGWARNING("Got1 unparseable ckdb auth response: %s", buf);
-			goto out_fail;
-		}
-		strcpy(response+1, buf+offset);
-		if (!strchr(response, '=')) {
-			if (cmdmatch(response, "failed"))
-				goto out;
-			LOGWARNING("Got2 unparseable ckdb auth response: %s", buf);
-			goto out_fail;
-		}
-		cmd = response;
-		strsep(&cmd, "=");
-		LOGINFO("User %s Worker %s got auth response: %s  cmd: %s",
-			user->username, client->workername,
-			response, cmd);
-		val = json_loads(cmd, 0, &err_val);
-		if (unlikely(!val))
-			LOGWARNING("AUTH JSON decode failed(%d): %s", err_val.line, err_val.text);
-		else {
-			json_t *worker_array = json_object_get(val, "workers");
-
-			json_get_string(&secondaryuserid, val, "secondaryuserid");
-			parse_worker_diffs(ckp, worker_array);
-			user->auth_time = time(NULL);
-		}
-		if (secondaryuserid && (!safecmp(response, "ok.authorise") ||
-					!safecmp(response, "ok.addrauth"))) {
-			if (!user->secondaryuserid)
-				user->secondaryuserid = secondaryuserid;
-			else
-				dealloc(secondaryuserid);
-			ret = 0;
-		}
-		if (likely(val))
-			json_decref(val);
-		goto out;
-	}
-	if (contended)
-		LOGWARNING("Prolonged lock contention for ckdb while trying to authorise");
-	else {
-		if (!sdata->ckdb_offline)
-			LOGWARNING("Got no auth response from ckdb :(");
-		else
-			LOGNOTICE("No auth response for %s from offline ckdb", user->username);
-	}
-out_fail:
-	ret = -1;
-out:
-	free(buf);
-	return ret;
-}
-
-/* For sending auths to ckdb after we've already decided we can authorise
- * these clients while ckdb is offline, based on an existing client of the
- * same username already having been authorised. Needs to be entered with
- * client holding a ref count. */
-static void queue_delayed_auth(stratum_instance_t *client)
-{
-	ckpool_t *ckp = client->ckp;
-	char cdfield[64];
-	json_t *val;
-	ts_t now;
-
-	ts_realtime(&now);
-	sprintf(cdfield, "%lu,%lu", now.tv_sec, now.tv_nsec);
-
-	JSON_CPACK(val, "{ss,ss,ss,ss,sI,ss,sb,ss,ss,ss,ss}",
-			"username", client->user_instance->username,
-			"workername", client->workername,
-			"poolinstance", ckp->name,
-			"useragent", client->useragent,
-			"clientid", client->id,
-			"enonce1", client->enonce1,
-			"preauth", true,
-			"createdate", cdfield,
-			"createby", "code",
-			"createcode", __func__,
-			"createinet", client->address);
-	ckdbq_add(ckp, ID_AUTH, val);
 }
 
 static void check_global_user(ckpool_t *ckp, user_instance_t *user, stratum_instance_t *client)
@@ -6580,10 +6237,7 @@ out:
 			json_set_string(val, "createby", "code");
 			json_set_string(val, "createcode", __func__);
 			json_set_string(val, "createinet", ckp->serverurl[client->server]);
-			if (ckp->remote && ckp->upstream_ckdb)
-				upstream_json_msgtype(ckp, val, SM_SHAREERR);
-			else
-				ckdbq_add(ckp, ID_SHAREERR, val);
+			ckdbq_add(ckp, ID_SHAREERR, val);
 		}
 		LOGINFO("Invalid share from client %s: %s", client->identity, client->workername);
 	}
@@ -8053,105 +7707,6 @@ out_noclient:
 
 }
 
-static void parse_ckdb_cmd(ckpool_t *ckp, const char *cmd)
-{
-	json_t *val, *res_val, *arr_val;
-	json_error_t err_val;
-	size_t index;
-
-	val = json_loads(cmd, 0, &err_val);
-	if (unlikely(!val)) {
-		LOGWARNING("CKDB MSG %s JSON decode failed(%d): %s", cmd, err_val.line, err_val.text);
-		return;
-	}
-	res_val = json_object_get(val, "diffchange");
-	json_array_foreach(res_val, index, arr_val) {
-		const char *workername;
-		int mindiff;
-
-		workername = json_string_value(json_object_get(arr_val, "workername"));
-		if (!workername)
-			continue;
-		json_get_int(&mindiff, arr_val, "difficultydefault");
-		set_worker_mindiff(ckp, workername, mindiff);
-	}
-	json_decref(val);
-}
-
-/* Test a value under lock and set it, returning the original value */
-static bool test_and_set(bool *val, mutex_t *lock)
-{
-	bool ret;
-
-	mutex_lock(lock);
-	ret = *val;
-	*val = true;
-	mutex_unlock(lock);
-
-	return ret;
-}
-
-static bool test_and_clear(bool *val, mutex_t *lock)
-{
-	bool ret;
-
-	mutex_lock(lock);
-	ret = *val;
-	*val = false;
-	mutex_unlock(lock);
-
-	return ret;
-}
-
-static void ckdbq_process(ckpool_t *ckp, char *msg)
-{
-	sdata_t *sdata = ckp->sdata;
-	size_t responselen;
-	char *buf = NULL;
-
-	while (!buf) {
-		mutex_lock(&sdata->ckdb_lock);
-		buf = ckdb_msg_call(ckp, msg);
-		mutex_unlock(&sdata->ckdb_lock);
-
-		if (unlikely(!buf)) {
-			if (!test_and_set(&sdata->ckdb_offline, &sdata->ckdb_lock))
-				LOGWARNING("Failed to talk to ckdb, queueing messages");
-			sleep(5);
-		}
-	}
-	free(msg);
-	if (test_and_clear(&sdata->ckdb_offline, &sdata->ckdb_lock))
-		LOGWARNING("Successfully resumed talking to ckdb");
-
-	/* Process any requests from ckdb that are heartbeat responses with
-	 * specific requests. */
-	responselen = strlen(buf);
-	if (likely(responselen > 1)) {
-		char *response = alloca(responselen);
-		int offset = 0;
-
-		memset(response, 0, responselen);
-		if (likely(sscanf(buf, "%*d.%*d.%c%n", response, &offset) > 0)) {
-			strcpy(response + 1, buf + offset);
-			if (likely(safecmp(response, "ok"))) {
-				char *cmd;
-
-				cmd = response;
-				strsep(&cmd, ".");
-				LOGDEBUG("Got ckdb response: %s cmd %s", response, cmd);
-				if (cmdmatch(cmd, "heartbeat=")) {
-					strsep(&cmd, "=");
-					parse_ckdb_cmd(ckp, cmd);
-				}
-			} else
-				LOGWARNING("Got ckdb failure response: %s", buf);
-		} else
-			LOGWARNING("Got bad ckdb response: %s", buf);
-	}
-	free(buf);
-}
-
 static int transactions_by_jobid(sdata_t *sdata, const int64_t id)
 {
 	workbase_t *wb;
@@ -8265,78 +7820,7 @@ static void update_workerstats(ckpool_t *ckp, sdata_t *sdata)
 	time_t now_t;
 	ts_t ts_now;
 
-	if (sdata->ckdb_offline) {
-		LOGDEBUG("Not queueing workerstats due to ckdb offline");
-		return;
-	}
-
-	if (++sdata->stats.userstats_cycle > 0x1f)
-		sdata->stats.userstats_cycle = 0;
-
-	ts_realtime(&ts_now);
-	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
-	now_t = ts_now.tv_sec;
-
-	ck_rlock(&sdata->instance_lock);
-	HASH_ITER(hh, sdata->user_instances, user, tmp) {
-		worker_instance_t *worker;
-		uint8_t cycle_mask;
-
-		if (!user->authorised)
-			continue;
-
-		/* Select users using a mask to return each user's stats once
-		 * every ~10 minutes */
-		cycle_mask = user->id & 0x1f;
-		if (cycle_mask != sdata->stats.userstats_cycle)
-			continue;
-		DL_FOREACH(user->worker_instances, worker) {
-			double ghs1, ghs5, ghs60, ghs1440;
-			json_t *val;
-			int elapsed;
-
-			/* Send one lot of stats once the worker is idle if
-			 * they have submitted no shares in the last 10 minutes
-			 * with the idle bool set. */
-			if (worker->idle && worker->notified_idle)
-				continue;
-			elapsed = now_t - worker->start_time;
-			ghs1 = worker->dsps1 * nonces;
-			ghs5 = worker->dsps5 * nonces;
-			ghs60 = worker->dsps60 * nonces;
-			ghs1440 = worker->dsps1440 * nonces;
-			JSON_CPACK(val, "{ss,si,ss,ss,si,sf,sf,sf,sf,sb,ss,ss,ss,ss}",
-					"poolinstance", ckp->name,
-					"elapsed", elapsed,
-					"username", user->username,
-					"workername", worker->workername,
-					"instances", worker->instance_count,
-					"hashrate", ghs1,
-					"hashrate5m", ghs5,
-					"hashrate1hr", ghs60,
-					"hashrate24hr", ghs1440,
-					"idle", worker->idle,
-					"createdate", cdfield,
-					"createby", "code",
-					"createcode", __func__,
-					"createinet", ckp->serverurl[0]);
-			worker->notified_idle = worker->idle;
-			entry = ckalloc(sizeof(json_entry_t));
-			entry->val = val;
-			DL_APPEND(json_list, entry);
-		}
-	}
-	ck_runlock(&sdata->instance_lock);
-
-	/* Add all entries outside of the instance lock */
-	DL_FOREACH_SAFE(json_list, entry, tmpentry) {
-		if (ckp->remote && !ckp->btcsolo && ckp->upstream_ckdb)
-			upstream_json_msgtype(ckp, entry->val, SM_WORKERSTATS);
-		else
-			ckdbq_add(ckp, ID_WORKERSTATS, entry->val);
-		DL_DELETE(json_list, entry);
-		free(entry);
-	}
+	return;
 }
 
 static void add_log_entry(log_entry_t **entries, char **fname, char **buf)
@@ -8816,39 +8300,6 @@ static void *statsupdate(void *arg)
 	return NULL;
 }
 
-/* Sends a heartbeat to ckdb every second to maintain the relationship of
- * ckpool always initiating a request -> getting a ckdb response, but allows
- * ckdb to provide specific commands to ckpool. */
-static void *ckdb_heartbeat(void *arg)
-{
-	ckpool_t *ckp = (ckpool_t *)arg;
-	sdata_t *sdata = ckp->sdata;
-
-	pthread_detach(pthread_self());
-	rename_proc("heartbeat");
-
-	while (42) {
-		char cdfield[64];
-		ts_t ts_now;
-		json_t *val;
-
-		cksleep_ms(1000);
-		if (unlikely(!ckmsgq_empty(sdata->ckdbq))) {
-			LOGDEBUG("Witholding heartbeat due to ckdb messages being queued");
-			continue;
-		}
-		ts_realtime(&ts_now);
-		sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
-		JSON_CPACK(val, "{ss,ss,ss,ss}",
-				"createdate", cdfield,
-				"createby", "code",
-				"createcode", __func__,
-				"createinet", ckp->serverurl[0]);
-		ckdbq_add(ckp, ID_HEARTBEAT, val);
-	}
-	return NULL;
-}
-
 static void read_poolstats(ckpool_t *ckp, int *tvsec_diff)
 {
 	char *s = alloca(4096), *pstats, *dsps, *sps;
@@ -8992,8 +8443,6 @@ void *stratifier(void *arg)
 	cksem_init(&sdata->update_sem);
 	cksem_post(&sdata->update_sem);
 
-	mutex_init(&sdata->ckdb_lock);
-	mutex_init(&sdata->ckdb_msg_lock);
 	/* Create half as many share processing and receiving threads as there
 	 * are CPUs */
 	threads = sysconf(_SC_NPROCESSORS_ONLN) / 2 ? : 1;
