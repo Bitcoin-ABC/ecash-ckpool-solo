@@ -8285,10 +8285,50 @@ static void read_poolstats(ckpool_t *ckp, int *tvsec_diff)
 	}
 }
 
+static char *status_chars = "|/-\\";
+
+void *throbber(void *arg)
+{
+	ckpool_t *ckp = arg;
+	sdata_t *sdata = ckp->sdata;
+	int counter = 0;
+
+	rename_proc("throbber");
+
+	while (42) {
+		double sdiff;
+		pool_stats_t *stats;
+		char stamp[128], hashrate[16], ch;
+
+		sleep(1);
+		if (ckp->quiet)
+			continue;
+		sdiff = sdata->stats.accounted_diff_shares;
+		stats = &sdata->stats;
+		suffix_string(stats->dsps1 * nonces, hashrate, 16, 3);
+		ch = status_chars[(counter++) & 0x3];
+		get_timestamp(stamp);
+		if (likely(sdata->current_workbase)) {
+			double bdiff = sdiff / sdata->current_workbase->network_diff * 100;
+
+			fprintf(stdout, "\33[2K\r%s %c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares  %.1f%% diff",
+				stamp, ch, hashrate, stats->sps1, stats->users + stats->remote_users,
+				stats->workers + stats->remote_workers, sdiff, bdiff);
+		} else {
+			fprintf(stdout, "\33[2K\r%s %c %sH/s  %.1f SPS  %d users  %d workers  %.0f shares",
+				stamp, ch, hashrate, stats->sps1, stats->users + stats->remote_users,
+				stats->workers + stats->remote_workers, sdiff);
+		}
+		fflush(stdout);
+	}
+
+	return NULL;
+}
+
 void *stratifier(void *arg)
 {
+	pthread_t pth_blockupdate, pth_statsupdate, pth_throbber;
 	proc_instance_t *pi = (proc_instance_t *)arg;
-	pthread_t pth_blockupdate, pth_statsupdate;
 	int threads, tvsec_diff = 0;
 	ckpool_t *ckp = pi->ckp;
 	int64_t randomiser;
@@ -8345,6 +8385,7 @@ void *stratifier(void *arg)
 	sdata->sauthq = create_ckmsgq(ckp, "authoriser", &sauth_process);
 	sdata->stxnq = create_ckmsgq(ckp, "stxnq", &send_transactions);
 	sdata->srecvs = create_ckmsgqs(ckp, "sreceiver", &srecv_process, threads);
+	create_pthread(&pth_throbber, throbber, ckp);
 	read_poolstats(ckp, &tvsec_diff);
 	read_userstats(ckp, sdata, tvsec_diff);
 
