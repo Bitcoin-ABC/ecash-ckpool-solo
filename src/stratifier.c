@@ -790,12 +790,11 @@ static void upstream_json(ckpool_t *ckp, json_t *val)
 	connector_upstream_msg(ckp, msg);
 }
 
-/* Upstream a json msgtype, absorbing the json in the process */
+/* Upstream a json msgtype */
 static void upstream_json_msgtype(ckpool_t *ckp, json_t *val, const int msg_type)
 {
 	json_set_string(val, "method", stratum_msgs[msg_type]);
 	upstream_json(ckp, val);
-	json_decref(val);
 }
 
 /* Upstream a json msgtype, duplicating the json */
@@ -2092,9 +2091,9 @@ static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 	uchar *enonce1bin = NULL, hash[32], swap[80], flip32[32];
 	uint32_t ntime32, version_mask = 0;
 	char blockhash[68], cdfield[64];
-	json_t *bval, *bval_copy;
 	int enonce1len, cblen;
 	workbase_t *wb = NULL;
+	json_t *bval;
 	double diff;
 	ts_t ts_now;
 	int64_t id;
@@ -2185,12 +2184,12 @@ static void submit_node_block(ckpool_t *ckp, sdata_t *sdata, json_t *val)
 			 "createinet", ckp->serverurl[0]);
 	put_workbase(sdata, wb);
 
-	bval_copy = json_deep_copy(bval);
-	json_decref(bval);
 	if (ret)
-		block_solve(ckp, bval_copy);
+		block_solve(ckp, bval);
 	else
-		block_reject(bval_copy);
+		block_reject(bval);
+
+	json_decref(bval);
 out:
 	free(nonce2);
 	free(nonce);
@@ -3721,11 +3720,6 @@ static void block_solve(ckpool_t *ckp, json_t *val)
 	json_get_double(&diff, val, "diff");
 	json_get_string(&workername, val, "workername");
 
-	if (ckp->remote)
-		upstream_json_msgtype(ckp, val, SM_BLOCK);
-	else
-		json_decref(val);
-
 	if (!workername) {
 		ASPRINTF(&msg, "Block solved by %s!", ckp->name);
 		LOGWARNING("Solved and confirmed block!");
@@ -3768,7 +3762,6 @@ static void block_reject(json_t *val)
 	int height = 0;
 
 	json_get_int(&height, val, "height");
-	json_decref(val);
 
 	LOGWARNING("Submitted, but had block %d rejected", height);
 }
@@ -5678,8 +5671,8 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 {
 	char blockhash[68], cdfield[64], *gbt_block;
 	sdata_t *sdata = client->sdata;
-	json_t *val = NULL, *val_copy;
 	ckpool_t *ckp = wb->ckp;
+	json_t *val = NULL;
 	uchar flip32[32];
 	ts_t ts_now;
 	bool ret;
@@ -5723,24 +5716,22 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	json_set_string(val, "createcode", __func__);
 	json_set_string(val, "createinet", ckp->serverurl[client->server]);
 
-	val_copy = json_deep_copy(val);
-
 	if (ckp->remote) {
 		add_remote_blockdata(ckp, val, cblen, coinbase, data);
 		upstream_json_msgtype(ckp, val, SM_BLOCK);
 	} else {
 		downstream_block(ckp, sdata, val, cblen, coinbase, data);
-		json_decref(val);
 	}
 
 	/* Submit block locally after sending it to remote locations avoiding
 	 * the delay of local verification */
 	ret = local_block_submit(ckp, gbt_block, flip32, wb->height);
 	if (ret)
-		block_solve(ckp, val_copy);
+		block_solve(ckp, val);
 	else
-		block_reject(val_copy);
+		block_reject(val);
 
+	json_decref(val);
 }
 
 /* Entered with instance_lock held */
@@ -6167,8 +6158,7 @@ out_nowb:
 	}
 	if (ckp->remote)
 		upstream_json_msgtype(ckp, val, SM_SHARE);
-	else
-		json_decref(val);
+	json_decref(val);
 out:
 	if (!sdata->wbincomplete && ((!result && !submit) || !share)) {
 		/* Is this the first in a run of invalids? */
