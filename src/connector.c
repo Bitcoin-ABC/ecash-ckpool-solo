@@ -1108,22 +1108,6 @@ static void passthrough_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t 
 		client->sendbufsize = set_sendbufsize(ckp, client->fd, 1048576);
 }
 
-static void remote_server(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
-{
-	json_t *val;
-
-	LOGWARNING("Connector adding client %"PRId64" %s as remote trusted server",
-		   client->id, client->address_name);
-	client->remote = true;
-	JSON_CPACK(val, "{sbsb}",
-		   "result", true, "ckdb", true);
-	send_client_json(ckp, cdata, client->id, val);
-	if (!ckp->rmem_warn)
-		set_recvbufsize(ckp, client->fd, 2097152);
-	if (!ckp->wmem_warn)
-		client->sendbufsize = set_sendbufsize(ckp, client->fd, 2097152);
-}
-
 static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 {
 	json_t *req, *val = NULL, *res_val, *err_val;
@@ -1168,13 +1152,8 @@ static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 		LOGWARNING("Denied upstream trusted connection");
 		goto out;
 	}
-	/* Parse whether the upstream pool is using ckdb or not. Default to yes
-	 * if no ckdb field is received for backward compatibility. */
-	res_val = json_object_get(val, "ckdb");
-	if (!res_val || json_is_true(res_val))
-		ckp->upstream_ckdb = true;
-	LOGWARNING("Connected to upstream %sckdb server %s:%s as trusted remote",
-		   ckp->upstream_ckdb ? "" : "non-", cs->url, cs->port);
+	LOGWARNING("Connected to upstream server %s:%s as trusted remote",
+		   cs->url, cs->port);
 	ret = true;
 out:
 	cksem_post(&cs->sem);
@@ -1537,21 +1516,6 @@ retry:
 			goto retry;
 		}
 		passthrough_client(ckp, cdata, client);
-		dec_instance_ref(cdata, client);
-	} else if (cmdmatch(buf, "remote")) {
-		client_instance_t *client;
-
-		ret = sscanf(buf, "remote=%"PRId64, &client_id);
-		if (ret < 0) {
-			LOGDEBUG("Connector failed to parse remote command: %s", buf);
-			goto retry;
-		}
-		client = ref_client_by_id(cdata, client_id);
-		if (unlikely(!client)) {
-			LOGINFO("Connector failed to find client id %"PRId64" to add as remote", client_id);
-			goto retry;
-		}
-		remote_server(ckp, cdata, client);
 		dec_instance_ref(cdata, client);
 	} else if (cmdmatch(buf, "getxfd")) {
 		int fdno = -1;

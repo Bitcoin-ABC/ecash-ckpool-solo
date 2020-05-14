@@ -147,11 +147,6 @@ struct ckpool_instance {
 	char *name;
 	/* Directory where sockets are created */
 	char *socket_dir;
-	/* Directory where ckdb sockets are */
-	char *ckdb_sockdir;
-	/* Name of the ckdb process */
-	char *ckdb_name;
-	char *ckdb_sockname;
 	/* Group ID for unix sockets */
 	char *grpnam;
 	gid_t gr_gid;
@@ -193,8 +188,6 @@ struct ckpool_instance {
 
 	/* Are we running in trusted remote node mode */
 	bool remote;
-	/* Does our upstream pool in remote mode have ckdb */
-	bool upstream_ckdb;
 
 	/* Are we running in node proxy mode */
 	bool node;

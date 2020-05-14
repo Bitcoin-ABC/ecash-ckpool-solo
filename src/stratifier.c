@@ -740,13 +740,7 @@ static void age_share_hashtable(sdata_t *sdata, const int64_t wb_id)
 		LOGINFO("Aged %d shares from share hashtable", aged);
 }
 
-static void _ckdbq_add(ckpool_t *ckp, const int idtype, json_t *val, const char *file,
-		       const char *func, const int line)
-{
-	return json_decref(val);
-}
-
-#define ckdbq_add(ckp, idtype, val) _ckdbq_add(ckp, idtype, val, __FILE__, __func__, __LINE__)
+#define ckdbq_add(ckp, idtype, val) json_decref(val)
 
 /* Append a bulk list already created to the ssends list */
 static void ssend_bulk_append(sdata_t *sdata, ckmsg_t *bulk_send, const int messages)
@@ -782,11 +776,9 @@ static void strip_fields(ckpool_t *ckp, json_t *val)
 {
 	json_object_del(val, "poolinstance");
 	json_object_del(val, "createby");
-	if (!ckp->upstream_ckdb) {
-		json_object_del(val, "createdate");
-		json_object_del(val, "createcode");
-		json_object_del(val, "createinet");
-	}
+	json_object_del(val, "createdate");
+	json_object_del(val, "createcode");
+	json_object_del(val, "createinet");
 }
 
 /* Send a json msg to an upstream trusted remote server */
