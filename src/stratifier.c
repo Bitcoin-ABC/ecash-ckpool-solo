@@ -1379,13 +1379,12 @@ static void gbt_witness_data(workbase_t *wb, json_t *txn_array)
  * are serialised. */
 static void block_update(ckpool_t *ckp, int *prio)
 {
+	bool new_block = false, ret = false;
 	const char *witnessdata_check;
 	sdata_t *sdata = ckp->sdata;
-	bool new_block = false;
-	int i, retries = 0;
 	json_t *txn_array;
-	bool ret = false;
 	txntable_t *txns;
+	int retries = 0;
 	workbase_t *wb;
 
 retry:
@@ -5349,7 +5348,7 @@ static void update_solo_client(sdata_t *sdata, workbase_t *wb, const int64_t cli
 
 /* Needs to be entered with client holding a ref count. */
 static json_t *parse_authorise(stratum_instance_t *client, const json_t *params_val,
-			       json_t **err_val, int *errnum)
+			       json_t **err_val)
 {
 	user_instance_t *user;
 	ckpool_t *ckp = client->ckp;
@@ -5837,8 +5836,8 @@ static void submit_share(stratum_instance_t *client, const int64_t jobid, const 
 	generator_add_send(ckp, json_msg);
 }
 
-static void check_best_diff(ckpool_t *ckp, sdata_t *sdata, user_instance_t *user,
-			    worker_instance_t *worker, const double sdiff, stratum_instance_t *client)
+static void check_best_diff(sdata_t *sdata, user_instance_t *user,worker_instance_t *worker,
+			    const double sdiff, stratum_instance_t *client)
 {
 	char buf[512];
 	bool best_ever = false, best_worker = false, best_user = false;
@@ -6004,7 +6003,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		client->best_diff = sdiff;
 		LOGINFO("User %s worker %s client %s new best diff %lf", user->username,
 			worker->workername, client->identity, sdiff);
-		check_best_diff(ckp, sdata, user, worker, sdiff, client);
+		check_best_diff(sdata, user, worker, sdiff, client);
 	}
 	bswap_256(sharehash, hash);
 	__bin2hex(hexhash, sharehash, 32);
@@ -6740,8 +6739,7 @@ static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workerna
 	return user;
 }
 
-static void parse_remote_share(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf,
-			       const int64_t client_id)
+static void parse_remote_share(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf)
 {
 	json_t *workername_val = json_object_get(val, "workername");
 	worker_instance_t *worker;
@@ -6763,7 +6761,7 @@ static void parse_remote_share(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 	user = generate_remote_user(ckp, workername);
 	user->authorised = true;
 	worker = get_worker(sdata, user, workername);
-	check_best_diff(ckp, sdata, user, worker, sdiff, NULL);
+	check_best_diff(sdata, user, worker, sdiff, NULL);
 
 	mutex_lock(&sdata->uastats_lock);
 	sdata->stats.unaccounted_shares++;
@@ -6784,8 +6782,7 @@ static void parse_remote_share(ckpool_t *ckp, sdata_t *sdata, json_t *val, const
 	LOGINFO("Added %.0lf remote shares to worker %s", diff, workername);
 }
 
-static void parse_remote_shareerr(ckpool_t *ckp, sdata_t *sdata, json_t *val, const char *buf,
-				  const int64_t client_id)
+static void parse_remote_shareerr(ckpool_t *ckp, json_t *val, const char *buf)
 {
 	const char *workername;
 
@@ -7172,7 +7169,7 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 	}
 
 	if (likely(!safecmp(method, stratum_msgs[SM_SHARE])))
-		parse_remote_share(ckp, sdata, val, buf, client->id);
+		parse_remote_share(ckp, sdata, val, buf);
 	else if (!safecmp(method, stratum_msgs[SM_TRANSACTIONS]))
 		add_node_txns(ckp, sdata, val);
 	else if (!safecmp(method, stratum_msgs[SM_WORKINFO]))
@@ -7180,7 +7177,7 @@ static void parse_trusted_msg(ckpool_t *ckp, sdata_t *sdata, json_t *val, stratu
 	else if (!safecmp(method, stratum_msgs[SM_AUTH]))
 		parse_remote_auth(ckp, sdata, val, client, client->id);
 	else if (!safecmp(method, stratum_msgs[SM_SHAREERR]))
-		parse_remote_shareerr(ckp, sdata, val, buf, client->id);
+		parse_remote_shareerr(ckp, val, buf);
 	else if (!safecmp(method, stratum_msgs[SM_BLOCK]))
 		parse_remote_block(ckp, sdata, val, buf, client->id);
 	else if (!safecmp(method, stratum_msgs[SM_REQTXNS]))
@@ -7203,7 +7200,6 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *clie
 	sdata_t *sdata = ckp->sdata;
 	json_params_t *jp;
 	char *buf = NULL;
-	int errnum;
 
 	if (msg_type < 0) {
 		buf = json_dumps(val, 0);
@@ -7233,7 +7229,7 @@ static void node_client_msg(ckpool_t *ckp, json_t *val, stratum_instance_t *clie
 			parse_subscribe_result(client, res_val);
 			break;
 		case SM_AUTH:
-			parse_authorise(client, params, &err_val, &errnum);
+			parse_authorise(client, params, &err_val);
 			break;
 		case SM_AUTHRESULT:
 			parse_authorise_result(ckp, sdata, client, res_val);
@@ -7542,7 +7538,6 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 	sdata_t *sdata = ckp->sdata;
 	stratum_instance_t *client;
 	int64_t mindiff, client_id;
-	int errnum = 0;
 	bool ret;
 
 	client_id = jp->client_id;
@@ -7553,7 +7548,7 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 		goto out_noclient;
 	}
 
-	result_val = parse_authorise(client, jp->params, &err_val, &errnum);
+	result_val = parse_authorise(client, jp->params, &err_val);
 	ret = json_is_true(result_val);
 	if (ret) {
 		/* So far okay in remote mode, remainder to be done by upstream
@@ -7563,12 +7558,8 @@ static void sauth_process(ckpool_t *ckp, json_params_t *jp)
 			goto out;
 		}
 		send_auth_success(ckp, sdata, client);
-	} else {
-		if (errnum < 0)
-			stratum_send_message(sdata, client, "Authorisations temporarily offline :(");
-		else
-			send_auth_failure(sdata, client);
-	}
+	} else
+		send_auth_failure(sdata, client);
 	send_auth_response(sdata, client_id, ret, jp->id_val, err_val);
 	if (!ret)
 		goto out;
@@ -8316,8 +8307,7 @@ static void *zmqnotify(void *arg)
 	ckpool_t *ckp = arg;
 	sdata_t *sdata = ckp->sdata;
 	void *context, *notify;
-	int zero = 0, rc;
-	char *endpoint;
+	int rc;
 
 	rename_proc("zmqnotify");
 
