@@ -1379,11 +1379,11 @@ static void gbt_witness_data(workbase_t *wb, json_t *txn_array)
  * are serialised. */
 static void block_update(ckpool_t *ckp, int *prio)
 {
-	const char* witnessdata_check, *rule;
-	json_t *txn_array, *rules_array;
+	const char *witnessdata_check;
 	sdata_t *sdata = ckp->sdata;
 	bool new_block = false;
 	int i, retries = 0;
+	json_t *txn_array;
 	bool ret = false;
 	txntable_t *txns;
 	workbase_t *wb;
@@ -1407,26 +1407,14 @@ retry:
 	txns = wb_merkle_bin_txns(ckp, sdata, wb, txn_array, true);
 
 	wb->insert_witness = false;
-	rules_array = json_object_get(wb->json, "rules");
 
-	if (rules_array) {
-		int rule_count = json_array_size(rules_array);
-
-		for (i = 0; i < rule_count; i++) {
-			rule = json_string_value(json_array_get(rules_array, i));
-			if (!rule)
-				continue;
-			if (*rule == '!')
-				rule++;
-			if (safecmp(rule, "segwit")) {
-				witnessdata_check = json_string_value(json_object_get(wb->json, "default_witness_commitment"));
-				gbt_witness_data(wb, txn_array);
-				// Verify against the pre-calculated value if it exists. Skip the size/OP_RETURN bytes.
-				if (wb->insert_witness && witnessdata_check[0] && safecmp(witnessdata_check + 4, wb->witnessdata) != 0)
-					LOGERR("Witness from btcd: %s. Calculated Witness: %s", witnessdata_check + 4, wb->witnessdata);
-				break;
-			}
-		}
+	witnessdata_check = json_string_value(json_object_get(wb->json, "default_witness_commitment"));
+	if (likely(witnessdata_check)) {
+		LOGDEBUG("Default witness commitment present, adding witness data");
+		gbt_witness_data(wb, txn_array);
+		// Verify against the pre-calculated value if it exists. Skip the size/OP_RETURN bytes.
+		if (wb->insert_witness && safecmp(witnessdata_check + 4, wb->witnessdata) != 0)
+			LOGERR("Witness from btcd: %s. Calculated Witness: %s", witnessdata_check + 4, wb->witnessdata);
 	}
 
 	generate_coinbase(ckp, wb);
