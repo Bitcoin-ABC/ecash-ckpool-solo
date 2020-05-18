@@ -40,6 +40,7 @@ AC_CHECK_HEADERS(stdint.h netinet/in.h netinet/tcp.h sys/ioctl.h getopt.h)
 AC_CHECK_HEADERS(sys/epoll.h libpq-fe.h postgresql/libpq-fe.h grp.h)
 AC_CHECK_HEADERS(gsl/gsl_math.h gsl/gsl_cdf.h)
 AC_CHECK_HEADERS(openssl/x509.h openssl/hmac.h)
+AC_CHECK_HEADERS(zmq.h)
 
 AC_CHECK_PROG(YASM, yasm, yes)
 AM_CONDITIONAL([HAVE_YASM], [test x$YASM = xyes])
@@ -77,6 +78,7 @@ AC_SUBST(JANSSON_LIBS)
 AC_SEARCH_LIBS(clock_nanosleep, rt, , "Error: Required library rt not found." && exit 1)
 AC_SEARCH_LIBS(exp, m, , echo "Error: Required library math not found." && exit 1)
 AC_SEARCH_LIBS(pthread_mutex_trylock, pthread, , "Error: Required library pthreads not found." && exit 1)
+AC_SEARCH_LIBS(zmq_socket, zmq, , "Error: Required library zmq not found." && exit 1)
 
 AC_OUTPUT([Makefile] [src/Makefile])
 

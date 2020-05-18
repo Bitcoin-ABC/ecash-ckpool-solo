@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017 Con Kolivas
+ * Copyright 2014-2020 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -1468,6 +1468,7 @@ static void parse_config(ckpool_t *ckp)
 	arr_val = json_object_get(json_conf, "redirecturl");
 	if (arr_val)
 		parse_redirecturls(ckp, arr_val);
+	json_get_string(&ckp->zmqblock, json_conf, "zmqblock");
 
 	json_decref(json_conf);
 }
@@ -1757,6 +1758,8 @@ int main(int argc, char **argv)
 		quit(0, "No proxy entries found in config file %s", ckp.config);
 	if (ckp.redirector && !ckp.redirecturls)
 		quit(0, "No redirect entries found in config file %s", ckp.config);
+	if (!ckp.zmqblock)
+		ckp.zmqblock = "tcp://127.0.0.1:28332";
 
 	/* Create the log directory */
 	trail_slash(&ckp.logdir);

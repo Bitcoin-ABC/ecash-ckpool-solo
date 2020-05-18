@@ -182,6 +182,9 @@ struct ckpool_instance {
 	bool stratifier_ready;
 	bool connector_ready;
 
+	/* Name of protocol used for ZMQ block notifications */
+	char *zmqblock;
+
 	/* Threads of main process */
 	pthread_t pth_listener;
 	pthread_t pth_watchdog;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 Con Kolivas
+ * Copyright 2014-2020 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -19,6 +19,7 @@
 #include <math.h>
 #include <string.h>
 #include <unistd.h>
+#include <zmq.h>
 
 #include "ckpool.h"
 #include "libckpool.h"
@@ -8325,9 +8326,76 @@ void *throbber(void *arg)
 	return NULL;
 }
 
+static void *zmqnotify(void *arg)
+{
+	ckpool_t *ckp = arg;
+	sdata_t *sdata = ckp->sdata;
+	void *context, *notify;
+	int zero = 0, rc;
+	char *endpoint;
+
+	rename_proc("zmqnotify");
+
+	context = zmq_ctx_new();
+	notify = zmq_socket(context, ZMQ_SUB);
+	if (!notify)
+		quit(1, "zmq_socket failed with errno %d", errno);
+	rc = zmq_setsockopt(notify, ZMQ_SUBSCRIBE, "hashblock", 0);
+	if (rc < 0)
+		quit(1, "zmq_setsockopt failed with errno %d", errno);
+	rc = zmq_connect(notify, ckp->zmqblock);
+	if (rc < 0)
+		quit(1, "zmq_connect failed with errno %d", errno);
+	LOGNOTICE("ZMQ connected to %s", ckp->zmqblock);
+
+	while (42) {
+		zmq_msg_t message;
+
+		do {
+			char hexhash[68] = {};
+			int size;
+
+			zmq_msg_init(&message);
+			rc = zmq_msg_recv(&message, notify, 0);
+			if (unlikely(rc < 0)) {
+				LOGWARNING("zmq_msg_recv failed with error %d", errno);
+				sleep(5);
+				zmq_msg_close(&message);
+				continue;
+			}
+
+			size = zmq_msg_size(&message);
+			switch (size) {
+				case 9:
+					LOGDEBUG("ZMQ hashblock message");
+					break;
+				case 4:
+					LOGDEBUG("ZMQ sequence number");
+					break;
+				case 32:
+					update_base(sdata, GEN_PRIORITY);
+					__bin2hex(hexhash, zmq_msg_data(&message), 32);
+					LOGNOTICE("ZMQ block hash %s", hexhash);
+					break;
+				default:
+					LOGWARNING("ZMQ message size error, size = %d!", size);
+					break;
+			}
+			zmq_msg_close(&message);
+		} while (zmq_msg_more(&message));
+
+		LOGDEBUG("ZMQ message complete");
+	}
+
+	zmq_close(notify);
+	zmq_ctx_destroy (context);
+
+	return NULL;
+}
+
 void *stratifier(void *arg)
 {
-	pthread_t pth_blockupdate, pth_statsupdate, pth_throbber;
+	pthread_t pth_blockupdate, pth_statsupdate, pth_throbber, pth_zmqnotify;
 	proc_instance_t *pi = (proc_instance_t *)arg;
 	int threads, tvsec_diff = 0;
 	ckpool_t *ckp = pi->ckp;
@@ -8406,6 +8474,7 @@ void *stratifier(void *arg)
 		create_pthread(&pth_statsupdate, statsupdate, ckp);
 
 	mutex_init(&sdata->share_lock);
+	create_pthread(&pth_zmqnotify, zmqnotify, ckp);
 
 	ckp->stratifier_ready = true;
 	LOGWARNING("%s stratifier ready", ckp->name);

@@ -310,3 +310,6 @@ maximum.
 
 "maxclients" : Optional upper limit on the number of clients ckpool will
 accept before rejecting further clients.
+
+"zmqblock" : Optional interface to use for zmq blockhash notification. Requires
+use of matched bitcoind -zmqpubhashblock option. Default: tcp://127.0.0.1:28332
