@@ -3676,9 +3676,6 @@ static void block_solve(ckpool_t *ckp, json_t *val)
 	int height = 0;
 	ts_t ts_now;
 
-	if (!ckp->node)
-		update_base(sdata, GEN_PRIORITY);
-
 	ts_realtime(&ts_now);
 	sprintf(cdfield, "%lu,%lu", ts_now.tv_sec, ts_now.tv_nsec);
 
