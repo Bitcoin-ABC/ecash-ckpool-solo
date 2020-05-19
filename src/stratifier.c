@@ -3184,16 +3184,11 @@ static inline stratum_instance_t *ref_instance_by_id(sdata_t *sdata, const int64
 static void __drop_client(sdata_t *sdata, stratum_instance_t *client, bool lazily, char **msg)
 {
 	user_instance_t *user = client->user_instance;
-	bool parent = false;
 
-	if (unlikely(client->node)) {
+	if (unlikely(client->node))
 		DL_DELETE2(sdata->node_instances, client, node_prev, node_next);
-		parent = true;
-	} else if (unlikely(client->trusted)) {
+	else if (unlikely(client->trusted))
 		DL_DELETE2(sdata->remote_instances, client, remote_prev, remote_next);
-		parent = true;
-	} else if (unlikely(client->passthrough))
-		parent = true;
 
 	if (client->workername) {
 		if (user) {
@@ -3211,8 +3206,7 @@ static void __drop_client(sdata_t *sdata, stratum_instance_t *client, bool lazil
 				 lazily ? "lazily" : "");
 		}
 	} else {
-		ASPRINTF(msg, "Dropped %sworkerless client %s %s %s", parent ? "parent " : "",
-			 client->identity, client->address, lazily ? "lazily" : "");
+		/* Workerless client. Too noisy to log them all */
 	}
 	__del_client(sdata, client);
 	__kill_instance(sdata, client);
@@ -5309,8 +5303,9 @@ static void client_auth(ckpool_t *ckp, stratum_instance_t *client, user_instance
 			if (ckp->userproxy)
 				check_global_user(ckp, user, client);
 		} else {
-			LOGNOTICE("Authorised client %s worker %s as user %s",
-				  client->identity, client->workername, user->username);
+			LOGNOTICE("Authorised client %s %s worker %s as user %s",
+				  client->identity, client->address, client->workername,
+				  user->username);
 		}
 		user->failed_authtime = 0;
 		user->auth_backoff = DEFAULT_AUTH_BACKOFF; /* Reset auth backoff time */
