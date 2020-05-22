@@ -186,7 +186,6 @@ struct generator_data {
 	int subproxies_generated;
 
 	int proxy_notify_id;	// Globally increasing notify id
-	server_instance_t *si;	/* Current server instance */
 	pthread_t pth_uprecv;	// User proxy receive thread
 	pthread_t pth_psend;	// Combined proxy send thread
 
@@ -203,7 +202,7 @@ struct generator_data {
 	share_msg_t *shares;
 	int64_t share_id;
 
-	server_instance_t *current_si;
+	server_instance_t *current_si; // Current server instance
 
 	proxy_instance_t *current_proxy;
 };
@@ -3253,10 +3252,8 @@ static void *server_watchdog(void *arg)
 			if (server_alive(ckp, si, true) && !best)
 				best = si;
 		}
-		if (best && best != gdata->si) {
-			gdata->si = best;
+		if (best && best != gdata->current_si)
 			send_proc(ckp->generator, "reconnect");
-		}
 		cksleep_ms_r(&timer_t, 5000);
 	}
 	return NULL;
