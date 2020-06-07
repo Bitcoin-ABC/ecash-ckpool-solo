@@ -1,8 +1,7 @@
-CKPOOL + CKDB + libckpool by Con Kolivas and Andrew Smith.
+CKPOOL + CKPROXY + libckpool by Con Kolivas
 
 Ultra low overhead massively scalable multi-process, multi-threaded modular
-bitcoin mining pool, proxy, passthrough, library and database interface in c
-for Linux.
+bitcoin mining pool, proxy, passthrough, and library in c for Linux.
 
 CKPOOL is code provided free of charge under the GPLv3 license but its development
 is mostly paid for by commissioned funding, and the pool by default contributes
@@ -34,15 +33,12 @@ processes.
 other on the same machine, local lan or remote internet locations.
 
 Modes of deployment:
-- Comprehensive pooled mining solution with a postgresql database interface.
+- Simple pool.
+- Simple proxy without the limitations of hashrate inherent in other proxy
+solutions when talking to ckpool.
 - Passthrough node(s) that combine connections to a single socket which can
 be used to scale to millions of clients and allow the main pool to be isolated
 from direct communication with clients.
-- Proxy nodes with a database that act as a single client to the upstream pool
-while storing full client data of their own.
-- Simple proxy without the limitations of hashrate inherent in other proxy
-solutions when talking to ckpool.
-- Simple pool without a database.
 - Library for use by other software.
 
 Features:
@@ -72,30 +68,28 @@ slow communicating clients from delaying low latency ones.
 ---
 BUILDING:
 
-Building ckpool standalone without ckdb has no dependencies outside of the
-basic build tools on any linux installation.
+Building ckpool requires no dependencies outside of the basic build tools and
+yasm on any linux installation. Optional zmq notification support (ckpool only)
+requires the zmq devel library installed.
+
+
+Basic build:
 
 sudo apt-get install build-essential yasm
-./configure --without-ckdb
-make
-
-
-Building with ckdb requires installation of the postgresql, gsl and ssl
-development libraries.
-
-sudo apt-get install build-essential yasm libpq-dev libgsl-dev
 ./configure
 make
 
-older distributions may instead require a different version of gsl:
- sudo apt-get install build-essential libpq-dev libgsl0ldbl libgsl0-dev yasm
 
-N.B. ckdb also requires libssl-dev but libpq-dev depends on it and installs it
+Building with zmq (this is not required for ckproxy):
+
+sudo apt-get install build-essential yasm libzmq3-dev
+./configure
+make
 
 
-Building from git also requires autoconf and automake
+Building from git also requires autoconf and automake:
 
-sudo apt-get install build-essential yasm libpq-dev libgsl-dev autoconf automake libtool
+sudo apt-get install build-essential yasm autoconf automake libtool libzmq3-dev
 ./autogen.sh
 ./configure
 make
@@ -103,8 +97,8 @@ make
 
 Binaries will be built in the src/ subdirectory. Binaries generated will be:
 ckpool - The main pool back end
-ckdb - The pool's database
-ckpmsg - An application for passing messages in libckpool format to ckpool/ckdb
+ckproxy - A link to ckpool that automatically starts it in proxy mode
+ckpmsg - An application for passing messages in libckpool format to ckpool
 notifier - An application designed to be run with bitcoind's -blocknotify to
 	notify ckpool of block changes.
 
@@ -114,20 +108,12 @@ it's built in but it can be installed with:
 sudo make install
 
 
-It is anticipated that pool operators wishing to set up a full database based
-installation of ckpool+ckdb will be familiar with setting up postgresql and
-associated permissions to the directories where the various processes will
-communicate with each other and a web server so these will not be documented.
-
-
 ---
 RUNNING:
 
 ckpool supports the following options:
 
--A | --standalone
 -c CONFIG | --config CONFIG
--d CKDB-NAME | --ckdb-name CKDB-NAME
 -g GROUP | --group GROUP
 -H | --handover
 -h | --help
@@ -139,24 +125,14 @@ ckpool supports the following options:
 -P | --passthrough
 -p | --proxy
 -R | --redirector
--S CKDB-SOCKDIR | --ckdb-sockdir CKDB-SOCKDIR
 -s SOCKDIR | --sockdir SOCKDIR
 -u | --userproxy
 
-
--A Standalone mode tells ckpool not to try to communicate with ckdb or log any
-ckdb requests in the rotating ckdb logs it would otherwise store. All users
-are automatically accepted without any attempt to authorise users in any way.
-This option is explicitly enabled when built without ckdb support.
 
 -c <CONFIG> tells ckpool to override its default configuration filename and
 load the specified one. If -c is not specified, ckpool looks for ckpool.conf,
 in proxy mode it looks for ckproxy.conf, in passthrough mode for
 ckpassthrough.conf and in redirector mode for ckredirector.conf
-
--d <CKDB-NAME> tells ckpool what the name of the ckdb process is that it should
-speak to, otherwise it will look for ckdb.
-This option does not exist when built without ckdb support.
 
 -g <GROUP> will start ckpool as the group ID specified.
 
@@ -204,10 +180,6 @@ one of the redirecturl entries in the configuration file. It will cycle over
 entries if multiple exist, but try to keep all clients from the same IP
 redirecting to the same pool.
 
--S <CKDB-SOCKDIR> tells ckpool which directory to look for the ckdb socket to
-talk to.
-This option does not exist when built without ckdb support.
-
 -s <SOCKDIR> tells ckpool which directory to place its own communication
 sockets (/tmp by default)
 
@@ -216,25 +188,6 @@ but in addition it will accept username/passwords from the stratum connects
 and try to open additional connections with those credentials to the upstream
 pool specified in the configuration file and then reconnect miners to mine with
 their chosen username/password to the upstream pool.
-
-
-ckdb takes the following options:
-
--b DBPREFIX | --dbprefix DBPREFIX
--c CONFIG | --config CONFIG
--d DBNAME | --dbname DBNAME
--h | --help
--k | --killold
--l LOGLEVEL | --loglevel LOGLEVEL
--n NAME | --name NAME
--p DBPASS | --dbpass DBPASS
--r CKPOOL-LOGDIR | --ckpool-logdir CKPOOL-LOGDIR
--R LOGDIR | --logdir LOGDIR
--s SOCKDIR | --sockdir SOCKDIR
--u DBUSER | --dbuser DBUSER
--v | --version
--y | --confirm
--Y CONFIRMRANGE | --confirmrange CONFIRMRANGE
 
 
 ckpmsg and notifier support the -n, -p and -s options
@@ -311,5 +264,6 @@ maximum.
 "maxclients" : Optional upper limit on the number of clients ckpool will
 accept before rejecting further clients.
 
-"zmqblock" : Optional interface to use for zmq blockhash notification. Requires
-use of matched bitcoind -zmqpubhashblock option. Default: tcp://127.0.0.1:28332
+"zmqblock" : Optional interface to use for zmq blockhash notification - ckpool
+only. Requires use of matched bitcoind -zmqpubhashblock option.
+Default: tcp://127.0.0.1:28332
