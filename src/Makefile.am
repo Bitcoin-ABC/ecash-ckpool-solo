@@ -36,3 +36,7 @@ notifier_LDADD = libckpool.a @JANSSON_LIBS@
 
 install-exec-hook:
 	setcap CAP_NET_BIND_SERVICE=+eip $(bindir)/ckpool
+	$(LN_S) -f ckpool $(DESTDIR)$(bindir)/ckproxy
+
+uninstall-local:
+	rm -f $(bindir)/ckproxy
