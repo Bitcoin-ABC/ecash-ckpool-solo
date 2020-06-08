@@ -75,10 +75,10 @@ JANSSON_LIBS="jansson-2.10/src/.libs/libjansson.a"
 
 AC_SUBST(JANSSON_LIBS)
 
-AC_SEARCH_LIBS(clock_nanosleep, rt, , "Error: Required library rt not found." && exit 1)
+AC_SEARCH_LIBS(clock_nanosleep, rt, , echo "Error: Required library rt not found." && exit 1)
 AC_SEARCH_LIBS(exp, m, , echo "Error: Required library math not found." && exit 1)
-AC_SEARCH_LIBS(pthread_mutex_trylock, pthread, , "Error: Required library pthreads not found." && exit 1)
-AC_SEARCH_LIBS(zmq_socket, zmq, , "Error: Required library zmq not found." && exit 1)
+AC_SEARCH_LIBS(pthread_mutex_trylock, pthread, , echo "Error: Required library pthreads not found." && exit 1)
+AC_SEARCH_LIBS(zmq_socket, zmq, ZMQ=yes, ZMQ=no)
 
 AC_OUTPUT([Makefile] [src/Makefile])
 
@@ -87,6 +87,7 @@ LDFLAGS="${LDFLAGS} -Wl,--as-needed"
 echo
 echo "Compilation............: make (or gmake)"
 echo "  YASM (Intel ASM).....: $YASM"
+echo "  ZMQ..................: $ZMQ"
 echo "  CPPFLAGS.............: $CPPFLAGS"
 echo "  CFLAGS...............: $CFLAGS"
 echo "  LDFLAGS..............: $LDFLAGS"

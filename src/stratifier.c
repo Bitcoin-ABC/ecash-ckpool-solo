@@ -19,7 +19,10 @@
 #include <math.h>
 #include <string.h>
 #include <unistd.h>
+
+#ifdef HAVE_ZMQ_H
 #include <zmq.h>
+#endif
 
 #include "ckpool.h"
 #include "libckpool.h"
@@ -8299,6 +8302,7 @@ void *throbber(void *arg)
 
 static void *zmqnotify(void *arg)
 {
+#ifdef HAVE_ZMQ_H
 	ckpool_t *ckp = arg;
 	sdata_t *sdata = ckp->sdata;
 	void *context, *notify;
@@ -8359,6 +8363,8 @@ static void *zmqnotify(void *arg)
 
 	zmq_close(notify);
 	zmq_ctx_destroy (context);
+#endif
+	pthread_detach(pthread_self());
 
 	return NULL;
 }
