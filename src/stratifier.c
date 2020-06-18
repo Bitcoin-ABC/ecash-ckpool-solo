@@ -8035,7 +8035,8 @@ static void *statsupdate(void *arg)
 		fprintf(fp, "%s\n", s);
 		dealloc(s);
 
-		percent = round(stats->accounted_diff_shares * 1000 / stats->network_diff) / 10;
+		/* Round to 4 significant digits */
+		percent = round(stats->accounted_diff_shares * 10000 / stats->network_diff) / 100;
 		JSON_CPACK(val, "{sf,sI,sI,sI,sf,sf,sf,sf}",
 			        "diff", percent,
 				"accepted", stats->accounted_diff_shares,
