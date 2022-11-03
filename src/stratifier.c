@@ -416,7 +416,7 @@ struct stratifier_data {
 	workbase_t *current_workbase;
 	int workbases_generated;
 	txntable_t *txns;
-	int txns_generated;
+	int64_t txns_generated;
 
 	/* Workbases from remote trusted servers */
 	workbase_t *remote_workbases;
@@ -449,9 +449,9 @@ struct stratifier_data {
 	stratum_instance_t *node_instances;
 	stratum_instance_t *remote_instances;
 
-	int stratum_generated;
-	int disconnected_generated;
-	int userwbs_generated;
+	int64_t stratum_generated;
+	int64_t disconnected_generated;
+	int64_t userwbs_generated;
 	session_t *disconnected_sessions;
 
 	user_instance_t *user_instances;
@@ -3745,9 +3745,9 @@ static void broadcast_ping(sdata_t *sdata)
 
 static void ckmsgq_stats(ckmsgq_t *ckmsgq, const int size, json_t **val)
 {
-	int objects, generated;
-	int64_t memsize;
+	int64_t memsize, generated;
 	ckmsg_t *msg;
+	int objects;
 
 	mutex_lock(ckmsgq->lock);
 	DL_COUNT(ckmsgq->msgs, msg, objects);
@@ -3755,22 +3755,22 @@ static void ckmsgq_stats(ckmsgq_t *ckmsgq, const int size, json_t **val)
 	mutex_unlock(ckmsgq->lock);
 
 	memsize = (sizeof(ckmsg_t) + size) * objects;
-	JSON_CPACK(*val, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+	JSON_CPACK(*val, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
 }
 
 char *stratifier_stats(ckpool_t *ckp, void *data)
 {
 	json_t *val = json_object(), *subval;
-	int objects, generated;
+	int64_t memsize, generated;
 	sdata_t *sdata = data;
-	int64_t memsize;
+	int objects;
 	char *buf;
 
 	ck_rlock(&sdata->workbase_lock);
 	objects = HASH_COUNT(sdata->workbases);
 	memsize = SAFE_HASH_OVERHEAD(sdata->workbases) + sizeof(workbase_t) * objects;
 	generated = sdata->workbases_generated;
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
 	json_set_object(val, "workbases", subval);
 	objects = HASH_COUNT(sdata->remote_workbases);
 	memsize = SAFE_HASH_OVERHEAD(sdata->remote_workbases) + sizeof(workbase_t) * objects;
@@ -3792,7 +3792,7 @@ char *stratifier_stats(ckpool_t *ckp, void *data)
 			memsize += SAFE_HASH_OVERHEAD(user->userwbs) + sizeof(struct userwb) * subobjects;
 		}
 		generated = sdata->userwbs_generated;
-		JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+		JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
 		json_set_object(val, "userwbs", subval);
 	}
 
@@ -3804,14 +3804,14 @@ char *stratifier_stats(ckpool_t *ckp, void *data)
 	objects = HASH_COUNT(sdata->stratum_instances);
 	memsize = SAFE_HASH_OVERHEAD(sdata->stratum_instances);
 	generated = sdata->stratum_generated;
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
 	json_set_object(val, "clients", subval);
 
 	objects = sdata->stats.disconnected;
 	generated = sdata->disconnected_generated;
 	memsize = SAFE_HASH_OVERHEAD(sdata->disconnected_sessions);
 	memsize += sizeof(session_t) * sdata->stats.disconnected;
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
 	json_set_object(val, "disconnected", subval);
 	ck_runlock(&sdata->instance_lock);
 
@@ -3821,14 +3821,14 @@ char *stratifier_stats(ckpool_t *ckp, void *data)
 	memsize = SAFE_HASH_OVERHEAD(sdata->shares) + sizeof(share_t) * objects;
 	mutex_unlock(&sdata->share_lock);
 
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
 	json_set_object(val, "shares", subval);
 
 	ck_rlock(&sdata->txn_lock);
 	objects = HASH_COUNT(sdata->txns);
 	memsize = SAFE_HASH_OVERHEAD(sdata->txns) + sizeof(txntable_t) * objects;
 	generated = sdata->txns_generated;
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
+	JSON_CPACK(subval, "{si,si,sI}", "count", objects, "memory", memsize, "generated", generated);
 	json_set_object(val, "transactions", subval);
 	ck_runlock(&sdata->txn_lock);
 
