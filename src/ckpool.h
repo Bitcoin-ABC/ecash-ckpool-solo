@@ -341,8 +341,6 @@ bool _ckmsgq_add(ckmsgq_t *ckmsgq, void *data, const char *file, const char *fun
 bool ckmsgq_empty(ckmsgq_t *ckmsgq);
 unix_msg_t *get_unix_msg(proc_instance_t *pi);
 
-ckpool_t *global_ckp;
-
 bool ping_main(ckpool_t *ckp);
 void empty_buffer(connsock_t *cs);
 int set_sendbufsize(ckpool_t *ckp, const int fd, const int len);
