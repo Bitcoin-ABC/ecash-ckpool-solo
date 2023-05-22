@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 Con Kolivas
+ * Copyright 2014-2018,2023 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -13,6 +13,7 @@
 typedef struct genwork gbtbase_t;
 
 bool validate_address(connsock_t *cs, const char *address, bool *script, bool *segwit);
+json_t *validate_txn(connsock_t *cs, const char *txn);
 bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt);
 void clear_gbtbase(gbtbase_t *gbt);
 int get_blockcount(connsock_t *cs);

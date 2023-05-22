@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2020 Con Kolivas
+ * Copyright 2014-2020,2023 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -524,7 +524,7 @@ static void info_msg_entries(char_entry_t **entries)
 
 static const int witnessdata_size = 36; // commitment header + hash
 
-static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
+static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 {
 	uint64_t *u64, g64, d64 = 0;
 	sdata_t *sdata = ckp->sdata;
@@ -639,6 +639,10 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 	wb->coinb3len += 4; // Blank lock
 
 	if (!ckp->btcsolo) {
+		int coinbase_len, offset = 0;
+		char *coinbase, *cb;
+		json_t *val = NULL;
+
 		/* Append the generation address and coinb3 in !solo mode */
 		wb->coinb2bin[wb->coinb2len++] = sdata->txnlen;
 		memcpy(wb->coinb2bin + wb->coinb2len, sdata->txnbin, sdata->txnlen);
@@ -647,6 +651,35 @@ static void generate_coinbase(const ckpool_t *ckp, workbase_t *wb)
 		wb->coinb2len += wb->coinb3len;
 		wb->coinb3len = 0;
 		dealloc(wb->coinb3bin);
+
+		if (!ckp->coinbase_valid) {
+			/* We have enough to test the validity of the coinbase here */
+			coinbase_len = wb->coinb1len + ckp->nonce1length + ckp->nonce2length + wb->coinb2len;
+			coinbase = ckzalloc(coinbase_len);
+			memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
+			offset += wb->coinb1len;
+			/* Space for nonce1 and 2 */
+			offset += ckp->nonce1length + ckp->nonce2length;
+			memcpy(coinbase + offset, wb->coinb2bin, wb->coinb2len);
+			offset += wb->coinb2len;
+			cb = bin2hex(coinbase, offset);
+			LOGDEBUG("Coinbase txn %s", cb);
+			free(coinbase);
+			if (generator_checktxn(ckp, cb, &val)) {
+				char *s = json_dumps(val, JSON_NO_UTF8 | JSON_COMPACT);
+
+				json_decref(val);
+				LOGNOTICE("Coinbase transaction confirmed valid");
+				LOGDEBUG("%s", s);
+				free(s);
+			} else {
+				/* This is a fatal error */
+				LOGEMERG("Coinbase failed valid transaction check, aborting!");
+				exit(1);
+			}
+			free(cb);
+			ckp->coinbase_valid = true;
+		}
 	}
 	/* Set this just for node compatibility, though it's unused */
 	wb->coinb2 = bin2hex(wb->coinb2bin, wb->coinb2len);

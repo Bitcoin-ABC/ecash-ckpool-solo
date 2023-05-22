@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 Con Kolivas
+ * Copyright 2014-2018,2023 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -245,6 +245,7 @@ struct ckpool_instance {
 	bool donscript; // Donation is a script
 	bool donsegwit; // Donation is segwit
 	bool donvalid; // Donation address works on this network
+	bool coinbase_valid; // Coinbase transaction confirmed valid
 
 	/* Stratum options */
 	server_instance_t **servers;

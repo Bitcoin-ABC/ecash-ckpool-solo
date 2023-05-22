@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 Con Kolivas
+ * Copyright 2014-2018,2023 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -90,6 +90,27 @@ out:
 	if (val)
 		json_decref(val);
 	return ret;
+}
+
+json_t *validate_txn(connsock_t *cs, const char *txn)
+{
+	json_t *val = NULL;
+	char *rpc_req;
+	int len;
+
+	if (unlikely(!txn || !strlen(txn))) {
+		LOGWARNING("Null transaction passed to validate_txn");
+		goto out;
+	}
+	len = strlen(txn) + 64;
+	rpc_req = ckalloc(len);
+	sprintf(rpc_req, "{\"method\": \"decoderawtransaction\", \"params\": [\"%s\"]}", txn);
+	val = json_rpc_call(cs, rpc_req);
+	dealloc(rpc_req);
+	if (!val)
+		LOGDEBUG("%s:%s Failed to get valid json response to decoderawtransaction", cs->url, cs->port);
+out:
+	return val;
 }
 
 static const char *gbt_req = "{\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"], \"rules\" : [\"segwit\"]}]}\n";
