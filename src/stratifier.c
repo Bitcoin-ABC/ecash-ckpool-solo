@@ -598,8 +598,10 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 
 	// Generation value
 	g64 = wb->coinbasevalue;
-	if (ckp->donvalid) {
-		d64 = g64 / 50; // 2% donation
+	if (ckp->donvalid && ckp->donation > 0) {
+		double dbl64 = (double)g64 / 100 * ckp->donation;
+
+		d64 = dbl64;
 		g64 -= d64; // To guarantee integers add up to the original coinbasevalue
 		wb->coinb2bin[wb->coinb2len++] = 2 + wb->insert_witness;
 	} else

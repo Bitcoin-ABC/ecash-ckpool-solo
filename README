@@ -224,6 +224,10 @@ new network blocks and is 100 by default. It is intended to be a backup only
 for when the notifier is not set up and only polls if the "notify" field is
 not set on a btcd.
 
+"donation" : Optional percentage donation of block reward that goes to the
+developer of ckpool to assist in further development and maintenance of the
+code. Takes a floating point value and defaults to zero if not set.
+
 "nodeserver" : This takes the same format as the serverurl array and specifies
 additional IPs/ports to bind to that will accept incoming requests for mining
 node communications. It is recommended to selectively isolate this address

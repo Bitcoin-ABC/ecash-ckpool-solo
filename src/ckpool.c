@@ -1461,6 +1461,12 @@ static void parse_config(ckpool_t *ckp)
 	json_get_int64(&ckp->maxdiff, json_conf, "maxdiff");
 	json_get_string(&ckp->logdir, json_conf, "logdir");
 	json_get_int(&ckp->maxclients, json_conf, "maxclients");
+	json_get_double(&ckp->donation, json_conf, "donation");
+	/* Avoid dust-sized donations */
+	if (ckp->donation < 0.1)
+		ckp->donation = 0;
+	else if (ckp->donation > 99.9)
+		ckp->donation = 99.9;
 	arr_val = json_object_get(json_conf, "proxy");
 	if (arr_val && json_is_array(arr_val)) {
 		arr_size = json_array_size(arr_val);

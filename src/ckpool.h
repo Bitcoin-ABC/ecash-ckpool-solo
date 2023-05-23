@@ -246,13 +246,16 @@ struct ckpool_instance {
 	bool script; // Address is a script address
 	bool segwit; // Address is a segwit address
 	char *btcsig; // Optional signature to add to coinbase
+	bool coinbase_valid; // Coinbase transaction confirmed valid
+
+	/* Donation data */
 	char *donaddress; // Donation address
 	char *tndonaddress; // Testnet donation address
 	char *rtdonaddress; // Regtest donation address
 	bool donscript; // Donation is a script
 	bool donsegwit; // Donation is segwit
 	bool donvalid; // Donation address works on this network
-	bool coinbase_valid; // Coinbase transaction confirmed valid
+	double donation; // Percentage donation to development
 
 	/* Stratum options */
 	server_instance_t **servers;
