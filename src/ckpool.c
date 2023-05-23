@@ -1336,6 +1336,7 @@ static void parse_nodeservers(ckpool_t *ckp, const json_t *arr_val)
 		if (!_json_get_string(&ckp->serverurl[j], val, "nodeserver"))
 			LOGWARNING("Invalid nodeserver entry number %d", i);
 		ckp->nodeserver[j] = true;
+		ckp->nodeservers++;
 	}
 	ckp->serverurls = total_urls;
 }

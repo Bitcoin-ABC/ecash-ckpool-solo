@@ -1302,7 +1302,7 @@ static void update_txns(ckpool_t *ckp, sdata_t *sdata, txntable_t *txns, bool lo
 	 * case they've been removed from its mempool as well and we need them
 	 * again in the future for a remote workinfo that hasn't forgotten
 	 * about them. */
-	if (purged)
+	if (purged && ckp->nodeservers)
 		submit_transaction_array(ckp, purged_txns);
 	json_decref(purged_txns);
 

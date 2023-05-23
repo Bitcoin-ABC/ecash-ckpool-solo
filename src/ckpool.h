@@ -263,6 +263,7 @@ struct ckpool_instance {
 	int serverurls; // Number of server bindings
 	bool *server_highdiff; // If this server is highdiff
 	bool *nodeserver; // If this server URL serves node information
+	int nodeservers; // If this server has remote node servers
 	bool *trusted; // If this server URL accepts trusted remote nodes
 	char *upstream; // Upstream pool in trusted remote mode
 
