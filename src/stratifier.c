@@ -654,6 +654,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		wb->coinb3len = 0;
 		dealloc(wb->coinb3bin);
 
+		/* Set this only once */
 		if (!ckp->coinbase_valid) {
 			/* We have enough to test the validity of the coinbase here */
 			coinbase_len = wb->coinb1len + ckp->nonce1length + ckp->nonce2length + wb->coinb2len;
@@ -682,7 +683,45 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 			free(cb);
 			ckp->coinbase_valid = true;
 		}
+	} else if (!ckp->coinbase_valid) {
+		/* Create a sample coinbase to test its validity in solo mode */
+		int coinbase_len, offset = 0;
+		char *coinbase, *cb;
+		json_t *val = NULL;
+
+		coinbase_len = wb->coinb1len + ckp->nonce1length + ckp->nonce2length + wb->coinb2len +
+			       sdata->txnlen + wb->coinb3len;
+		coinbase = ckzalloc(coinbase_len);
+		memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
+		offset += wb->coinb1len;
+		offset += ckp->nonce1length + ckp->nonce2length;
+		memcpy(coinbase + offset, wb->coinb2bin, wb->coinb2len);
+		offset += wb->coinb2len;
+		coinbase[offset] = sdata->txnlen;
+		offset += 1;
+		memcpy(coinbase + offset, sdata->txnbin, sdata->txnlen);
+		offset += sdata->txnlen;
+		memcpy(coinbase + offset, wb->coinb3bin, wb->coinb3len);
+		offset += wb->coinb3len;
+		cb = bin2hex(coinbase, offset);
+		LOGDEBUG("Coinbase txn %s", cb);
+		free(coinbase);
+		if (generator_checktxn(ckp, cb, &val)) {
+			char *s = json_dumps(val, JSON_NO_UTF8 | JSON_COMPACT);
+
+			json_decref(val);
+			LOGNOTICE("Coinbase transaction confirmed valid");
+			LOGDEBUG("%s", s);
+			free(s);
+		} else {
+			/* This is a fatal error */
+			LOGEMERG("Coinbase failed valid transaction check, aborting!");
+			exit(1);
+		}
+		free(cb);
+		ckp->coinbase_valid = true;
 	}
+
 	/* Set this just for node compatibility, though it's unused */
 	wb->coinb2 = bin2hex(wb->coinb2bin, wb->coinb2len);
 	LOGDEBUG("Coinb2: %s", wb->coinb2);
