@@ -616,7 +616,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	wb->coinb3len = 0;
 	wb->coinb3bin = ckzalloc(256 + wb->insert_witness * (8 + witnessdata_size + 2));
 
-	if (ckp->donvalid) {
+	if (ckp->donvalid && ckp->donation > 0) {
 		u64 = (uint64_t *)wb->coinb3bin;
 		*u64 = htole64(d64);
 		wb->coinb3len += 8;
