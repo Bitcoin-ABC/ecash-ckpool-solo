@@ -982,13 +982,17 @@ static void generate_userwbs(sdata_t *sdata, workbase_t *wb)
 static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_block)
 {
 	sdata_t *ckp_sdata = ckp->sdata;
+	pool_stats_t *stats = &sdata->stats;
+	double old_diff = stats->network_diff;
 	workbase_t *tmp, *tmpa;
 	int len, ret;
 
 	ts_realtime(&wb->gentime);
 	/* Stats network_diff is not protected by lock but is not a critical
 	 * value */
-	sdata->stats.network_diff = wb->network_diff = diff_from_nbits(wb->headerbin + 72);
+	stats->network_diff = wb->network_diff = diff_from_nbits(wb->headerbin + 72);
+	if (stats->network_diff != old_diff)
+		LOGNOTICE("Network diff set to %.1ld%s", stats->network_diff, ckp->testnet ? " in testnet mode!": "");
 
 	len = strlen(ckp->logdir) + 8 + 1 + 16 + 1;
 	wb->logdir = ckzalloc(len);
@@ -5667,13 +5671,15 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	char blockhash[68], cdfield[64], *gbt_block;
 	sdata_t *sdata = client->sdata;
 	ckpool_t *ckp = wb->ckp;
+	double network_diff;
 	json_t *val = NULL;
 	uchar flip32[32];
 	ts_t ts_now;
 	bool ret;
 
 	/* Submit anything over 99.9% of the diff in case of rounding errors */
-	if (likely(diff < sdata->current_workbase->network_diff * 0.999))
+	network_diff = ckp->testnet ? sdata->current_workbase->network_diff * 0.499 : sdata->current_workbase->network_diff * 0.999;
+	if (likely(diff < network_diff))
 		return;
 
 	LOGWARNING("Possible %sblock solve diff %lf !", stale ? "stale share " : "", diff);
@@ -8437,10 +8443,23 @@ void *stratifier(void *arg)
 		hex2bin(scriptsig_header_bin, scriptsig_header, 41);
 		sdata->txnlen = address_to_txn(sdata->txnbin, ckp->btcaddress, ckp->script, ckp->segwit);
 
+		/* Find a valid donation address if possible */
 		if (generator_checkaddr(ckp, ckp->donaddress, &ckp->donscript, &ckp->donsegwit)) {
 			ckp->donvalid = true;
 			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit);
-		}
+			LOGNOTICE("BTC donation address valid %s", ckp->donaddress);
+		} else if (generator_checkaddr(ckp, ckp->tndonaddress, &ckp->donscript, &ckp->donsegwit)) {
+			ckp->donaddress = ckp->tndonaddress;
+			ckp->donvalid = true;
+			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit);
+			LOGNOTICE("BTC testnet donation address valid %s", ckp->donaddress);
+		} else if (generator_checkaddr(ckp, ckp->rtdonaddress, &ckp->donscript, &ckp->donsegwit)) {
+			ckp->donaddress = ckp->rtdonaddress;
+			ckp->donvalid = true;
+			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit);
+			LOGNOTICE("BTC regtest donation address valid %s", ckp->donaddress);
+		} else
+			LOGNOTICE("No valid donation address found");
 	}
 
 	randomiser = time(NULL);

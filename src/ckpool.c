@@ -1251,12 +1251,14 @@ static void parse_btcds(ckpool_t *ckp, const json_t *arr_val, const int arr_size
 	ckp->btcdauth = ckzalloc(sizeof(char *) * arr_size);
 	ckp->btcdpass = ckzalloc(sizeof(char *) * arr_size);
 	ckp->btcdnotify = ckzalloc(sizeof(bool *) * arr_size);
+	ckp->btcdtestnet = ckzalloc(sizeof(bool *) * arr_size);
 	for (i = 0; i < arr_size; i++) {
 		val = json_array_get(arr_val, i);
 		json_get_string(&ckp->btcdurl[i], val, "url");
 		json_get_string(&ckp->btcdauth[i], val, "auth");
 		json_get_string(&ckp->btcdpass[i], val, "pass");
 		json_get_bool(&ckp->btcdnotify[i], val, "notify");
+		json_get_bool(&ckp->btcdtestnet[i], val, "testnet");
 	}
 }
 
@@ -1733,6 +1735,12 @@ int main(int argc, char **argv)
 	}
 
 	ckp.donaddress = "1PKN98VN2z5gwSGZvGKS2bj8aADZBkyhkZ";
+
+	/* Donations on testnet are meaningless but required for complete
+	 * testing. Testnet and regtest addresses */
+	ckp.tndonaddress = "tb1q5fyv7tue73y4zxezh2c685qpwx0cfngfxlrgxh";
+	ckp.rtdonaddress = "bcrt1qlk935ze2fsu86zjp395uvtegztrkaezawxx0wf";
+
 	if (!ckp.btcaddress)
 		ckp.btcaddress = ckp.donaddress;
 	if (!ckp.blockpoll)
