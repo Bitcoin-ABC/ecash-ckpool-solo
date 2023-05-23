@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 Con Kolivas
+ * Copyright 2014-2018,2023 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -2141,6 +2141,27 @@ double le256todouble(const uchar *target)
 	return dcut64;
 }
 
+/* Converts a big endian 256 bit value to a double */
+double be256todouble(const uchar *target)
+{
+	uint64_t *data64;
+	double dcut64;
+
+	data64 = (uint64_t *)(target);
+	dcut64 = be64toh(*data64) * bits192;
+
+	data64 = (uint64_t *)(target + 8);
+	dcut64 += be64toh(*data64) * bits128;
+
+	data64 = (uint64_t *)(target + 16);
+	dcut64 += be64toh(*data64) * bits64;
+
+	data64 = (uint64_t *)(target + 24);
+	dcut64 += be64toh(*data64);
+
+	return dcut64;
+}
+
 /* Return a difficulty from a binary target */
 double diff_from_target(uchar *target)
 {
@@ -2153,23 +2174,34 @@ double diff_from_target(uchar *target)
 	return d64 / dcut64;
 }
 
+/* Return a difficulty from a binary big endian target */
+double diff_from_betarget(uchar *target)
+{
+	double d64, dcut64;
+
+	d64 = truediffone;
+	dcut64 = be256todouble(target);
+	if (unlikely(!dcut64))
+		dcut64 = 1;
+	return d64 / dcut64;
+}
+
 /* Return the network difficulty from the block header which is in packed form,
  * as a double. */
 double diff_from_nbits(char *nbits)
 {
-	double numerator;
-	uint32_t diff32;
-	uint8_t pow;
-	int powdiff;
+	uint8_t shift = nbits[0];
+	uchar target[32] = {};
 
-	pow = nbits[0];
-	powdiff = (8 * (0x1d - 3)) - (8 * (pow - 3));
-	if (powdiff < 8) // testnet only
-		powdiff = 8;
-	diff32 = be32toh(*((uint32_t *)nbits)) & 0x00FFFFFF;
-	numerator = 0xFFFFULL << powdiff;
-
-	return numerator / (double)diff32;
+	if (unlikely(shift < 3)) {
+		LOGWARNING("Corrupt shift of %d in nbits", shift);
+		shift = 3;
+	} else if (unlikely(shift > 29)) {
+		LOGWARNING("Corrupt shift of %d in nbits", shift);
+		shift = 29;
+	}
+	memcpy(target + (32 - shift), nbits + 1, 3);
+	return diff_from_betarget(target);
 }
 
 void target_from_diff(uchar *target, double diff)

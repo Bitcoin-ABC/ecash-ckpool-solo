@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2018 Con Kolivas
+ * Copyright 2014-2018,2023 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -597,7 +597,9 @@ double sane_tdiff(tv_t *end, tv_t *start);
 void suffix_string(double val, char *buf, size_t bufsiz, int sigdigits);
 
 double le256todouble(const uchar *target);
+double be256todouble(const uchar *target);
 double diff_from_target(uchar *target);
+double diff_from_betarget(uchar *target);
 double diff_from_nbits(char *nbits);
 void target_from_diff(uchar *target, double diff);
 
