@@ -690,7 +690,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		json_t *val = NULL;
 
 		coinbase_len = wb->coinb1len + ckp->nonce1length + ckp->nonce2length + wb->coinb2len +
-			       sdata->txnlen + wb->coinb3len;
+			       sdata->txnlen + wb->coinb3len + 1;
 		coinbase = ckzalloc(coinbase_len);
 		memcpy(coinbase, wb->coinb1bin, wb->coinb1len);
 		offset += wb->coinb1len;
