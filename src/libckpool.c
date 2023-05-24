@@ -1835,11 +1835,11 @@ int ser_number(uchar *s, int32_t val)
 	int32_t *i32 = (int32_t *)&s[1];
 	int len;
 
-	if (val < 128)
+	if (val < 0x80)
 		len = 1;
-	else if (val < 16512)
+	else if (val < 0x8000)
 		len = 2;
-	else if (val < 2113664)
+	else if (val < 0x800000)
 		len = 3;
 	else
 		len = 4;
