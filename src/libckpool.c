@@ -2192,13 +2192,17 @@ double diff_from_nbits(char *nbits)
 {
 	uint8_t shift = nbits[0];
 	uchar target[32] = {};
+	char *nb;
 
+	nb = bin2hex(nbits, 4);
+	LOGDEBUG("Nbits is %s", nb);
+	free(nb);
 	if (unlikely(shift < 3)) {
 		LOGWARNING("Corrupt shift of %d in nbits", shift);
 		shift = 3;
-	} else if (unlikely(shift > 29)) {
+	} else if (unlikely(shift > 32)) {
 		LOGWARNING("Corrupt shift of %d in nbits", shift);
-		shift = 29;
+		shift = 32;
 	}
 	memcpy(target + (32 - shift), nbits + 1, 3);
 	return diff_from_betarget(target);
