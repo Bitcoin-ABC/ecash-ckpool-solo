@@ -208,7 +208,7 @@ ckmsgq_t *create_ckmsgqs(ckpool_t *ckp, const char *name, const void *func, cons
 	cond_init(cond);
 
 	for (i = 0; i < count; i++) {
-		snprintf(ckmsgq[i].name, 15, "%.8s%x", name, i);
+		snprintf(ckmsgq[i].name, 15, "%.6s%x", name, i);
 		ckmsgq[i].func = func;
 		ckmsgq[i].ckp = ckp;
 		ckmsgq[i].lock = lock;
