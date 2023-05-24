@@ -195,15 +195,25 @@ static inline void flip_80(void *dest_p, const void *src_p)
 
 void logmsg(int loglevel, const char *fmt, ...);
 
-#define DEFLOGBUFSIZ 1000
+#define DEFLOGBUFSIZ 256
 
 #define LOGMSGBUF(__lvl, __buf) do { \
 		logmsg(__lvl, "%s", __buf); \
 	} while(0)
 #define LOGMSGSIZ(__siz, __lvl, __fmt, ...) do { \
-		char tmp42[__siz]; \
-		snprintf(tmp42, sizeof(tmp42), __fmt, ##__VA_ARGS__); \
-		logmsg(__lvl, "%s", tmp42); \
+		char *buf; \
+		int len, offset = 0; \
+		ASPRINTF(&buf, __fmt, ##__VA_ARGS__); \
+		len = strlen(buf); \
+		while (len > 0) { \
+			char tmp42[__siz] = {}; \
+			int cpy = MIN(len, DEFLOGBUFSIZ - 2); \
+			memcpy(tmp42, buf + offset, cpy); \
+			logmsg(__lvl, "%s", tmp42);\
+			offset += cpy; \
+			len -= offset; \
+		} \
+		free(buf); \
 	} while(0)
 
 #define LOGMSG(_lvl, _fmt, ...) \
