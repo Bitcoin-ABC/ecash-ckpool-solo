@@ -5974,7 +5974,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	sdata_t *sdata = client->sdata;
 	enum share_err err = SE_NONE;
 	ckpool_t *ckp = client->ckp;
-	char idstring[20] = {};
+	char idstring[24] = {};
 	workbase_t *wb = NULL;
 	uchar hash[32];
 	int nlen, len;
@@ -6063,7 +6063,7 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		goto out_nowb;
 	}
 	wdiff = wb->diff;
-	strncpy(idstring, wb->idstring, 19);
+	strncpy(idstring, wb->idstring, 20);
 	ASPRINTF(&fname, "%s.sharelog", wb->logdir);
 	/* Fix broken clients sending too many chars. Nonce2 is part of the
 	 * read only json so use a temporary variable and modify it. */
