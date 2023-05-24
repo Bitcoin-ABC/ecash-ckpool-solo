@@ -195,7 +195,7 @@ static inline void flip_80(void *dest_p, const void *src_p)
 
 void logmsg(int loglevel, const char *fmt, ...);
 
-#define DEFLOGBUFSIZ 256
+#define DEFLOGBUFSIZ 512
 
 #define LOGMSGBUF(__lvl, __buf) do { \
 		logmsg(__lvl, "%s", __buf); \
