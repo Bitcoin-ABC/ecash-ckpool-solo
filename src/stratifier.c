@@ -81,7 +81,7 @@ struct pool_stats {
 	double dsps1440;
 	double dsps10080;
 
-	uint64_t network_diff;
+	double network_diff;
 	int64_t best_diff;
 };
 
@@ -1031,10 +1031,12 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 	ts_realtime(&wb->gentime);
 	/* Stats network_diff is not protected by lock but is not a critical
 	 * value */
-	stats->network_diff = wb->network_diff = diff_from_nbits(wb->headerbin + 72);
+	wb->network_diff = diff_from_nbits(wb->headerbin + 72);
+	if (wb->network_diff < 1)
+		wb->network_diff = 1;
+	stats->network_diff = wb->network_diff;
 	if (stats->network_diff != old_diff)
-		LOGNOTICE("Network diff set to %.1ld%s", stats->network_diff, ckp->testnet ? " in testnet mode!": "");
-
+		LOGWARNING("Network diff set to %.1f%s", stats->network_diff, ckp->testnet ? " in testnet mode!": "");
 	len = strlen(ckp->logdir) + 8 + 1 + 16 + 1;
 	wb->logdir = ckzalloc(len);
 
@@ -5664,6 +5666,9 @@ static void add_submit(ckpool_t *ckp, stratum_instance_t *client, const double d
 
 	/* Set to lower of optimal and network_diff */
 	optimal = MIN(optimal, network_diff);
+
+	if (unlikely(optimal < 1))
+		return;
 
 	if (client->diff == optimal)
 		return;

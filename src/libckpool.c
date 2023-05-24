@@ -2165,25 +2165,23 @@ double be256todouble(const uchar *target)
 /* Return a difficulty from a binary target */
 double diff_from_target(uchar *target)
 {
-	double d64, dcut64;
+	double dcut64;
 
-	d64 = truediffone;
 	dcut64 = le256todouble(target);
-	if (unlikely(!dcut64))
+	if (unlikely(dcut64 <= 0))
 		dcut64 = 1;
-	return d64 / dcut64;
+	return truediffone / dcut64;
 }
 
 /* Return a difficulty from a binary big endian target */
 double diff_from_betarget(uchar *target)
 {
-	double d64, dcut64;
+	double dcut64;
 
-	d64 = truediffone;
 	dcut64 = be256todouble(target);
-	if (unlikely(!dcut64))
+	if (unlikely(dcut64 <= 0))
 		dcut64 = 1;
-	return d64 / dcut64;
+	return truediffone / dcut64;
 }
 
 /* Return the network difficulty from the block header which is in packed form,
