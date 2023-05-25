@@ -299,7 +299,6 @@ retry:
 	goto retry;
 living:
 	gdata->current_si = alive;
-	ckp->testnet = alive->testnet;
 	cs = &alive->cs;
 	LOGINFO("Connected to live server %s:%s", cs->url, cs->port);
 	send_proc(ckp->connector, alive ? "accept" : "reject");
@@ -3296,7 +3295,6 @@ static void setup_servers(ckpool_t *ckp)
 		si->auth = ckp->btcdauth[i];
 		si->pass = ckp->btcdpass[i];
 		si->notify = ckp->btcdnotify[i];
-		si->testnet = ckp->btcdtestnet[i];
 		si->id = i;
 		cs = &si->cs;
 		cs->ckp = ckp;

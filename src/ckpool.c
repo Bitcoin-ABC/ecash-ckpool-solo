@@ -1251,14 +1251,12 @@ static void parse_btcds(ckpool_t *ckp, const json_t *arr_val, const int arr_size
 	ckp->btcdauth = ckzalloc(sizeof(char *) * arr_size);
 	ckp->btcdpass = ckzalloc(sizeof(char *) * arr_size);
 	ckp->btcdnotify = ckzalloc(sizeof(bool *) * arr_size);
-	ckp->btcdtestnet = ckzalloc(sizeof(bool *) * arr_size);
 	for (i = 0; i < arr_size; i++) {
 		val = json_array_get(arr_val, i);
 		json_get_string(&ckp->btcdurl[i], val, "url");
 		json_get_string(&ckp->btcdauth[i], val, "auth");
 		json_get_string(&ckp->btcdpass[i], val, "pass");
 		json_get_bool(&ckp->btcdnotify[i], val, "notify");
-		json_get_bool(&ckp->btcdtestnet[i], val, "testnet");
 	}
 }
 

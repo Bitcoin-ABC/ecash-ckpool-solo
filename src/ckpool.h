@@ -120,7 +120,6 @@ struct server_instance {
 	char *auth;
 	char *pass;
 	bool notify;
-	bool testnet;
 	bool alive;
 	connsock_t cs;
 };
@@ -217,9 +216,6 @@ struct ckpool_instance {
 	/* Should we disable the throbber */
 	bool quiet;
 
-	/* Are we mining on testnet */
-	bool testnet;
-
 	/* Have we given warnings about the inability to raise buf sizes */
 	bool wmem_warn;
 	bool rmem_warn;
@@ -230,7 +226,6 @@ struct ckpool_instance {
 	char **btcdauth;
 	char **btcdpass;
 	bool *btcdnotify;
-	bool *btcdtestnet;
 	int blockpoll; // How frequently in ms to poll bitcoind for block updates
 	int nonce1length; // Extranonce1 length
 	int nonce2length; // Extranonce2 length

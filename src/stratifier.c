@@ -1036,7 +1036,7 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 		wb->network_diff = 1;
 	stats->network_diff = wb->network_diff;
 	if (stats->network_diff != old_diff)
-		LOGWARNING("Network diff set to %.1f%s", stats->network_diff, ckp->testnet ? " in testnet mode!": "");
+		LOGWARNING("Network diff set to %.1f", stats->network_diff);
 	len = strlen(ckp->logdir) + 8 + 1 + 16 + 1;
 	wb->logdir = ckzalloc(len);
 
@@ -5724,7 +5724,7 @@ test_blocksolve(const stratum_instance_t *client, const workbase_t *wb, const uc
 	bool ret;
 
 	/* Submit anything over 99.9% of the diff in case of rounding errors */
-	network_diff = ckp->testnet ? sdata->current_workbase->network_diff * 0.499 : sdata->current_workbase->network_diff * 0.999;
+	network_diff = sdata->current_workbase->network_diff * 0.999;
 	if (likely(diff < network_diff))
 		return;
 
