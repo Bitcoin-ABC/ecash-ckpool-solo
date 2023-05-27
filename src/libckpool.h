@@ -185,7 +185,7 @@ static inline void flip_80(void *dest_p, const void *src_p)
 
 #define VASPRINTF(strp, fmt, ...) do { \
 	if (unlikely(vasprintf(strp, fmt, ##__VA_ARGS__) < 0)) \
-		quitfrom(1, __FILE__, __func__, __LINE__, "Failed to asprintf"); \
+		quitfrom(1, __FILE__, __func__, __LINE__, "Failed to vasprintf"); \
 } while (0)
 
 #define ASPRINTF(strp, fmt, ...) do { \
@@ -197,9 +197,6 @@ void logmsg(int loglevel, const char *fmt, ...);
 
 #define DEFLOGBUFSIZ 512
 
-#define LOGMSGBUF(__lvl, __buf) do { \
-		logmsg(__lvl, "%s", __buf); \
-	} while(0)
 #define LOGMSGSIZ(__siz, __lvl, __fmt, ...) do { \
 		char *buf; \
 		int len, offset = 0; \
