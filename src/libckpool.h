@@ -198,20 +198,20 @@ void logmsg(int loglevel, const char *fmt, ...);
 #define DEFLOGBUFSIZ 512
 
 #define LOGMSGSIZ(__siz, __lvl, __fmt, ...) do { \
-		char *buf; \
-		int len, offset = 0; \
-		ASPRINTF(&buf, __fmt, ##__VA_ARGS__); \
-		len = strlen(buf); \
-		while (len > 0) { \
-			char tmp42[__siz] = {}; \
-			int cpy = MIN(len, DEFLOGBUFSIZ - 2); \
-			memcpy(tmp42, buf + offset, cpy); \
-			logmsg(__lvl, "%s", tmp42);\
-			offset += cpy; \
-			len -= offset; \
-		} \
-		free(buf); \
-	} while(0)
+	char *BUF; \
+	int LEN, OFFSET = 0; \
+	ASPRINTF(&BUF, __fmt, ##__VA_ARGS__); \
+	LEN = strlen(BUF); \
+	while (LEN > 0) { \
+		char tmp42[__siz] = {}; \
+		int CPY = MIN(LEN, DEFLOGBUFSIZ - 2); \
+		memcpy(tmp42, BUF + OFFSET, CPY); \
+		logmsg(__lvl, "%s", tmp42);\
+		OFFSET += CPY; \
+		LEN -= OFFSET; \
+	} \
+	free(BUF); \
+} while(0)
 
 #define LOGMSG(_lvl, _fmt, ...) \
 	LOGMSGSIZ(DEFLOGBUFSIZ, _lvl, _fmt, ##__VA_ARGS__)
