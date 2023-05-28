@@ -624,7 +624,8 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		wb->coinb3bin[wb->coinb3len++] = sdata->dontxnlen;
 		memcpy(wb->coinb3bin + wb->coinb3len, sdata->dontxnbin, sdata->dontxnlen);
 		wb->coinb3len += sdata->dontxnlen;
-	}
+	} else
+		ckp->donation = 0;
 
 	if (wb->insert_witness) {
 		// 0 value
@@ -655,7 +656,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		dealloc(wb->coinb3bin);
 
 		/* Set this only once */
-		if (!ckp->coinbase_valid) {
+		if (unlikely(!ckp->coinbase_valid)) {
 			/* We have enough to test the validity of the coinbase here */
 			coinbase_len = wb->coinb1len + ckp->nonce1length + ckp->nonce2length + wb->coinb2len;
 			coinbase = ckzalloc(coinbase_len);
@@ -682,8 +683,11 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 			}
 			free(cb);
 			ckp->coinbase_valid = true;
+			LOGWARNING("Mining from any incoming username to address %s", ckp->btcaddress);
+			if (ckp->donation)
+				LOGWARNING("%.1f percent donation to %s", ckp->donation, ckp->donaddress);
 		}
-	} else if (!ckp->coinbase_valid) {
+	} else if (unlikely(!ckp->coinbase_valid)) {
 		/* Create a sample coinbase to test its validity in solo mode */
 		int coinbase_len, offset = 0;
 		char *coinbase, *cb;
@@ -720,6 +724,9 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		}
 		free(cb);
 		ckp->coinbase_valid = true;
+		LOGWARNING("Mining solo to any incoming valid BTC address username");
+		if (ckp->donation)
+			LOGWARNING("%.1f percent donation to %s", ckp->donation, ckp->donaddress);
 	}
 
 	/* Set this just for node compatibility, though it's unused */
