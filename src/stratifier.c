@@ -5125,6 +5125,7 @@ static void read_userstats(ckpool_t *ckp, sdata_t *sdata, int tvsec_diff)
 
 	while ((dir = readdir(d)) != NULL) {
 		json_t *worker_array, *arr_val;
+		int64_t authorised;
 		int lastshare;
 		size_t index;
 
@@ -5183,11 +5184,13 @@ static void read_userstats(ckpool_t *ckp, sdata_t *sdata, int tvsec_diff)
 		json_get_int64(&user->shares, val, "shares");
 		json_get_double(&user->best_diff, val, "bestshare");
 		json_get_int64(&user->best_ever, val, "bestever");
+		json_get_int64(&authorised, val, "authorised");
+		user->auth_time = authorised;
 		if (user->best_diff > user->best_ever)
 			user->best_ever = user->best_diff;
-		LOGINFO("Successfully read user %s stats %f %f %f %f %f %f %ld", user->username,
+		LOGINFO("Successfully read user %s stats %f %f %f %f %f %f %ld %ld", user->username,
 			user->dsps1, user->dsps5, user->dsps60, user->dsps1440,
-			user->dsps10080, user->best_diff, user->best_ever);
+			user->dsps10080, user->best_diff, user->best_ever, user->auth_time);
 		if (tvsec_diff > 60)
 			decay_user(user, 0, &now);
 
@@ -5400,6 +5403,8 @@ static void client_auth(ckpool_t *ckp, stratum_instance_t *client, user_instance
 		user->failed_authtime = 0;
 		user->auth_backoff = DEFAULT_AUTH_BACKOFF; /* Reset auth backoff time */
 		user->throttled = false;
+		if (!user->auth_time)
+			user->auth_time = time(NULL);
 	} else {
 		if (user->throttled) {
 			LOGINFO("Client %s %s worker %s failed to authorise as throttled user %s",
@@ -7975,7 +7980,7 @@ static void *statsupdate(void *arg)
 			ghs = user->dsps10080 * nonces;
 			suffix_string(ghs, suffix10080, 16, 0);
 
-			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,si,sI,sf,sI}",
+			JSON_CPACK(val, "{ss,ss,ss,ss,ss,si,si,sI,sf,sI, sI}",
 					"hashrate1m", suffix1,
 					"hashrate5m", suffix5,
 					"hashrate1hr", suffix60,
@@ -7985,7 +7990,8 @@ static void *statsupdate(void *arg)
 					"workers", user->workers + user->remote_workers,
 					"shares", user->shares,
 					"bestshare", user->best_diff,
-					"bestever", user->best_ever);
+					"bestever", user->best_ever,
+					"authorised", user->auth_time);
 
 			if (user->remote_workers) {
 				remote_workers += user->remote_workers;
