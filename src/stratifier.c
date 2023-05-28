@@ -3708,12 +3708,14 @@ static json_t *user_stats(const user_instance_t *user)
 	ghs = user->dsps10080 * nonces;
 	suffix_string(ghs, suffix10080, 16, 0);
 
-	JSON_CPACK(val, "{ss,ss,ss,ss,ss}",
+	JSON_CPACK(val, "{ss,ss,ss,ss,ss,sI,sI}",
 			"hashrate1m", suffix1,
 			"hashrate5m", suffix5,
 			"hashrate1hr", suffix60,
 			"hashrate1d", suffix1440,
-			"hashrate7d", suffix10080);
+			"hashrate7d", suffix10080,
+			"shares", user->shares,
+			"authorised", user->auth_time);
 	return val;
 }
 
