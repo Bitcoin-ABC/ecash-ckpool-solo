@@ -143,4 +143,9 @@ mining solo locally should be reserved as a backup operation only unless you
 have the skills, hardware, and data centre quality connectivity to minimise
 latency.
 
+Mining on testnet may create a cascade of solved competing blocks when the diff
+is 1. This is normal as the default behaviour is optimised around mainnet
+mining where block solving is rare.
+
+
 Good luck.
