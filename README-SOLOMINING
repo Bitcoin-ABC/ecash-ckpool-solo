@@ -82,7 +82,9 @@ you can set a bitcoin address to mine to as follows:
 
 "btcaddress" : "14BMjogz69qe8hk9thyzbmR5pg34mVKB1e",
 
-You must then start ckpool withOUT the -B option.
+You must then start ckpool withOUT the -B option. This would mine to the
+address 14BMjogz69qe8hk9thyzbmR5pg34mVKB1e, so modify it to the bitcoin address
+you wish to mine to.
 
 
 You can set the starting diff (instead of the default 42) on the pool as
@@ -129,6 +131,7 @@ this will look for a configuration file called local.conf
 ---
 
 NOTES.
+
 Json is very strict with its field processing although spacing is flexible. The
 most common error to watch out for is to NOT put a comma after the last field.
 
