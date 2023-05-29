@@ -1,6 +1,6 @@
-AC_INIT(ckpool, 0.9.6, kernel@kolivas.org)
+AC_INIT([ckpool],[0.9.7],[kernel@kolivas.org])
 
-AC_CANONICAL_SYSTEM
+AC_CANONICAL_TARGET
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR([src/ckpool.c])
 AC_CONFIG_HEADERS([config.h])
@@ -25,7 +25,6 @@ LT_INIT([disable-shared])
 # gl_INIT - maybe later
 
 dnl Checks for header files.
-AC_HEADER_STDC
 
 AC_FUNC_ALLOCA
 
@@ -80,7 +79,8 @@ AC_SEARCH_LIBS(exp, m, , echo "Error: Required library math not found." && exit 
 AC_SEARCH_LIBS(pthread_mutex_trylock, pthread, , echo "Error: Required library pthreads not found." && exit 1)
 AC_SEARCH_LIBS(zmq_socket, zmq, ZMQ=yes, ZMQ=no)
 
-AC_OUTPUT([Makefile] [src/Makefile])
+AC_CONFIG_FILES([Makefile src/Makefile])
+AC_OUTPUT
 
 LDFLAGS="${LDFLAGS} -Wl,--as-needed"
 
