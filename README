@@ -121,23 +121,15 @@ sudo apt-get install build-essential yasm
 make
 
 
-Building from git also requires autoconf and automake:
+Building from git also requires autoconf, automake, and pkgconf:
 
-sudo apt-get install build-essential yasm autoconf automake libtool libzmq3-dev
+sudo apt-get install build-essential yasm autoconf automake libtool libzmq3-dev pkgconf
 
 ./autogen.sh
 
 ./configure
 
 make
-
-
-If this fails, you may be using a linux distribution that requires the pkgconf
-package additionally installed.
-
-sudo apt-get install pkgconf
-
-(then resume at the autogen.sh stage above).
 
 
 Binaries will be built in the src/ subdirectory. Binaries generated will be:
