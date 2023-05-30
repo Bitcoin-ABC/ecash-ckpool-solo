@@ -103,18 +103,18 @@ yasm on any linux installation. Recommended zmq notification support (ckpool
 only) requires the zmq devel library installed.
 
 
-Basic build:
+Building with zmq (preferred build but not required for ckproxy):
 
-sudo apt-get install build-essential yasm
+sudo apt-get install build-essential yasm libzmq3-dev
 
 ./configure
 
 make
 
 
-Building with zmq (this is not required for ckproxy):
+Basic build:
 
-sudo apt-get install build-essential yasm libzmq3-dev
+sudo apt-get install build-essential yasm
 
 ./configure
 
@@ -130,6 +130,14 @@ sudo apt-get install build-essential yasm autoconf automake libtool libzmq3-dev
 ./configure
 
 make
+
+
+If this fails, you may be using a linux distribution that requires the pkgconf
+package additionally installed.
+
+sudo apt-get install pkgconf
+
+(then resume at the autogen.sh stage above).
 
 
 Binaries will be built in the src/ subdirectory. Binaries generated will be:
