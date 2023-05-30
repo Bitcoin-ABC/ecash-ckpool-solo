@@ -252,6 +252,19 @@ static bool server_alive(ckpool_t *ckp, server_instance_t *si, bool pinging)
 		goto out;
 	}
 	clear_gbtbase(&gbt);
+	if (unlikely(ckp->btcsolo && !ckp->btcaddress)) {
+		/* If no btcaddress is specified in solobtc mode, choose one of
+		 * the donation addresses from mainnet, testnet, or regtest for
+		 * coinbase validation later on, although it will not be used
+		 * for mining. */
+		if (validate_address(cs, ckp->donaddress, &ckp->script, &ckp->segwit))
+			ckp->btcaddress = ckp->donaddress;
+		else if (validate_address(cs, ckp->tndonaddress, &ckp->script, &ckp->segwit))
+			ckp->btcaddress = ckp->tndonaddress;
+		else if (validate_address(cs, ckp->rtdonaddress, &ckp->script, &ckp->segwit))
+			ckp->btcaddress = ckp->rtdonaddress;
+	}
+
 	if (!ckp->node && !validate_address(cs, ckp->btcaddress, &ckp->script, &ckp->segwit)) {
 		LOGWARNING("Invalid btcaddress: %s !", ckp->btcaddress);
 		goto out;
