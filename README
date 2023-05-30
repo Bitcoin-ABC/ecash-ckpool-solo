@@ -19,49 +19,79 @@ GNU Public license V3. See included COPYING for details.
 DESIGN:
 
 Architecture:
+
 - Low level hand coded architecture relying on minimal outside libraries beyond
 basic glibc functions for maximum flexibility and minimal overhead that can be
 built and deployed on any Linux installation.
+
 - Multiprocess+multithreaded design to scale to massive deployments and
 capitalise on modern multicore/multithread CPU designs.
+
 - Minimal memory overhead.
+
 - Utilises ultra reliable unix sockets for communication with dependent
 processes.
+
 - Modular code design to streamline further development.
+
 - Standalone library code that can be utilised independently of ckpool.
+
 - Same code can be deployed in many different modes designed to talk to each
 other on the same machine, local lan or remote internet locations.
 
+
+---
 Modes of deployment:
+
 - Simple pool.
+
+- Simple pool with per-user solo mining.
+
 - Simple proxy without the limitations of hashrate inherent in other proxy
 solutions when talking to ckpool.
+
 - Passthrough node(s) that combine connections to a single socket which can
 be used to scale to millions of clients and allow the main pool to be isolated
 from direct communication with clients.
+
 - Library for use by other software.
 
+
+---
 Features:
+
 - Bitcoind communication to unmodified bitcoind with multiple failover to local
 or remote locations.
+
 - Local pool instance worker limited only by operating system resources and
 can be made virtually limitless through use of multiple downstream passthrough
 nodes.
+
 - Proxy and passthrough modes can set up multiple failover upstream pools.
+
 - Optional share logging.
+
 - Virtually seamless restarts for upgrades through socket handover from exiting
 instances to new starting instance.
+
 - Configurable custom coinbase signature.
+
 - Configurable instant starting and minimum difficulty.
+
 - Rapid vardiff adjustment with stable unlimited maximum difficulty handling.
+
 - New work generation on block changes incorporate full bitcoind transaction
 set without delay or requiring to send transactionless work to miners thereby
 providing the best bitcoin network support and rewarding miners with the most
 transaction fees.
+
 - Event driven communication based on communication readiness preventing
 slow communicating clients from delaying low latency ones.
+
 - Stratum messaging system to running clients.
+
 - Accurate pool and per client statistics.
+
 - Multiple named instances can be run concurrently on the same machine.
 
 
@@ -103,9 +133,13 @@ make
 
 
 Binaries will be built in the src/ subdirectory. Binaries generated will be:
+
 ckpool - The main pool back end
+
 ckproxy - A link to ckpool that automatically starts it in proxy mode
+
 ckpmsg - An application for passing messages in libckpool format to ckpool
+
 notifier - An application designed to be run with bitcoind's -blocknotify to
 	notify ckpool of block changes.
 
@@ -121,18 +155,31 @@ RUNNING:
 ckpool supports the following options:
 
 -c CONFIG | --config CONFIG
+
 -g GROUP | --group GROUP
+
 -H | --handover
+
 -h | --help
+
 -k | --killold
+
 -L | --log-shares
+
 -l LOGLEVEL | --loglevel LOGLEVEL
+
 -N | --node
+
 -n NAME | --name NAME
+
 -P | --passthrough
+
 -p | --proxy
+
 -R | --redirector
+
 -s SOCKDIR | --sockdir SOCKDIR
+
 -u | --userproxy
 
 
