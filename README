@@ -154,6 +154,8 @@ RUNNING:
 
 ckpool supports the following options:
 
+-B
+
 -c CONFIG | --config CONFIG
 
 -g GROUP | --group GROUP
@@ -182,6 +184,10 @@ ckpool supports the following options:
 
 -u | --userproxy
 
+
+-B will start ckpool in BTCSOLO mode, which is designed for solo mining. All
+usernames connected must be valid bitcoin addresses, and 100% of the block
+reward will go to the user solving the block, minus any donation set.
 
 -c <CONFIG> tells ckpool to override its default configuration filename and
 load the specified one. If -c is not specified, ckpool looks for ckpool.conf,
@@ -268,7 +274,8 @@ with the username "user" and password "pass".
 "proxy" : This is an array in the same format as btcd above but is used in
 proxy and passthrough mode to set the upstream pool and is mandatory.
 
-"btcaddress" : This is the bitcoin address to try to generate blocks to.
+"btcaddress" : This is the bitcoin address to try to generate blocks to. It is
+ignored in BTCSOLO mode.
 
 "btcsig" : This is an optional signature to put into the coinbase of mined
 blocks.
