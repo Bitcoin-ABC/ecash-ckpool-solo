@@ -162,7 +162,7 @@ RUNNING:
 
 ckpool supports the following options:
 
--B
+-B | --btcsolo
 
 -c CONFIG | --config CONFIG
 
