@@ -69,29 +69,36 @@ slow communicating clients from delaying low latency ones.
 BUILDING:
 
 Building ckpool requires no dependencies outside of the basic build tools and
-yasm on any linux installation. Optional zmq notification support (ckpool only)
-requires the zmq devel library installed.
+yasm on any linux installation. Recommended zmq notification support (ckpool
+only) requires the zmq devel library installed.
 
 
 Basic build:
 
 sudo apt-get install build-essential yasm
+
 ./configure
+
 make
 
 
 Building with zmq (this is not required for ckproxy):
 
 sudo apt-get install build-essential yasm libzmq3-dev
+
 ./configure
+
 make
 
 
 Building from git also requires autoconf and automake:
 
 sudo apt-get install build-essential yasm autoconf automake libtool libzmq3-dev
+
 ./autogen.sh
+
 ./configure
+
 make
 
 
