@@ -500,7 +500,7 @@ int set_sendbufsize(ckpool_t *ckp, const int fd, const int len)
 		opt /= 2;
 	}
 	if (opt < len) {
-		LOGWARNING("Failed to increase sendbufsize to %d, increase wmem_max or start %s privileged",
+		LOGNOTICE("Failed to increase sendbufsize to %d, increase wmem_max or start %s privileged if using a remote btcd",
 			   len, ckp->name);
 		ckp->wmem_warn = true;
 	} else
@@ -528,7 +528,7 @@ int set_recvbufsize(ckpool_t *ckp, const int fd, const int len)
 		opt /= 2;
 	}
 	if (opt < len) {
-		LOGWARNING("Failed to increase rcvbufsiz to %d, increase rmem_max or start %s privileged",
+		LOGNOTICE("Failed to increase rcvbufsiz to %d, increase rmem_max or start %s privileged if using a remote btcd",
 			   len, ckp->name);
 		ckp->rmem_warn = true;
 	} else
