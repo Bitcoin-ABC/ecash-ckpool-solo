@@ -528,7 +528,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 {
 	uint64_t *u64, g64, d64 = 0;
 	sdata_t *sdata = ckp->sdata;
-	char header[228];
+	char header[272];
 	int len, ofs = 0;
 	ts_t now;
 
@@ -734,12 +734,13 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	LOGDEBUG("Coinb2: %s", wb->coinb2);
 	/* Coinbases 2 +/- 3 templates complete */
 
-	snprintf(header, 225, "%s%s%s%s%s%s%s",
+	snprintf(header, 270, "%s%s%s%s%s%s%s",
 		 wb->bbversion, wb->prevhash,
 		 "0000000000000000000000000000000000000000000000000000000000000000",
 		 wb->ntime, wb->nbit,
 		 "00000000", /* nonce */
 		 workpadding);
+	header[224] = 0;
 	LOGDEBUG("Header: %s", header);
 	hex2bin(wb->headerbin, header, 112);
 }
@@ -1818,7 +1819,7 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t clie
 	workbase_t *wb = ckzalloc(sizeof(workbase_t));
 	sdata_t *sdata = ckp->sdata;
 	bool new_block = false;
-	char header[228];
+	char header[272];
 
 	wb->ckp = ckp;
 	/* This is the client id if this workbase came from a remote trusted
@@ -1867,12 +1868,13 @@ static void add_node_base(ckpool_t *ckp, json_t *val, bool trusted, int64_t clie
 	json_intcpy(&wb->enonce2varlen, val, "enonce2varlen");
 	ts_realtime(&wb->gentime);
 
-	snprintf(header, 225, "%s%s%s%s%s%s%s",
+	snprintf(header, 270, "%s%s%s%s%s%s%s",
 		 wb->bbversion, wb->prevhash,
 		 "0000000000000000000000000000000000000000000000000000000000000000",
 		 wb->ntime, wb->nbit,
 		 "00000000", /* nonce */
 		 workpadding);
+	header[224] = 0;
 	LOGDEBUG("Header: %s", header);
 	hex2bin(wb->headerbin, header, 112);
 
