@@ -13,6 +13,7 @@
 #define LIBCKPOOL_H
 
 #include <errno.h>
+#include <inttypes.h>
 #include <jansson.h>
 #include <netdb.h>
 #include <pthread.h>
