@@ -172,10 +172,5 @@ AC_CONFIG_FILES([
         doc/Makefile
         src/Makefile
         src/jansson_config.h
-        test/Makefile
-        test/bin/Makefile
-        test/ossfuzz/Makefile
-        test/suites/Makefile
-        test/suites/api/Makefile
 ])
 AC_OUTPUT

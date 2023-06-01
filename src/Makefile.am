@@ -1,7 +1,7 @@
-SUBDIRS	= jansson-2.10
+SUBDIRS	= jansson-2.14
 
 ACLOCAL_AMFLAGS = -I m4
-AM_CPPFLAGS =  -I$(top_srcdir)/src/jansson-2.10/src
+AM_CPPFLAGS =  -I$(top_srcdir)/src/jansson-2.14/src
 
 native_objs :=
 
