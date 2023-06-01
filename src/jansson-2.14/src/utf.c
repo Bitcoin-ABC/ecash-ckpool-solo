@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2009-2016 Petri Lehtinen <petri@digip.org>
+ * Copyright (c) 2015,2017,2023 Con Kolivas <kernel@kolivas.org>
  *
  * Jansson is free software; you can redistribute it and/or modify
  * it under the terms of the MIT license. See LICENSE for details.
@@ -113,16 +114,19 @@ size_t utf8_check_full(const char *buffer, size_t size, int32_t *codepoint) {
     return 1;
 }
 
-const char *utf8_iterate(const char *buffer, size_t bufsize, int32_t *codepoint) {
-    size_t count;
+const char *utf8_iterate(const char *buffer, size_t bufsize, int32_t *codepoint, int noutf8)
+{
+    size_t count = 1;
     int32_t value;
 
     if (!bufsize)
         return buffer;
 
-    count = utf8_check_first(buffer[0]);
-    if (count <= 0)
-        return NULL;
+    if (!noutf8) {
+	    count = utf8_check_first(buffer[0]);
+	    if(count <= 0)
+	        return NULL;
+    }
 
     if (count == 1)
         value = (unsigned char)buffer[0];

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2009-2016 Petri Lehtinen <petri@digip.org>
+ * Copyright (c) 2015,2017,2023 Con Kolivas <kernel@kolivas.org>
  *
  * Jansson is free software; you can redistribute it and/or modify
  * it under the terms of the MIT license. See LICENSE for details.
@@ -83,10 +84,13 @@ int jsonp_dtostr(char *buffer, size_t size, double value, int prec);
 
 /* Wrappers for custom memory functions */
 void *jsonp_malloc(size_t size) JANSSON_ATTRS((warn_unused_result));
-void jsonp_free(void *ptr);
+void _jsonp_free(void **ptr);
+#define jsonp_free(ptr) _jsonp_free((void *)&(ptr))
+
 char *jsonp_strndup(const char *str, size_t length) JANSSON_ATTRS((warn_unused_result));
 char *jsonp_strdup(const char *str) JANSSON_ATTRS((warn_unused_result));
-char *jsonp_strndup(const char *str, size_t len) JANSSON_ATTRS((warn_unused_result));
+char *jsonp_strsteal(strbuffer_t *strbuff);
+char *jsonp_eolstrsteal(strbuffer_t *strbuff);
 
 /* Circular reference check*/
 /* Space for "0x", double the sizeof a pointer for the hex and a terminator. */
