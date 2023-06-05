@@ -5997,12 +5997,12 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 			    const json_t *params_val, json_t **err_val)
 {
 	bool share = false, result = false, invalid = true, submit = false, stale = false;
-	const char *workername, *job_id, *ntime, *nonce, *version_mask;
+	const char *workername, *job_id, *ntime, *version_mask;
 	double diff = client->diff, wdiff = 0, sdiff = -1;
 	char hexhash[68] = {}, sharehash[32], cdfield[64];
 	user_instance_t *user = client->user_instance;
+	char *fname = NULL, *s, *nonce, *nonce2;
 	uint32_t ntime32, version_mask32 = 0;
-	char *fname = NULL, *s, *nonce2;
 	sdata_t *sdata = client->sdata;
 	enum share_err err = SE_NONE;
 	ckpool_t *ckp = client->ckp;
@@ -6054,8 +6054,8 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 		*err_val = JSON_ERR(err);
 		goto out;
 	}
-	nonce = json_string_value(json_array_get(params_val, 4));
-	if (unlikely(!nonce || !strlen(nonce) || !validhex(nonce))) {
+	nonce = (char *)json_string_value(json_array_get(params_val, 4));
+	if (unlikely(!nonce || strlen(nonce) < 8 || !validhex(nonce))) {
 		err = SE_NO_NONCE;
 		*err_val = JSON_ERR(err);
 		goto out;
@@ -6101,15 +6101,25 @@ static json_t *parse_submit(stratum_instance_t *client, json_t *json_msg,
 	 * read only json so use a temporary variable and modify it. */
 	len = wb->enonce2varlen * 2;
 	nlen = strlen(nonce2);
-	if (nlen > len) {
-		nonce2 = strdupa(nonce2);
-		nonce2[len] = '\0';
-	} else if (nlen < len) {
-		char *tmp = nonce2;
+	if (unlikely(nlen != len)) {
+		if (nlen > len) {
+			nonce2 = strdupa(nonce2);
+			nonce2[len] = '\0';
+		} else if (nlen < len) {
+			char *tmp = nonce2;
 
-		nonce2 = strdupa("0000000000000000");
-		memcpy(nonce2, tmp, nlen);
-		nonce2[len] = '\0';
+			nonce2 = strdupa("0000000000000000");
+			memcpy(nonce2, tmp, nlen);
+			nonce2[len] = '\0';
+		}
+	}
+	/* Same with nonce, but we need at least 8 chars. We checked for this
+	 * earlier. */
+	len = 8;
+	nlen = strlen(nonce);
+	if (unlikely(nlen > len)) {
+		nonce = strdupa(nonce);
+		nonce[len] = '\0';
 	}
 	if (id < sdata->blockchange_id)
 		stale = true;
