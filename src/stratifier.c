@@ -6676,8 +6676,8 @@ static void parse_method(ckpool_t *ckp, sdata_t *sdata, stratum_instance_t *clie
 		json_params_t *jp;
 
 		if (unlikely(client->authorised)) {
-			LOGNOTICE("Client %s %s trying to authorise twice",
-				  client->identity, client->address);
+			LOGINFO("Client %s %s trying to authorise twice",
+				client->identity, client->address);
 			return;
 		}
 		jp = create_json_params(client_id, method_val, params_val, id_val);
