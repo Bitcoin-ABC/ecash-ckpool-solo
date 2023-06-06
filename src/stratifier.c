@@ -2990,7 +2990,7 @@ static void update_notify(ckpool_t *ckp, const char *cmd)
 	sdata_t *sdata = ckp->sdata, *dsdata;
 	bool new_block = false, clean;
 	int i, id = 0, subid = 0;
-	char header[228];
+	char header[272];
 	const char *buf;
 	proxy_t *proxy;
 	workbase_t *wb;
@@ -3045,12 +3045,13 @@ static void update_notify(ckpool_t *ckp, const char *cmd)
 	sscanf(wb->ntime, "%x", &wb->ntime32);
 	clean = json_is_true(json_object_get(val, "clean"));
 	ts_realtime(&wb->gentime);
-	snprintf(header, 225, "%s%s%s%s%s%s%s",
+	snprintf(header, 270, "%s%s%s%s%s%s%s",
 		 wb->bbversion, wb->prevhash,
 		 "0000000000000000000000000000000000000000000000000000000000000000",
 		 wb->ntime, wb->nbit,
 		 "00000000", /* nonce */
 		 workpadding);
+	header[224] = 0;
 	LOGDEBUG("Header: %s", header);
 	hex2bin(wb->headerbin, header, 112);
 	wb->txn_hashes = ckzalloc(1);
