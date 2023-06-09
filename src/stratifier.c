@@ -6418,7 +6418,11 @@ static void send_json_err(sdata_t *sdata, const int64_t client_id, json_t *id_va
 {
 	json_t *val;
 
-	JSON_CPACK(val, "{soss}", "id", json_deep_copy(id_val), "error", err_msg);
+	/* Some clients have no id_val so pass back an empty string. */
+	if (unlikely(!id_val))
+		JSON_CPACK(val, "{ssss}", "id", "", "error", err_msg);
+	else
+		JSON_CPACK(val, "{soss}", "id", json_deep_copy(id_val), "error", err_msg);
 	stratum_add_send(sdata, val, client_id, SM_ERROR);
 }
 
