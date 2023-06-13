@@ -1,4 +1,4 @@
-AC_INIT([ckpool],[0.9.8],[kernel@kolivas.org])
+AC_INIT([ckpool],[0.9.9],[kernel@kolivas.org])
 
 AC_CANONICAL_TARGET
 AC_CONFIG_MACRO_DIR([m4])
