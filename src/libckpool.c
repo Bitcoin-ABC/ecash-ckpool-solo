@@ -1,5 +1,6 @@
 /*
  * Copyright 2014-2018,2023 Con Kolivas
+ * Copyright 2023 The eCash developers
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -30,6 +31,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <math.h>
+#include <ctype.h>
 #include <poll.h>
 #include <arpa/inet.h>
 
@@ -1741,6 +1743,10 @@ static const int8_t charset_rev[128] = {
 	1,  0,  3, 16, 11, 28, 12, 14,  6,  4,  2, -1, -1, -1, -1, -1
 };
 
+static inline int8_t bech32(int input) {
+	return (input & 0x80) ? -1 : charset_rev[input];
+}
+
 /* It's assumed that there is no chance of sending invalid chars to these
  * functions as they should have been checked beforehand. */
 static void bech32_decode(uint8_t *data, int *data_len, const char *input)
@@ -1753,7 +1759,7 @@ static void bech32_decode(uint8_t *data, int *data_len, const char *input)
 	hrp_len = input_len - (1 + *data_len);
 	*(data_len) -= 6;
 	for (i = hrp_len + 1; i < input_len; i++) {
-		int v = (input[i] & 0x80) ? -1 : charset_rev[(int)input[i]];
+		int v = bech32(input[i]);
 
 		if (i + 6 < input_len)
 			data[i - (1 + hrp_len)] = v;
@@ -1775,6 +1781,234 @@ static void convert_bits(char *out, int *outlen, const uint8_t *in,
 			out[(*outlen)++] = (val >> bits) & maxv;
 		}
 	}
+}
+
+static uint64_t polymod(const uint8_t *data, size_t len) {
+	uint64_t c = 1;
+	for (size_t i = 0; i < len; i++) {
+		char d = data[i];
+
+		uint8_t c0 = c >> 35;
+		c = ((c & 0x07ffffffff) << 5) ^ d;
+
+		if (c0 & 0x01) {
+			c ^= 0x98f2bc8e61;
+		}
+
+		if (c0 & 0x02) {
+			c ^= 0x79b76d99e2;
+		}
+
+		if (c0 & 0x04) {
+			c ^= 0xf33e5fb3c4;
+		}
+
+		if (c0 & 0x08) {
+			c ^= 0xae2eabe2a8;
+		}
+
+		if (c0 & 0x10) {
+			c ^= 0x1e4f43e470;
+		}
+	}
+
+	return c ^ 1;
+}
+
+static bool verify_checksum(char *prefix, size_t prefix_char_count, uint8_t *payload, size_t payload_size) {
+	uint8_t data[prefix_char_count + payload_size + 1];
+
+	for (size_t i = 0; i < prefix_char_count; i++) {
+		data[i] = prefix[i] & 0x1f;
+	}
+	data[prefix_char_count] = 0;
+	for (size_t i = 0; i < payload_size; i++) {
+		data[i + prefix_char_count + 1] = payload[i];
+	}
+
+	uint64_t poly = polymod(data, prefix_char_count + payload_size + 1);
+	return poly == 0;
+}
+
+static const char default_prefix[] = "ecash";
+
+bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *script, char *hash) {
+	if (!addr) {
+		LOGERR("Null address passed to decode_cashaddr");
+		return false;
+	}
+
+	size_t addr_len = strlen(addr);
+
+	/* Sanity checks */
+	bool lower = false;
+	bool upper = false;
+	bool hasNumber = false;
+	size_t prefix_char_count = 0;
+	for (size_t i = 0; i < addr_len; i++) {
+		char c = addr[i];
+		if (c >= 'a' && c <= 'z') {
+			lower = true;
+			continue;
+		}
+
+		if (c >= 'A' && c <= 'Z') {
+			upper = true;
+			continue;
+		}
+
+		if (c >= '0' && c <= '9') {
+			// We cannot have numbers in the prefix.
+			hasNumber = true;
+			continue;
+		}
+
+		if (c == ':') {
+			// The separator cannot be the first character, cannot have number
+			// and there must not be 2 separators.
+			if (hasNumber || i == 0 || prefix_char_count != 0) {
+				LOGERR("Invalid prefix in cash address %s\n, addr");
+				return false;
+			}
+
+			prefix_char_count = i;
+			continue;
+		}
+
+		// We have an unexpected character.
+		LOGERR("Unexpected character 0x%02x in cash address %s at pos %ld\n", c, addr, i);
+		return false;
+	}
+
+	if (upper && lower) {
+		LOGERR("Cannot mix lower and upper case in a cash address: %s\n", addr);
+		return false;
+	}
+
+	size_t payload_start = prefix_char_count;
+
+	// Get the prefix.
+	if (prefix_char_count == 0) {
+		prefix_char_count = strlen(default_prefix);
+
+		// Assume the default prefix if the address is prefixless
+		if (prefix_len <= prefix_char_count) {
+			LOGERR("Cash address prefix is too long: %s:%s\n", default_prefix, addr);
+			return false;
+		}
+		
+		strcpy(prefix, default_prefix);
+	} else {
+		if (prefix_len <= prefix_char_count) {
+			LOGERR("Cash address prefix is too long: %s\n", addr);
+			return false;
+		}
+
+		for (size_t i = 0; i < prefix_char_count; ++i) {
+			prefix[i] = tolower(addr[i]);
+		}
+		prefix[prefix_char_count] = '\0';
+
+		// Skip the ':' prefix separators
+		payload_start++;
+	}
+
+	int payload_size = addr_len - payload_start;
+	if (payload_size <= 0) {
+		LOGERR("Empty payload in cash address %s\n", addr);
+		return false;
+	}
+
+	// We can't use the libckpool bech32_decode, it is specialized for BTC
+	// addresses.
+	uint8_t payload[payload_size];
+	for (size_t i = 0; i < payload_size; ++i) {
+		uint8_t c = addr[i + payload_start];
+		// We have an invalid char in there.
+		int8_t c32 = bech32(c);
+		if (c32 == -1) {
+			LOGERR("Invalid character 0x%02x in payload for cash address %s\n", c, addr);
+			return false;
+		}
+
+		payload[i] = c32;
+	}
+
+	if (!verify_checksum(prefix, prefix_char_count, payload, payload_size)) {
+		LOGERR("Invalid checksum for cash address %s\n", addr);
+		return false;
+	}
+
+	// Trim the checksum, we don't need it anymore
+	payload_size -= 8;
+
+	int data_size = payload_size * 5 / 8;
+	char data[data_size];
+	int data_size_out = 0;
+	convert_bits(data, &data_size_out, payload, payload_size);
+	if (data_size != data_size_out) {
+		LOGERR("Payload decoding failed for cash address %s\n", addr);
+		return false;
+	}
+
+	uint8_t version = data[0];
+	if (version & 0x80) {
+		LOGERR("Invalid version %d for cash address %s\n", version, addr);
+		return false;
+	}
+	uint32_t hash_size = 20 + 4 * (version & 0x03);
+	if (version & 0x04) {
+		hash_size *= 2;
+	}
+	if (data_size != hash_size + 1) {
+		LOGERR("Wrong hash size %d for cash address %s (expected %d)\n", data_size - 1, addr, hash_size);
+		return false;
+	}
+	if (hash_size != 20) {
+		LOGERR("Wrong hash size %d for cash address %s: only 20 bytes hashes are currently supported\n", hash_size, addr);
+		return false;
+	}
+
+	*script = ((version >> 3) & 0x1f) == 1;
+
+	memcpy(hash, &data[1], hash_size);
+
+	return true;
+}
+
+static int cashaddr_to_pubkeytxn(char *pkh, const char *hash) {
+	pkh[0] = 0x76;
+	pkh[1] = 0xa9;
+	pkh[2] = 0x14;
+	memcpy(&pkh[3], hash, 20);
+	pkh[23] = 0x88;
+	pkh[24] = 0xac;
+	return 25;
+}
+
+static int cashaddr_to_scripttxn(char *psh, const char *hash)
+{
+	psh[0] = 0xa9;
+	psh[1] = 0x14;
+	memcpy(&psh[2], hash, 20);
+	psh[22] = 0x87;
+	return 23;
+}
+
+static int cashaddr_to_txn(char *p2h, const char *addr, const bool script) {
+	char prefix[16];
+	char hash[20];
+	bool _script;
+
+	decode_cashaddr(addr, prefix, 16, &_script, hash);
+	if (_script != script) {
+		// Should never happen, this is certainly a bug
+		LOGERR("Cash address decoding mismatch with bitcoind !\n");
+	}
+
+	if (script)
+		return cashaddr_to_scripttxn(p2h, hash);
+	return cashaddr_to_pubkeytxn(p2h, hash);
 }
 
 static int address_to_pubkeytxn(char *pkh, const char *addr)
@@ -1820,8 +2054,10 @@ static int segaddress_to_txn(char *p2h, const char *addr)
 }
 
 /* Convert an address to a transaction and return the length of the transaction */
-int address_to_txn(char *p2h, const char *addr, const bool script, const bool segwit)
+int address_to_txn(char *p2h, const char *addr, const bool script, const bool segwit, const bool cashaddr)
 {
+	if (cashaddr)
+		return cashaddr_to_txn(p2h, addr, script);
 	if (segwit)
 		return segaddress_to_txn(p2h, addr);
 	if (script)

@@ -230,6 +230,9 @@ struct ckpool_instance {
 	int nonce1length; // Extranonce1 length
 	int nonce2length; // Extranonce2 length
 
+	/* Mining on the eCash network */
+	bool ecash; // Default false
+
 	/* Difficulty settings */
 	int64_t mindiff; // Default 1
 	int64_t startdiff; // Default 42

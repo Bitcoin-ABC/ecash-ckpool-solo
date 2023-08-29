@@ -1,5 +1,6 @@
 /*
  * Copyright 2014-2020,2023 Con Kolivas
+ * Copyright 2023 The eCash developers
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -596,16 +597,26 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	memcpy(wb->coinb2bin + wb->coinb2len, "\xff\xff\xff\xff", 4);
 	wb->coinb2len += 4;
 
-	// Generation value
-	g64 = wb->coinbasevalue;
+	/* 
+	 * Generation value
+	 * XEC: account for minerfund if applicable.
+	 */
+	g64 = wb->coinbasevalue - wb->minerfund_amount;
+	uint8_t txout_count = 1; // Single byte varint is enough
 	if (ckp->donvalid && ckp->donation > 0) {
 		double dbl64 = (double)g64 / 100 * ckp->donation;
 
 		d64 = dbl64;
 		g64 -= d64; // To guarantee integers add up to the original coinbasevalue
-		wb->coinb2bin[wb->coinb2len++] = 2 + wb->insert_witness;
-	} else
-		wb->coinb2bin[wb->coinb2len++] = 1 + wb->insert_witness;
+		++txout_count;
+	}
+
+	/* XEC only: account for the miner fund output */
+	if (wb->minerfund_amount > 0) {
+		++txout_count;
+	}
+	
+	wb->coinb2bin[wb->coinb2len++] = txout_count + wb->insert_witness;
 
 	u64 = (uint64_t *)&wb->coinb2bin[wb->coinb2len];
 	*u64 = htole64(g64);
@@ -626,6 +637,17 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		wb->coinb3len += sdata->dontxnlen;
 	} else
 		ckp->donation = 0;
+
+	/* XEC only: add the miner fund output */
+	if (wb->minerfund_amount > 0) {
+		u64 = (uint64_t *)wb->coinb3bin;
+		*u64 = htole64(wb->minerfund_amount);
+		wb->coinb3len += 8;
+
+		wb->coinb3bin[wb->coinb3len++] = wb->minerfund_txnlen;
+		memcpy(wb->coinb3bin + wb->coinb3len, wb->minerfund_txn, wb->minerfund_txnlen);
+		wb->coinb3len += wb->minerfund_txnlen;
+	}
 
 	if (wb->insert_witness) {
 		// 0 value
@@ -5380,7 +5402,7 @@ static user_instance_t *generate_user(ckpool_t *ckp, stratum_instance_t *client,
 		/* Is this a btc address based username? */
 		if (generator_checkaddr(ckp, username, &user->script, &user->segwit)) {
 			user->btcaddress = true;
-			user->txnlen = address_to_txn(user->txnbin, username, user->script, user->segwit);
+			user->txnlen = address_to_txn(user->txnbin, username, user->script, user->segwit, ckp->ecash);
 		}
 	}
 	if (new_user) {
@@ -6860,7 +6882,7 @@ static user_instance_t *generate_remote_user(ckpool_t *ckp, const char *workerna
 		/* Is this a btc address based username? */
 		if (generator_checkaddr(ckp, username, &user->script, &user->segwit)) {
 			user->btcaddress = true;
-			user->txnlen = address_to_txn(user->txnbin, username, user->script, user->segwit);
+			user->txnlen = address_to_txn(user->txnbin, username, user->script, user->segwit, ckp->ecash);
 		}
 	}
 	if (new_user) {
@@ -8535,23 +8557,23 @@ void *stratifier(void *arg)
 
 		/* Store this for use elsewhere */
 		hex2bin(scriptsig_header_bin, scriptsig_header, 41);
-		sdata->txnlen = address_to_txn(sdata->txnbin, ckp->btcaddress, ckp->script, ckp->segwit);
+		sdata->txnlen = address_to_txn(sdata->txnbin, ckp->btcaddress, ckp->script, ckp->segwit, ckp->ecash);
 
 		/* Find a valid donation address if possible */
 		if (generator_checkaddr(ckp, ckp->donaddress, &ckp->donscript, &ckp->donsegwit)) {
 			ckp->donvalid = true;
-			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit);
-			LOGNOTICE("BTC donation address valid %s", ckp->donaddress);
+			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit, ckp->ecash);
+			LOGNOTICE("Donation address valid %s", ckp->donaddress);
 		} else if (generator_checkaddr(ckp, ckp->tndonaddress, &ckp->donscript, &ckp->donsegwit)) {
 			ckp->donaddress = ckp->tndonaddress;
 			ckp->donvalid = true;
-			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit);
-			LOGNOTICE("BTC testnet donation address valid %s", ckp->donaddress);
+			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit, ckp->ecash);
+			LOGNOTICE("Testnet donation address valid %s", ckp->donaddress);
 		} else if (generator_checkaddr(ckp, ckp->rtdonaddress, &ckp->donscript, &ckp->donsegwit)) {
 			ckp->donaddress = ckp->rtdonaddress;
 			ckp->donvalid = true;
-			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit);
-			LOGNOTICE("BTC regtest donation address valid %s", ckp->donaddress);
+			sdata->dontxnlen = address_to_txn(sdata->dontxnbin, ckp->donaddress, ckp->donscript, ckp->donsegwit, ckp->ecash);
+			LOGNOTICE("Regtest donation address valid %s", ckp->donaddress);
 		} else
 			LOGNOTICE("No valid donation address found");
 	}

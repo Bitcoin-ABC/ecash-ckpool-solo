@@ -1,3 +1,18 @@
+# ecash-ckpool-solo
+
+This is a fork of the CKPOOL solo mining software by Con Kolivas, with added
+support for mining on the eCash blockchain:
+ - Support for the eCash address format
+ - Coinbase output compliant with the miner fund
+ - Default donation goes to the miner fund address when the eCash option is set
+
+To use with eCash, use the -x | --ecash commmand line option (see below). See
+also the sample eCash configuration (ckpool.ecash.conf).
+
+Link to the source repository:
+https://bitbucket.org/ckolivas/ckpool-solo/src/solobtc/
+
+---
 CKPOOL + CKPROXY + libckpool by Con Kolivas
 
 Ultra low overhead massively scalable multi-process, multi-threaded modular
@@ -184,6 +199,8 @@ ckpool supports the following options:
 
 -u | --userproxy
 
+-x | --ecash
+
 
 -B will start ckpool in BTCSOLO mode, which is designed for solo mining. All
 usernames connected must be valid bitcoin addresses, and 100% of the block
@@ -248,6 +265,8 @@ but in addition it will accept username/passwords from the stratum connects
 and try to open additional connections with those credentials to the upstream
 pool specified in the configuration file and then reconnect miners to mine with
 their chosen username/password to the upstream pool.
+
+-x Mine on the eCash blockchain.
 
 
 ckpmsg and notifier support the -n, -p and -s options

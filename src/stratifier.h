@@ -75,6 +75,11 @@ struct genwork {
 	char *coinb3bin; // coinbase3 for variable coinb2len
 	int coinb3len; // length of above
 
+	/* XEC only*/
+	char minerfund_txn[48]; // IFP txn
+	int minerfund_txnlen; // length of above
+	uint64_t minerfund_amount; // IFP amount
+
 	/* Cached header binary */
 	char headerbin[112];
 

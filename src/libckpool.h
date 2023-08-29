@@ -573,7 +573,22 @@ void b58tobin(char *b58bin, const char *b58);
 int safecmp(const char *a, const char *b);
 bool cmdmatch(const char *buf, const char *cmd);
 
-int address_to_txn(char *p2h, const char *addr, const bool script, const bool segwit);
+/**
+ * @brief Decode a cash address. Only 20 bytes hashes are supported.
+ * 
+ * @param[in] addr The full address string
+ * @param[out] prefix The prefix string. Should be allocated with at least
+ *                    prefix_len bytes.
+ * @param[in] prefix_len The length in bytes of the prefix string.
+ * @param[out] script Whether this is a script address.
+ * @param[out] p2h The pubkey/script hash. Should be allocated with at least 20
+ *                 bytes.
+ * @return true if decoding was successful.
+ * @return false if decoding failed, and the out params should not be relied
+ *               upon.
+ */
+bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *script, char *hash);
+int address_to_txn(char *p2h, const char *addr, const bool script, const bool segwit, const bool cashaddr);
 int ser_number(uchar *s, int32_t val);
 int get_sernumber(uchar *s);
 bool fulltest(const uchar *hash, const uchar *target);

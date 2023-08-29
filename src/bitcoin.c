@@ -1,5 +1,6 @@
 /*
  * Copyright 2014-2018,2023 Con Kolivas
+ * Copyright 2023 The eCash developers
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -210,6 +211,32 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 	gbt->height = height;
 
 	gbt->flags = strdup(flags);
+
+	// XEC only.
+	if (cs->ckp->ecash) {
+		json_t *coinbasetxn, *minerfund;
+		const char *minerfund_addr;
+		uint64_t minerfund_amount;
+		bool script, segwit;
+		char *minerfundtxn;
+
+		coinbasetxn = json_object_get(res_val, "coinbasetxn");
+
+		minerfund = json_object_get(coinbasetxn, "minerfund");
+		// Send all to a single address
+		minerfund_addr = json_string_value(json_array_get(json_object_get(minerfund, "addresses"), 0));
+		// Remain 0 if minerfund is disabled
+		gbt->minerfund_amount = 0;
+		if (minerfund_addr) {
+			gbt->minerfund_amount = json_integer_value(json_object_get(minerfund, "minimumvalue"));
+			char minerfund_prefix[16];
+			char minerfund_hash[20];
+			if (!decode_cashaddr(minerfund_addr, minerfund_prefix, 16, &script, minerfund_hash)) {
+				return false;
+			}
+			gbt->minerfund_txnlen = address_to_txn(gbt->minerfund_txn, minerfund_addr, script, /*segwit=*/false, /*cashaddr=*/true);
+		}
+	}
 
 	ret = true;
 out:
