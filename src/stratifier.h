@@ -80,6 +80,10 @@ struct genwork {
 	int minerfund_txnlen; // length of above
 	uint64_t minerfund_amount; // IFP amount
 
+	char stakingrewards_txn[256]; // staking rewards txn
+	int stakingrewards_txnlen; // length of above
+	uint64_t stakingrewards_amount; // staking rewards amount
+
 	/* Cached header binary */
 	char headerbin[112];
 

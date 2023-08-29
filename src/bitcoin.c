@@ -236,6 +236,20 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 			}
 			gbt->minerfund_txnlen = address_to_txn(gbt->minerfund_txn, minerfund_addr, script, /*segwit=*/false, /*cashaddr=*/true);
 		}
+
+		json_t *stakingrewards;
+		const char *stakingrewards_script_hex;
+		uint64_t stakingrewards_amount;
+
+		stakingrewards = json_object_get(coinbasetxn, "stakingrewards");
+		stakingrewards_script_hex = json_string_value(json_object_get(json_object_get(stakingrewards, "payoutscript"), "hex"));
+		// Remain 0 if staking rewards is disabled
+		gbt->stakingrewards_amount = 0;
+		if (stakingrewards_script_hex) {
+			gbt->stakingrewards_amount = json_integer_value(json_object_get(stakingrewards, "minimumvalue"));
+			gbt->stakingrewards_txnlen = strlen(stakingrewards_script_hex) / 2;
+			hex2bin(gbt->stakingrewards_txn, stakingrewards_script_hex, gbt->stakingrewards_txnlen);
+		}
 	}
 
 	ret = true;

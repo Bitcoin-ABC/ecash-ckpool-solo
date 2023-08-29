@@ -599,9 +599,9 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 
 	/* 
 	 * Generation value
-	 * XEC: account for minerfund if applicable.
+	 * XEC: account for minerfund and staking rewards, if any.
 	 */
-	g64 = wb->coinbasevalue - wb->minerfund_amount;
+	g64 = wb->coinbasevalue - wb->minerfund_amount - wb->stakingrewards_amount;
 	uint8_t txout_count = 1; // Single byte varint is enough
 	if (ckp->donvalid && ckp->donation > 0) {
 		double dbl64 = (double)g64 / 100 * ckp->donation;
@@ -611,8 +611,11 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		++txout_count;
 	}
 
-	/* XEC only: account for the miner fund output */
+	/* XEC only: account for miner fund and staking rewards outputs */
 	if (wb->minerfund_amount > 0) {
+		++txout_count;
+	}
+	if (wb->stakingrewards_amount > 0) {
 		++txout_count;
 	}
 	
@@ -625,7 +628,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 	/* Coinb2 address goes here, takes up 23~25 bytes + 1 byte for length */
 
 	wb->coinb3len = 0;
-	wb->coinb3bin = ckzalloc(256 + wb->insert_witness * (8 + witnessdata_size + 2));
+	wb->coinb3bin = ckzalloc(512 + wb->insert_witness * (8 + witnessdata_size + 2));
 
 	if (ckp->donvalid && ckp->donation > 0) {
 		u64 = (uint64_t *)wb->coinb3bin;
@@ -647,6 +650,16 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 		wb->coinb3bin[wb->coinb3len++] = wb->minerfund_txnlen;
 		memcpy(wb->coinb3bin + wb->coinb3len, wb->minerfund_txn, wb->minerfund_txnlen);
 		wb->coinb3len += wb->minerfund_txnlen;
+	}
+	/* XEC only: add the staking rewards output */
+	if (wb->stakingrewards_amount > 0) {
+		u64 = (uint64_t *)(wb->coinb3bin + wb->coinb3len);
+		*u64 = htole64(wb->stakingrewards_amount);
+		wb->coinb3len += 8;
+
+		wb->coinb3bin[wb->coinb3len++] = wb->stakingrewards_txnlen;
+		memcpy(wb->coinb3bin + wb->coinb3len, wb->stakingrewards_txn, wb->stakingrewards_txnlen);
+		wb->coinb3len += wb->stakingrewards_txnlen;
 	}
 
 	if (wb->insert_witness) {
