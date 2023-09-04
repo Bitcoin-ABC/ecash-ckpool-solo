@@ -640,7 +640,7 @@ static void generate_coinbase(ckpool_t *ckp, workbase_t *wb)
 
 	/* XEC only: add the miner fund output */
 	if (wb->minerfund_amount > 0) {
-		u64 = (uint64_t *)wb->coinb3bin;
+		u64 = (uint64_t *)(wb->coinb3bin + wb->coinb3len);
 		*u64 = htole64(wb->minerfund_amount);
 		wb->coinb3len += 8;
 
