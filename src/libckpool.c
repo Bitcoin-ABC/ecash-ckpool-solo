@@ -1830,7 +1830,8 @@ static bool verify_checksum(char *prefix, size_t prefix_char_count, uint8_t *pay
 	return poly == 0;
 }
 
-static const char default_prefix[] = "ecash";
+#define NUM_PREFIX 2
+static char *default_prefixes[NUM_PREFIX] = {"ecash", "ectest"};
 
 bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *script, char *hash) {
 	if (!addr) {
@@ -1876,31 +1877,22 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 		}
 
 		// We have an unexpected character.
-		LOGERR("Unexpected character 0x%02x in cash address %s at pos %ld\n", c, addr, i);
+		LOGERR("Unexpected character 0x%02x in cash address %s at pos %ld", c, addr, i);
 		return false;
 	}
 
 	if (upper && lower) {
-		LOGERR("Cannot mix lower and upper case in a cash address: %s\n", addr);
+		LOGERR("Cannot mix lower and upper case in a cash address: %s", addr);
 		return false;
 	}
 
 	size_t payload_start = prefix_char_count;
 
-	// Get the prefix.
-	if (prefix_char_count == 0) {
-		prefix_char_count = strlen(default_prefix);
-
-		// Assume the default prefix if the address is prefixless
+	// Get the prefix if a : separator was found.
+	bool addr_has_prefix = false;
+	if (prefix_char_count > 0) {
 		if (prefix_len <= prefix_char_count) {
-			LOGERR("Cash address prefix is too long: %s:%s\n", default_prefix, addr);
-			return false;
-		}
-		
-		strcpy(prefix, default_prefix);
-	} else {
-		if (prefix_len <= prefix_char_count) {
-			LOGERR("Cash address prefix is too long: %s\n", addr);
+			LOGERR("Cash address prefix is too long: %s", addr);
 			return false;
 		}
 
@@ -1911,11 +1903,14 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 
 		// Skip the ':' prefix separators
 		payload_start++;
+
+		addr_has_prefix = true;
+		LOGDEBUG("Found prefix %s for cash address %s", prefix, addr);
 	}
 
 	int payload_size = addr_len - payload_start;
 	if (payload_size <= 0) {
-		LOGERR("Empty payload in cash address %s\n", addr);
+		LOGERR("Empty payload in cash address %s", addr);
 		return false;
 	}
 
@@ -1927,15 +1922,47 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 		// We have an invalid char in there.
 		int8_t c32 = bech32(c);
 		if (c32 == -1) {
-			LOGERR("Invalid character 0x%02x in payload for cash address %s\n", c, addr);
+			LOGERR("Invalid character 0x%02x in payload for cash address %s", c, addr);
 			return false;
 		}
 
 		payload[i] = c32;
 	}
 
-	if (!verify_checksum(prefix, prefix_char_count, payload, payload_size)) {
-		LOGERR("Invalid checksum for cash address %s\n", addr);
+	bool valid_prefix_found = false;
+	for (size_t i = 0; (i < NUM_PREFIX) && !valid_prefix_found; i++) {
+		char *default_prefix = default_prefixes[i];
+
+		// Guess the prefix if it's not part of the address.
+		if (!addr_has_prefix) {
+			LOGDEBUG("Guessing prefix for %s, trying %s", addr, default_prefix);
+			prefix_char_count = strlen(default_prefix);
+
+			if (prefix_len <= prefix_char_count) {
+				LOGERR("Cash address prefix is too long: %s:%s", default_prefix, addr);
+				continue;
+			}
+			
+			strncpy(prefix, default_prefix, prefix_len);
+		}
+
+		if (!verify_checksum(prefix, prefix_char_count, payload, payload_size)) {
+			if (addr_has_prefix) {
+				LOGERR("Invalid checksum for cash address %s", addr);
+				return false;
+			}
+
+			// Keep looping so we have a chance to try to guess the prefix
+			LOGWARNING("Invalid checksum for cash address %s using prefix %s, trying another prefix", addr, prefix);
+			continue;
+		}
+
+		LOGDEBUG("Checksum for cash address %s is valid, using prefix %s", addr, prefix);
+		valid_prefix_found = true;
+	}
+
+	if (!valid_prefix_found) {
+		LOGERR("Unable to guess the prefix for cash address %s", addr);
 		return false;
 	}
 
@@ -1947,13 +1974,13 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 	int data_size_out = 0;
 	convert_bits(data, &data_size_out, payload, payload_size);
 	if (data_size != data_size_out) {
-		LOGERR("Payload decoding failed for cash address %s\n", addr);
+		LOGERR("Payload decoding failed for cash address %s", addr);
 		return false;
 	}
 
 	uint8_t version = data[0];
 	if (version & 0x80) {
-		LOGERR("Invalid version %d for cash address %s\n", version, addr);
+		LOGERR("Invalid version %d for cash address %s", version, addr);
 		return false;
 	}
 	uint32_t hash_size = 20 + 4 * (version & 0x03);
@@ -1961,11 +1988,11 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 		hash_size *= 2;
 	}
 	if (data_size != hash_size + 1) {
-		LOGERR("Wrong hash size %d for cash address %s (expected %d)\n", data_size - 1, addr, hash_size);
+		LOGERR("Wrong hash size %d for cash address %s (expected %d)", data_size - 1, addr, hash_size);
 		return false;
 	}
 	if (hash_size != 20) {
-		LOGERR("Wrong hash size %d for cash address %s: only 20 bytes hashes are currently supported\n", hash_size, addr);
+		LOGERR("Wrong hash size %d for cash address %s: only 20 bytes hashes are currently supported", hash_size, addr);
 		return false;
 	}
 
