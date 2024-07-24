@@ -2449,7 +2449,7 @@ double diff_from_betarget(uchar *target)
 
 /* Return the network difficulty from the block header which is in packed form,
  * as a double. */
-double diff_from_nbits(char *nbits)
+double diff_from_nbits(const char *nbits)
 {
 	uint8_t shift = nbits[0];
 	uchar target[32] = {};

@@ -83,6 +83,8 @@ struct genwork {
 	char stakingrewards_txn[256]; // staking rewards txn
 	int stakingrewards_txnlen; // length of above
 	uint64_t stakingrewards_amount; // staking rewards amount
+	
+	double rtt_diff; // real time difficulty
 
 	/* Cached header binary */
 	char headerbin[112];
