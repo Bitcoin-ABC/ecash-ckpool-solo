@@ -2112,6 +2112,14 @@ static bool local_block_submit(ckpool_t *ckp, char *gbt_block, const uchar *flip
 	uchar swap256[32];
 
 	free(gbt_block);
+
+	// On eCash we don't want to force mining on top of the block if it is
+	// rejected because it will conflict with avalanche and we might end up
+	// mining the wrong chain.
+	if (ckp->ecash) {
+		return ret;
+	}
+
 	swap_256(swap256, flip32);
 	__bin2hex(rhash, swap256, 32);
 	generator_preciousblock(ckp, rhash);
