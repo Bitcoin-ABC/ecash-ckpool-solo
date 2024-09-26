@@ -1953,11 +1953,13 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 			}
 
 			// Keep looping so we have a chance to try to guess the prefix
-			LOGWARNING("Invalid checksum for cash address %s using prefix %s, trying another prefix", addr, prefix);
+			LOGWARNING("Invalid checksum for cash address %s:%s, trying another prefix", prefix, addr);
 			continue;
 		}
 
-		LOGDEBUG("Checksum for cash address %s is valid, using prefix %s", addr, prefix);
+		if (!addr_has_prefix) {
+			LOGWARNING("Checksum for cash address %s:%s is valid, using prefix %s", prefix, addr, prefix);
+		}
 		valid_prefix_found = true;
 	}
 
