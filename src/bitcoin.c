@@ -212,13 +212,16 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 
 	gbt->flags = strdup(flags);
 
+	gbt->rtt_diff = gbt->diff;
+
 	// XEC only.
 	if (cs->ckp->ecash) {
-		json_t *coinbasetxn, *minerfund;
-		const char *minerfund_addr;
+		json_t *coinbasetxn, *minerfund, *rtt;
+		const char *minerfund_addr, *rtt_bits_hex;
 		uint64_t minerfund_amount;
 		bool script, segwit;
 		char *minerfundtxn;
+		char rtt_bits[4];
 
 		coinbasetxn = json_object_get(res_val, "coinbasetxn");
 
@@ -249,6 +252,12 @@ bool gen_gbtbase(connsock_t *cs, gbtbase_t *gbt)
 			gbt->stakingrewards_amount = json_integer_value(json_object_get(stakingrewards, "minimumvalue"));
 			gbt->stakingrewards_txnlen = strlen(stakingrewards_script_hex) / 2;
 			hex2bin(gbt->stakingrewards_txn, stakingrewards_script_hex, gbt->stakingrewards_txnlen);
+		}
+
+		rtt = json_object_get(res_val, "rtt");
+		rtt_bits_hex = json_string_value(json_object_get(rtt, "nexttarget"));
+		if (rtt_bits_hex && hex2bin(rtt_bits, rtt_bits_hex, 4)) {
+			gbt->rtt_diff = diff_from_nbits(rtt_bits);
 		}
 	}
 

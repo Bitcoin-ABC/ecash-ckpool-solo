@@ -1074,12 +1074,21 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 	ts_realtime(&wb->gentime);
 	/* Stats network_diff is not protected by lock but is not a critical
 	 * value */
-	wb->network_diff = diff_from_nbits(wb->headerbin + 72);
+	// XEC only.
+	if (ckp->ecash) {
+		wb->network_diff = wb->rtt_diff;
+	} else {
+		wb->network_diff = diff_from_nbits(wb->headerbin + 72);
+	}
 	if (wb->network_diff < 1)
 		wb->network_diff = 1;
 	stats->network_diff = wb->network_diff;
-	if (stats->network_diff != old_diff)
-		LOGWARNING("Network diff set to %.1f", stats->network_diff);
+	if (stats->network_diff != old_diff) {
+		LOGWARNING("Network diff updated to %.1f", stats->network_diff);
+	} else {
+		LOGWARNING("Network diff constant: %.1f", stats->network_diff);
+	}
+
 	len = strlen(ckp->logdir) + 8 + 1 + 16 + 1;
 	wb->logdir = ckzalloc(len);
 

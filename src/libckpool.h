@@ -623,7 +623,7 @@ double le256todouble(const uchar *target);
 double be256todouble(const uchar *target);
 double diff_from_target(uchar *target);
 double diff_from_betarget(uchar *target);
-double diff_from_nbits(char *nbits);
+double diff_from_nbits(const char *nbits);
 void target_from_diff(uchar *target, double diff);
 
 void gen_hash(uchar *data, uchar *hash, int len);
