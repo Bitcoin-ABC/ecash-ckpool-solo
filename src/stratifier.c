@@ -1074,12 +1074,14 @@ static void add_base(ckpool_t *ckp, sdata_t *sdata, workbase_t *wb, bool *new_bl
 	ts_realtime(&wb->gentime);
 	/* Stats network_diff is not protected by lock but is not a critical
 	 * value */
-	// XEC only.
-	if (ckp->ecash) {
-		wb->network_diff = wb->rtt_diff;
-	} else {
-		wb->network_diff = diff_from_nbits(wb->headerbin + 72);
-	}
+	/* Use the current job's actual header-derived target for network_diff,
+	 * on every chain including eCash. This value gates block detection in
+	 * test_blocksolve() and must match what the node itself checks on
+	 * submission. wb->rtt_diff (eCash "rtt.nexttarget") is a forward-looking
+	 * estimate that is transiently wrong by orders of magnitude right after
+	 * a block change, which caused genuinely valid blocks found in that
+	 * window to never be submitted. See issue Bitcoin-ABC/ecash-ckpool-solo#10. */
+	wb->network_diff = diff_from_nbits(wb->headerbin + 72);
 	if (wb->network_diff < 1)
 		wb->network_diff = 1;
 	stats->network_diff = wb->network_diff;

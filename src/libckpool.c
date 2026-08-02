@@ -1868,7 +1868,7 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 			// The separator cannot be the first character, cannot have number
 			// and there must not be 2 separators.
 			if (hasNumber || i == 0 || prefix_char_count != 0) {
-				LOGERR("Invalid prefix in cash address %s\n, addr");
+				LOGERR("Invalid prefix in cash address %s\n", addr);
 				return false;
 			}
 
