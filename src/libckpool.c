@@ -1833,6 +1833,9 @@ static bool verify_checksum(char *prefix, size_t prefix_char_count, uint8_t *pay
 #define NUM_PREFIX 2
 static char *default_prefixes[NUM_PREFIX] = {"ecash", "ectest"};
 
+/* Cashaddr checksum is always 8 five-bit symbols. */
+#define CASHADDR_CHECKSUM_SIZE 8
+
 bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *script, char *hash) {
 	if (!addr) {
 		LOGERR("Null address passed to decode_cashaddr");
@@ -1909,8 +1912,8 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 	}
 
 	int payload_size = addr_len - payload_start;
-	if (payload_size <= 0) {
-		LOGERR("Empty payload in cash address %s", addr);
+	if (payload_size < CASHADDR_CHECKSUM_SIZE) {
+		LOGERR("Payload too short in cash address %s", addr);
 		return false;
 	}
 
@@ -1967,7 +1970,11 @@ bool decode_cashaddr(const char *addr, char *prefix, int prefix_len, bool *scrip
 	}
 
 	// Trim the checksum, we don't need it anymore
-	payload_size -= 8;
+	payload_size -= CASHADDR_CHECKSUM_SIZE;
+	if (payload_size <= 1) {
+		LOGERR("Payload too short after checksum strip for cash address %s", addr);
+		return false;
+	}
 
 	int data_size = payload_size * 5 / 8;
 	char data[data_size];
