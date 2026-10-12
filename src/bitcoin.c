@@ -65,6 +65,25 @@ bool validate_address(connsock_t *cs, const char *address, bool *script, bool *s
 		LOGDEBUG("Bitcoin address %s is NOT valid", address);
 		goto out;
 	}
+	/* eCash mode only accepts cashaddr; bitcoind still reports legacy
+	 * base58 as isvalid, but the pool cannot safely pay to those. */
+	if (cs->ckp && cs->ckp->ecash) {
+		char prefix[16];
+		char hash[20];
+		bool cash_script = false;
+
+		if (!decode_cashaddr(address, prefix, 16, &cash_script, hash)) {
+			LOGNOTICE("Address %s rejected: eCash mode requires cashaddr",
+				  address);
+			goto out;
+		}
+		*script = cash_script;
+		*segwit = false;
+		ret = true;
+		LOGDEBUG("Bitcoin address %s IS valid cashaddr%s", address,
+			 *script ? " script" : "");
+		goto out;
+	}
 	ret = true;
 	tmp_val = json_object_get(res_val, "isscript");
 	if (unlikely(!tmp_val)) {
