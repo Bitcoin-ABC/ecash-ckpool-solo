@@ -2031,12 +2031,15 @@ static int cashaddr_to_scripttxn(char *psh, const char *hash)
 
 static int cashaddr_to_txn(char *p2h, const char *addr, const bool script) {
 	char prefix[16];
-	char hash[20];
-	bool _script;
+	char hash[20] = {0};
+	bool _script = false;
 
-	decode_cashaddr(addr, prefix, 16, &_script, hash);
+	if (!decode_cashaddr(addr, prefix, 16, &_script, hash)) {
+		LOGERR("Failed to decode cashaddr %s", addr);
+		return 0;
+	}
 	if (_script != script) {
-		// Should never happen, this is certainly a bug
+		/* Should never happen, this is certainly a bug */
 		LOGERR("Cash address decoding mismatch with bitcoind !\n");
 	}
 
