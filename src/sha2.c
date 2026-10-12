@@ -84,8 +84,15 @@ uint32_t sha256_k[64] =
              0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
 /* SHA-256 functions */
+#if defined(USE_X86_SHANI)
+extern void sha256_x86_shani(uint32_t[8], const unsigned char *, uint64_t);
 
-#ifdef USE_AVX2
+void sha256_transf(sha256_ctx *ctx, const unsigned char *message,
+                   unsigned int block_nb)
+{
+        sha256_x86_shani(ctx->h, message, block_nb);
+}
+#elif USE_AVX2
 extern void sha256_rorx(const void *, uint32_t[8], uint64_t);
 
 void sha256_transf(sha256_ctx *ctx, const unsigned char *message,
@@ -108,6 +115,14 @@ void sha256_transf(sha256_ctx *ctx, const unsigned char *message,
                    unsigned int block_nb)
 {
 	sha256_sse4(message, ctx->h, block_nb);
+}
+#elif defined(USE_ARM_SHA2)
+extern void sha256_arm_sha2(uint32_t[8], const unsigned char *, uint64_t);
+
+void sha256_transf(sha256_ctx *ctx, const unsigned char *message,
+                   unsigned int block_nb)
+{
+        sha256_arm_sha2(ctx->h, message, block_nb);
 }
 #else
 void sha256_transf(sha256_ctx *ctx, const unsigned char *message,

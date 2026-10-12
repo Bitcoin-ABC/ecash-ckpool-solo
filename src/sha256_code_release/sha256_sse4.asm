@@ -542,3 +542,5 @@ _SHUF_00BA:              ddq 0xFFFFFFFFFFFFFFFF0b0a090803020100
 
 ; shuffle xDxC -> DC00
 _SHUF_DC00:              ddq 0x0b0a090803020100FFFFFFFFFFFFFFFF
+
+section .note.GNU-stack noalloc noexec nowrite progbits

@@ -1,5 +1,5 @@
 /*
- * Copyright 2014-2017 Con Kolivas
+ * Copyright 2014-2017,2026 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -22,8 +22,17 @@
 #include "utlist.h"
 #include "stratifier.h"
 #include "generator.h"
+#ifdef HAVE_SV2
+#include "sv2_conn.h"
+#include "sv2_strat.h"
+#include "sv2_jd.h"
+#endif
 
 #define MAX_MSGSIZE 1024
+/* Trusted remote / node peers may send larger JSON than a miner, but must
+ * still have a finite ceiling so a compromised peer cannot grow the recv
+ * buffer without bound. */
+#define MAX_REMOTE_MSGSIZE (16 * 1024 * 1024)
 
 typedef struct client_instance client_instance_t;
 typedef struct sender_send sender_send_t;
@@ -72,8 +81,9 @@ struct client_instance {
 	/* Is this the parent passthrough client */
 	bool passthrough;
 
-	/* Linked list of shares in redirector mode.*/
+	/* Linked list of in-flight mining.submit ids in redirector mode. */
 	share_t *shares;
+	int nshares;
 
 	/* Has this client already been told to redirect */
 	bool redirected;
@@ -83,8 +93,37 @@ struct client_instance {
 	/* Time this client started blocking, 0 when not blocked */
 	time_t blocked_time;
 
+	/* Time this client was accepted, and whether it has ever delivered a
+	 * complete message. A stratum_instance_t is only created once a whole
+	 * message reaches the stratifier, so a socket that connects and stays
+	 * silent is invisible to the stratifier's unauthorised client reaper
+	 * while still occupying an fd and a maxclients slot. Only the connector
+	 * can see these, so they are reaped here. got_msg is the SV1 latch
+	 * (first complete JSON); SV2 uses the setup/channel fields below. */
+	time_t accept_time;
+	bool got_msg;
+
 	/* The size of the socket send buffer */
 	int sendbufsize;
+
+	/* Bytes currently queued but not yet written to this client. Only
+	 * modified under the owning csender's lock. */
+	int64_t queued_bytes;
+
+#ifdef HAVE_SV2
+	/* True if accepted on an SV2 listen socket (binary Noise stream). */
+	bool sv2;
+	/* True if this SV2 socket is Job Declaration (not Mining). */
+	bool sv2_jd;
+	/* Per-connection Noise + reassembly (connector-owned). */
+	struct sv2_conn *sv2c;
+	/* Connector phase fields below are protected by cdata->lock. */
+	bool sv2_noise_done;
+	/* Set when SetupConnection.Success is queued; 0 until then. */
+	time_t sv2_setup_time;
+	/* Mining: Open*Channel.Success. JD: AllocateMiningJobToken.Success. */
+	bool sv2_has_channel;
+#endif
 };
 
 struct sender_send {
@@ -95,6 +134,15 @@ struct sender_send {
 	char *buf;
 	int len;
 	int ofs;
+	/* Length accounted against the client's queued_bytes at queue time.
+	 * len is consumed by partial writes and rewritten by SV2 encryption so
+	 * it cannot be used to reverse the accounting. */
+	int qlen;
+#ifdef HAVE_SV2
+	/* If true, buf is a plaintext SV2 frame; encrypt once on the owning
+	 * sender-shard thread before the first write. */
+	bool sv2_encrypt;
+#endif
 };
 
 struct share {
@@ -112,9 +160,10 @@ struct redirect {
 	int redirect_no;
 };
 
+typedef struct csender csender_t;
+
 /* Private data for the connector */
 struct connector_data {
-	ckpool_t *ckp;
 	cklock_t lock;
 	proc_instance_t *pi;
 
@@ -128,7 +177,6 @@ struct connector_data {
 	int epfd;
 
 	bool accept;
-	pthread_t pth_sender;
 	pthread_t pth_receiver;
 
 	/* For the hashtable of all clients */
@@ -143,28 +191,25 @@ struct connector_data {
 
 	int64_t client_ids;
 
-	/* client message process queue */
-	ckmsgq_t *cmpq;
+	/* client yyjson message process queue */
+	ckmsgq_t *cympq;
 
 	/* client message event process queue */
 	ckmsgq_t *cevents;
 
-	/* For the linked list of pending sends */
-	sender_send_t *sender_sends;
-
-	int64_t sends_generated;
-	int64_t sends_delayed;
-	int64_t sends_queued;
-	int64_t sends_size;
-
-	/* For protecting the pending sends list */
-	mutex_t sender_lock;
-	pthread_cond_t sender_cond;
+	/* Array of nsenders independent sender shards. Each shard is its own
+	 * thread with its own pending-send queue, handling the disjoint set of
+	 * clients whose id modulo nsenders equals the shard index, so per-client
+	 * send state needs no locking. */
+	int nsenders;
+	csender_t *csenders;
 
 	/* Hash list of all redirected IP address in redirector mode */
 	redirect_t *redirects;
 	/* What redirect we're currently up to */
 	int redirect;
+	/* In-flight mining.submit records across all redirector clients */
+	int redirector_shares;
 
 	/* Pending sends to the upstream server */
 	ckmsgq_t *upstream_sends;
@@ -176,9 +221,29 @@ struct connector_data {
 
 typedef struct connector_data cdata_t;
 
-void connector_upstream_msg(ckpool_t *ckp, char *msg)
+/* One shard of the sender: an independent thread with its own pending-send
+ * queue and lock/cond, handling clients whose id modulo cdata->nsenders equals
+ * this shard's index. */
+struct csender {
+	cdata_t *cdata;
+	int id;
+
+	/* Linked list of pending sends for this shard */
+	sender_send_t *sends;
+
+	int64_t sends_generated;
+	int64_t sends_delayed;
+	int64_t sends_queued;
+	int64_t sends_size;
+
+	mutex_t lock;
+	pthread_cond_t cond;
+	pthread_t pth;
+};
+
+void connector_upstream_msg(char *msg)
 {
-	cdata_t *cdata = ckp->cdata;
+	cdata_t *cdata = ckpool.cdata;
 
 	LOGDEBUG("Upstreaming %s", msg);
 	ckmsgq_add(cdata->upstream_sends, msg);
@@ -237,7 +302,22 @@ static client_instance_t *recruit_client(cdata_t *cdata)
 
 static void __recycle_client(cdata_t *cdata, client_instance_t *client)
 {
+	share_t *share, *tmp;
+
 	dealloc(client->buf);
+	DL_FOREACH_SAFE(client->shares, share, tmp) {
+		cdata->redirector_shares--;
+		dealloc(share);
+	}
+	if (cdata->redirector_shares < 0)
+		cdata->redirector_shares = 0;
+#ifdef HAVE_SV2
+	if (client->sv2c) {
+		sv2_conn_free(client->sv2c);
+		client->sv2c = NULL;
+	}
+#endif
+
 	memset(client, 0, sizeof(client_instance_t));
 	client->id = -1;
 	DL_APPEND2(cdata->recycled_clients, client, recycled_prev, recycled_next);
@@ -251,11 +331,11 @@ static void recycle_client(cdata_t *cdata, client_instance_t *client)
 }
 
 /* Allows the stratifier to get a unique local virtualid for subclients */
-int64_t connector_newclientid(ckpool_t *ckp)
+int64_t connector_newclientid(void)
 {
 	int64_t ret;
 
-	cdata_t *cdata = ckp->cdata;
+	cdata_t *cdata = ckpool.cdata;
 
 	ck_wlock(&cdata->lock);
 	ret = cdata->client_ids++;
@@ -269,7 +349,6 @@ int64_t connector_newclientid(ckpool_t *ckp)
 static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 {
 	int fd, port, no_clients, sockd;
-	ckpool_t *ckp = cdata->ckp;
 	client_instance_t *client;
 	struct epoll_event event;
 	socklen_t address_len;
@@ -279,12 +358,34 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	no_clients = HASH_COUNT(cdata->clients);
 	ck_runlock(&cdata->lock);
 
-	if (unlikely(ckp->maxclients && no_clients >= ckp->maxclients)) {
-		LOGWARNING("Server full with %d clients", no_clients);
+	sockd = cdata->serverfd[server];
+
+	if (unlikely(ckpool.maxclients && no_clients >= ckpool.maxclients)) {
+		static time_t last_full_warn = 0;
+		static int full_suppressed = 0;
+		time_t now_t = time(NULL);
+
+		/* The listen socket is level triggered so leaving the pending
+		 * connection unaccepted makes epoll_wait return immediately
+		 * forever, spinning a core and flooding the log. Accept and
+		 * close it instead so the backlog drains, and rate limit the
+		 * warning. */
+		fd = accept(sockd, NULL, NULL);
+		if (likely(fd >= 0))
+			Close(fd);
+		if (now_t - last_full_warn >= 60) {
+			if (full_suppressed) {
+				LOGWARNING("Server full with %d clients (%d further connections dropped)",
+					   no_clients, full_suppressed);
+			} else
+				LOGWARNING("Server full with %d clients", no_clients);
+			last_full_warn = now_t;
+			full_suppressed = 0;
+		} else
+			full_suppressed++;
 		return 0;
 	}
 
-	sockd = cdata->serverfd[server];
 	client = recruit_client(cdata);
 	client->server = server;
 	client->address = (struct sockaddr *)&client->address_storage;
@@ -294,7 +395,8 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 		/* Handle these errors gracefully should we ever share this
 		 * socket */
 		if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNABORTED) {
-			LOGERR("Recoverable error on accept in accept_client");
+			LOGNOTICE("Recoverable error on accept in accept_client");
+			recycle_client(cdata, client);
 			return 0;
 		}
 		LOGERR("Failed to accept on socket %d in acceptor", sockd);
@@ -330,17 +432,75 @@ static int accept_client(cdata_t *cdata, const int epfd, const uint64_t server)
 	LOGINFO("Connected new client %d on socket %d to %d active clients from %s:%d",
 		cdata->nfds, fd, no_clients, client->address_name, port);
 
+#ifdef HAVE_SV2
+	if (ckpool.server_sv2 && server < (uint64_t)ckpool.serverurls &&
+	    ckpool.server_sv2[server]) {
+		/*
+		 * Reserve HS slot before keys/ECDH so rate limits cannot be
+		 * TOCTOUed past and expensive work is not free under flood.
+		 * Release on any failure path before hs_inflight is set.
+		 */
+		if (!sv2_handshake_try_reserve(client->address_name)) {
+			LOGNOTICE("SV2 handshake rate-limited from %s", client->address_name);
+			Close(fd);
+			recycle_client(cdata, client);
+			return 0;
+		}
+		if (!sv2_get_server_keys()) {
+			LOGERR("SV2 client rejected: server keys not initialised");
+			sv2_handshake_release();
+			Close(fd);
+			recycle_client(cdata, client);
+			return 0;
+		}
+		client->sv2 = true;
+		client->sv2_jd = ckpool.server_sv2_jd &&
+				server < (uint64_t)ckpool.serverurls &&
+				ckpool.server_sv2_jd[server];
+		client->sv2c = sv2_conn_new(sv2_get_server_keys());
+		if (!client->sv2c) {
+			LOGERR("SV2 conn setup failed for %s", client->address_name);
+			sv2_handshake_release();
+			Close(fd);
+			recycle_client(cdata, client);
+			return 0;
+		}
+		/*
+		 * JD: raise reassembly to JD policy payload + AEAD/header headroom.
+		 * Mining keeps SV2_MAX_MINING_PAYLOAD-scale default from sv2_conn_new
+		 * (not full U24) so a post-Noise peer cannot pin tens of MiB.
+		 */
+		if (client->sv2_jd)
+			sv2_conn_set_rx_max(client->sv2c,
+					    sv2_rx_max_for_payload(SV2_MAX_JD_PAYLOAD));
+		/* Slot owned by this conn until handshake complete or free */
+		client->sv2c->hs_inflight = true;
+		LOGNOTICE("SV2 %s client accepted from %s",
+			  client->sv2_jd ? "JD" : "mining", client->address_name);
+	}
+#endif
+
 	ck_wlock(&cdata->lock);
 	client->id = cdata->client_ids++;
 	HASH_ADD_I64(cdata->clients, id, client);
 	cdata->nfds++;
 	ck_wunlock(&cdata->lock);
 
+#ifdef HAVE_SV2
+	if (client->sv2) {
+		if (client->sv2_jd)
+			sv2_jd_note_client(client->id, client->address_name, (int)server);
+		else
+			sv2_strat_note_client(client->id, client->address_name, (int)server);
+	}
+#endif
+
 	/* We increase the ref count on this client as epoll creates a pointer
 	 * to it. We drop that reference when the socket is closed which
 	 * removes it automatically from the epoll list. */
 	__inc_instance_ref(client);
 	client->fd = fd;
+	client->accept_time = time(NULL);
 	optlen = sizeof(client->sendbufsize);
 	getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &client->sendbufsize, &optlen);
 	LOGDEBUG("Client sendbufsize detected as %d", client->sendbufsize);
@@ -376,27 +536,23 @@ out:
 	return ret;
 }
 
-static void stratifier_drop_id(ckpool_t *ckp, const int64_t id)
+static void stratifier_drop_id(const int64_t id)
 {
 	char buf[256];
 
 	sprintf(buf, "dropclient=%"PRId64, id);
-	send_proc(ckp->stratifier, buf);
+	send_proc(ckpool.stratifier, buf);
 }
 
-/* Client must hold a reference count */
-static int drop_client(cdata_t *cdata, client_instance_t *client)
+/* Complete the side effects after __drop_client has atomically invalidated and
+ * unhashed a client under cdata->lock. Client must hold a reference count. */
+static int finish_drop_client(cdata_t *cdata, client_instance_t *client, int fd)
 {
 	bool passthrough = client->passthrough, remote = client->remote;
 	char address_name[INET6_ADDRSTRLEN];
 	int64_t client_id = client->id;
-	int fd = -1;
 
 	strcpy(address_name, client->address_name);
-	ck_wlock(&cdata->lock);
-	fd = __drop_client(cdata, client);
-	ck_wunlock(&cdata->lock);
-
 	if (fd > -1) {
 		if (passthrough) {
 			LOGNOTICE("Connector dropped passthrough %"PRId64" %s",
@@ -406,56 +562,60 @@ static int drop_client(cdata_t *cdata, client_instance_t *client)
 				   client_id, address_name);
 		}
 		LOGDEBUG("Connector dropped fd %d", fd);
-		stratifier_drop_id(cdata->ckp, client_id);
+		stratifier_drop_id(client_id);
+#ifdef HAVE_SV2
+		sv2_strat_drop_client(client_id);
+		sv2_jd_drop_client(client_id);
+#endif
 	}
 
 	return fd;
 }
 
 /* For sending the drop command to the upstream pool in passthrough mode */
-static void generator_drop_client(ckpool_t *ckp, const client_instance_t *client)
+static void generator_drop_client(const client_instance_t *client)
 {
-	json_t *val;
+	yyjson_mut_doc *doc;
 
-	JSON_CPACK(val, "{si,sI:ss:si:ss:s[]}", "id", 42, "client_id", client->id, "address",
-		   client->address_name, "server", client->server, "method", "mining.term",
-		   "params");
-	generator_add_send(ckp, val);
+	doc = yyjson_mut_pack("{si,sI:ss:si:ss:s[]}", "id", 42, "client_id", client->id, "address",
+			      client->address_name, "server", client->server, "method", "mining.term",
+			      "params");
+	generator_add_send(doc);
 }
 
-static void stratifier_drop_client(ckpool_t *ckp, const client_instance_t *client)
+static void stratifier_drop_client(const client_instance_t *client)
 {
-	stratifier_drop_id(ckp, client->id);
+	stratifier_drop_id(client->id);
 }
 
 /* Invalidate this instance. Remove them from the hashtables we look up
  * regularly but keep the instances in a linked list until their ref count
  * drops to zero when we can remove them lazily. Client must hold a reference
  * count. */
-static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
+static int finish_invalidate_client(cdata_t *cdata, client_instance_t *client,
+				    int ret)
 {
-	client_instance_t *tmp;
-	int ret;
+	client_instance_t *dead, *tmp;
 
-	ret = drop_client(cdata, client);
-	if ((!ckp->passthrough || ckp->node) && !client->passthrough)
-		stratifier_drop_client(ckp, client);
-	if (ckp->passthrough)
-		generator_drop_client(ckp, client);
+	ret = finish_drop_client(cdata, client, ret);
+	if ((!ckpool.passthrough || ckpool.node) && !client->passthrough)
+		stratifier_drop_client(client);
+	if (ckpool.passthrough)
+		generator_drop_client(client);
 
 	/* Cull old unused clients lazily when there are no more reference
 	 * counts for them. */
 	ck_wlock(&cdata->lock);
-	DL_FOREACH_SAFE2(cdata->dead_clients, client, tmp, dead_next) {
-		if (!client->ref) {
-			DL_DELETE2(cdata->dead_clients, client, dead_prev, dead_next);
-			LOGINFO("Connector recycling client %"PRId64, client->id);
+	DL_FOREACH_SAFE2(cdata->dead_clients, dead, tmp, dead_next) {
+		if (!dead->ref) {
+			DL_DELETE2(cdata->dead_clients, dead, dead_prev, dead_next);
+			LOGINFO("Connector recycling client %"PRId64, dead->id);
 			/* We only close the client fd once we're sure there
 			 * are no references to it left to prevent fds being
 			 * reused on new and old clients. */
-			nolinger_socket(client->fd);
-			Close(client->fd);
-			__recycle_client(cdata, client);
+			nolinger_socket(dead->fd);
+			Close(dead->fd);
+			__recycle_client(cdata, dead);
 		}
 	}
 	ck_wunlock(&cdata->lock);
@@ -463,69 +623,336 @@ static int invalidate_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *c
 	return ret;
 }
 
+static int invalidate_client(cdata_t *cdata, client_instance_t *client)
+{
+	int ret;
+
+	ck_wlock(&cdata->lock);
+	ret = __drop_client(cdata, client);
+	ck_wunlock(&cdata->lock);
+	return finish_invalidate_client(cdata, client, ret);
+}
+
 static void drop_all_clients(cdata_t *cdata)
 {
 	client_instance_t *client, *tmp;
+	int64_t *ids = NULL;
+	int n = 0, i;
 
+	/*
+	 * Match drop_client() side effects: after unhashing under cdata->lock,
+	 * notify stratifier and tear down SV2 mining/JD state so tokens,
+	 * channels, and client refs cannot leak across a bulk drop (e.g. reject).
+	 */
 	ck_wlock(&cdata->lock);
 	HASH_ITER(hh, cdata->clients, client, tmp) {
-		__drop_client(cdata, client);
-	}
-	ck_wunlock(&cdata->lock);
-}
+		int64_t id = client->id;
 
-static void send_client(ckpool_t *ckp, cdata_t *cdata, int64_t id, char *buf);
-
-/* Look for shares being submitted via a redirector and add them to a linked
- * list for looking up the responses. */
-static void parse_redirector_share(cdata_t *cdata, client_instance_t *client, const json_t *val)
-{
-	share_t *share, *tmp;
-	time_t now;
-	int64_t id;
-
-	if (!json_get_int64(&id, val, "id")) {
-		LOGNOTICE("Failed to find redirector share id");
-		return;
-	}
-	share = ckzalloc(sizeof(share_t));
-	now = time(NULL);
-	share->submitted = now;
-	share->id = id;
-
-	LOGINFO("Redirector adding client %"PRId64" share id: %"PRId64, client->id, id);
-
-	/* We use the cdata lock instead of a separate lock since this function
-	 * is called infrequently. */
-	ck_wlock(&cdata->lock);
-	DL_APPEND(client->shares, share);
-
-	/* Age old shares. */
-	DL_FOREACH_SAFE(client->shares, share, tmp) {
-		if (now > share->submitted + 120) {
-			DL_DELETE(client->shares, share);
-			dealloc(share);
+		if (__drop_client(cdata, client) > -1) {
+			ids = ckrealloc(ids, (n + 1) * sizeof(*ids));
+			ids[n++] = id;
 		}
 	}
 	ck_wunlock(&cdata->lock);
+
+	for (i = 0; i < n; i++) {
+		stratifier_drop_id(ids[i]);
+#ifdef HAVE_SV2
+		sv2_strat_drop_client(ids[i]);
+		sv2_jd_drop_client(ids[i]);
+#endif
+	}
+	dealloc(ids);
 }
+
+static void send_client(cdata_t *cdata, int64_t id, char *buf);
+
+#define REDIR_SHARE_TTL		120
+#define REDIR_SHARE_MAX_CLIENT	64
+#define REDIR_SHARE_MAX_GLOBAL	4096
+
+/* Caller holds cdata wlock. */
+static void __unlink_redir_share(cdata_t *cdata, client_instance_t *client,
+				 share_t *share)
+{
+	DL_DELETE(client->shares, share);
+	if (client->nshares > 0)
+		client->nshares--;
+	if (cdata->redirector_shares > 0)
+		cdata->redirector_shares--;
+	dealloc(share);
+}
+
+/* Caller holds cdata wlock. List is FIFO (append-to-tail); stop at the first
+ * record still inside the TTL. */
+static void __expire_redir_shares(cdata_t *cdata, client_instance_t *client,
+				  time_t now)
+{
+	share_t *share, *tmp;
+
+	DL_FOREACH_SAFE(client->shares, share, tmp) {
+		if (now <= share->submitted + REDIR_SHARE_TTL)
+			break;
+		__unlink_redir_share(cdata, client, share);
+	}
+}
+
+static void __free_redir_shares(cdata_t *cdata, client_instance_t *client)
+{
+	while (client->shares)
+		__unlink_redir_share(cdata, client, client->shares);
+}
+
+/* Track an in-flight mining.submit id so an accepted result can qualify a
+ * redirect. Caller has already checked method == "mining.submit". */
+static void parse_redirector_share(cdata_t *cdata, client_instance_t *client, yyjson_mut_val *val)
+{
+	share_t *share;
+	time_t now;
+	int64_t id;
+
+	if (!yyjson_mut_obj_get_int64(&id, val, "id")) {
+		LOGNOTICE("Failed to find redirector share id");
+		return;
+	}
+	now = time(NULL);
+
+	ck_wlock(&cdata->lock);
+	/* Only an accepted share from an already-authorised client may grant
+	 * access to a protected redirect. This check must be under the same lock
+	 * as the authorisation transition and share-list mutation. */
+	if (!client->authorised || client->redirected) {
+		ck_wunlock(&cdata->lock);
+		return;
+	}
+	__expire_redir_shares(cdata, client, now);
+	DL_FOREACH(client->shares, share) {
+		if (share->id == id) {
+			ck_wunlock(&cdata->lock);
+			return;
+		}
+	}
+	while (client->nshares >= REDIR_SHARE_MAX_CLIENT && client->shares)
+		__unlink_redir_share(cdata, client, client->shares);
+	if (cdata->redirector_shares >= REDIR_SHARE_MAX_GLOBAL) {
+		ck_wunlock(&cdata->lock);
+		return;
+	}
+	share = ckzalloc(sizeof(share_t));
+	share->submitted = now;
+	share->id = id;
+	DL_APPEND(client->shares, share);
+	client->nshares++;
+	cdata->redirector_shares++;
+	ck_wunlock(&cdata->lock);
+
+	LOGINFO("Redirector adding client %"PRId64" share id: %"PRId64, client->id, id);
+}
+
+/* The stratifier trusts client_id, address and server as connector generated.
+ * yyjson permits duplicate keys and returns the first match, so a key supplied
+ * by the remote end would shadow the one we append. Remove any existing copies
+ * before adding ours; yyjson_mut_obj_remove_key strips all duplicates of a
+ * name, so one call each is enough. Passthrough messages legitimately carry
+ * the subclient's address from the downstream connector so we only strip that
+ * on the direct client path where we generate it ourselves; srecv_process
+ * validates it in either case. */
+static void strip_reserved_keys(yyjson_mut_val *root, const bool strip_address)
+{
+	yyjson_mut_obj_remove_key(root, "client_id");
+	yyjson_mut_obj_remove_key(root, "server");
+	if (strip_address)
+		yyjson_mut_obj_remove_key(root, "address");
+}
+
+#ifdef HAVE_SV2
+/* Forward decls — defined later in this file. */
+static void queue_sender_send(cdata_t *cdata, client_instance_t *client,
+			      sender_send_t *sender_send);
+static void send_client_bin(cdata_t *cdata, client_instance_t *client,
+			    uint8_t *buf, int len);
+static client_instance_t *ref_client_by_id(cdata_t *cdata, int64_t id);
+
+/* SV2 binary path: Noise reassembly, decrypt, stratifier handle, encrypt reply.
+ * Returns false to drop. */
+static bool parse_client_msg_sv2(cdata_t *cdata, client_instance_t *client)
+{
+	uint8_t rdbuf[8192];
+	int ret;
+	uint8_t *reply = NULL;
+	size_t reply_len = 0;
+	uint8_t **frames = NULL;
+	size_t *frame_lens = NULL;
+	size_t nframes = 0, i;
+
+	ret = read(client->fd, rdbuf, sizeof(rdbuf));
+	if (ret < 1) {
+		if (likely(errno == EAGAIN || errno == EWOULDBLOCK || !ret))
+			return true;
+		LOGINFO("SV2 client id %"PRId64" fd %d disconnected - recv fail ret %d errno %d",
+			client->id, client->fd, ret, errno);
+		return false;
+	}
+	if (!sv2_conn_feed(client->sv2c, rdbuf, (size_t)ret, &reply, &reply_len,
+			   &frames, &frame_lens, &nframes)) {
+		LOGNOTICE("SV2 client %"PRId64" protocol/crypto error, dropping", client->id);
+		dealloc(reply);
+		for (i = 0; i < nframes; i++)
+			dealloc(frames[i]);
+		dealloc(frames);
+		dealloc(frame_lens);
+		return false;
+	}
+	if (sv2_conn_ready(client->sv2c)) {
+		ck_wlock(&cdata->lock);
+		client->sv2_noise_done = true;
+		ck_wunlock(&cdata->lock);
+	}
+	/* Handshake ciphertext — already Noise-framed; do not re-encrypt.
+	 * Completing Noise must not set got_msg; the idle reaper treats
+	 * sv2_noise_done, sv2_setup_time and sv2_has_channel as three phases. */
+	if (reply && reply_len) {
+		sender_send_t *ss = ckzalloc(sizeof(sender_send_t));
+
+		ss->client = client;
+		ss->buf = (char *)reply;
+		ss->len = (int)reply_len;
+		ss->sv2_encrypt = false;
+		inc_instance_ref(cdata, client);
+		queue_sender_send(cdata, client, ss);
+		reply = NULL;
+	}
+	dealloc(reply);
+
+	for (i = 0; i < nframes; i++) {
+		size_t rlen = 0;
+		uint8_t *rplain;
+
+		/*
+		 * Policy plaintext caps (rx_append already bounds ciphertext).
+		 * JD: SV2_MAX_JD_PAYLOAD; mining: SV2_MAX_MINING_PAYLOAD.
+		 */
+		{
+			size_t pcap = client->sv2_jd ?
+				(size_t)SV2_MAX_JD_PAYLOAD : (size_t)SV2_MAX_MINING_PAYLOAD;
+
+			if (frame_lens[i] > (size_t)SV2_FRAME_HEADER_LEN + pcap) {
+				LOGNOTICE("SV2 %s client %"PRId64" plaintext frame %zu > "
+					  "cap %zu — dropping frame",
+					  client->sv2_jd ? "JD" : "mining",
+					  client->id, frame_lens[i], pcap);
+				dealloc(frames[i]);
+				continue;
+			}
+		}
+		if (client->sv2_jd)
+			rplain = sv2_jd_handle_frame(client->id, frames[i],
+						     frame_lens[i], &rlen);
+		else
+			rplain = sv2_strat_handle_frame(client->id, frames[i],
+							frame_lens[i], &rlen);
+
+		dealloc(frames[i]);
+		if (rplain && rlen)
+			send_client_bin(cdata, client, rplain, (int)rlen);
+		else
+			dealloc(rplain);
+	}
+	dealloc(frames);
+	dealloc(frame_lens);
+	return true;
+}
+
+/* Latch pre-session progress from an outbound plaintext frame. Open*.Success
+ * is queued (not returned) so the send path is the single observer. */
+static void sv2_note_outbound_progress(cdata_t *cdata, client_instance_t *client,
+				       const uint8_t *plain, int plainlen)
+{
+	uint8_t mt;
+
+	if (plainlen < SV2_FRAME_HEADER_LEN)
+		return;
+	mt = plain[2];
+	ck_wlock(&cdata->lock);
+	if (mt == SV2_MSG_SETUP_CONNECTION_SUCCESS) {
+		if (!client->sv2_setup_time)
+			client->sv2_setup_time = time(NULL);
+	} else if (mt == SV2_MSG_OPEN_STANDARD_MINING_CHANNEL_SUCCESS ||
+		   mt == SV2_MSG_OPEN_EXTENDED_MINING_CHANNEL_SUCCESS ||
+		   mt == SV2_MSG_ALLOCATE_MINING_JOB_TOKEN_SUCCESS)
+		client->sv2_has_channel = true;
+	ck_wunlock(&cdata->lock);
+}
+
+/* Queue a plaintext SV2 frame for the owning sender shard. Encryption of the
+ * outbound Noise CipherState happens only on that shard thread. */
+static void send_client_bin(cdata_t *cdata, client_instance_t *client,
+			    uint8_t *plain, int plainlen)
+{
+	sender_send_t *ss;
+
+	if (!client->sv2 || !client->sv2c || plainlen < 1) {
+		dealloc(plain);
+		return;
+	}
+	sv2_note_outbound_progress(cdata, client, plain, plainlen);
+	ss = ckzalloc(sizeof(sender_send_t));
+	ss->client = client;
+	ss->buf = (char *)plain;
+	ss->len = plainlen;
+	ss->sv2_encrypt = true;
+	inc_instance_ref(cdata, client);
+	queue_sender_send(cdata, client, ss);
+}
+
+void connector_sv2_send_plain(int64_t client_id, uint8_t *plain, size_t plainlen)
+{
+	cdata_t *cdata = ckpool.cdata;
+	client_instance_t *client;
+
+	if (!cdata || !plain) {
+		dealloc(plain);
+		return;
+	}
+	client = ref_client_by_id(cdata, client_id);
+	if (!client || !client->sv2 || !client->sv2c) {
+		if (client)
+			dec_instance_ref(cdata, client);
+		dealloc(plain);
+		return;
+	}
+	/* Queue only; shard thread encrypts (single-writer CipherState). */
+	send_client_bin(cdata, client, plain, (int)plainlen);
+	dec_instance_ref(cdata, client);
+}
+#endif /* HAVE_SV2 */
 
 /* Client is holding a reference count from being on the epoll list. Returns
  * true if we will still be receiving messages from this client. */
-static bool parse_client_msg(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
+static bool parse_client_msg(cdata_t *cdata, client_instance_t *client)
 {
+	yyjson_doc *sdoc;
 	int buflen, ret;
-	json_t *val;
 	char *eol;
+
+#ifdef HAVE_SV2
+	if (client->sv2)
+		return parse_client_msg_sv2(cdata, client);
+#endif
 
 retry:
 	if (unlikely(client->bufofs > MAX_MSGSIZE)) {
-		if (!client->remote) {
+		/* Remote clients are allowed a larger but finite ceiling. */
+		if (unlikely(!client->remote || client->bufofs > MAX_REMOTE_MSGSIZE)) {
 			LOGNOTICE("Client id %"PRId64" fd %d overloaded buffer without EOL, disconnecting",
 				client->id, client->fd);
 			return false;
 		}
 		client->buf = realloc(client->buf, round_up_page(client->bufofs + MAX_MSGSIZE + 1));
+		if (unlikely(!client->buf)) {
+			LOGERR("Client id %"PRId64" failed to grow remote recv buffer", client->id);
+			return false;
+		}
 	}
 	/* This read call is non-blocking since the socket is set to O_NOBLOCK */
 	ret = read(client->fd, client->buf + client->bufofs, MAX_MSGSIZE);
@@ -537,6 +964,11 @@ retry:
 		return false;
 	}
 	client->bufofs += ret;
+	/* Always keep the buffer null terminated as we use string functions
+	 * on it below. There is always room for this as non-remote clients
+	 * are bounded to MAX_MSGSIZE and the remote realloc above allows for
+	 * bufofs + MAX_MSGSIZE + 1. */
+	client->buf[client->bufofs] = '\0';
 reparse:
 	eol = memchr(client->buf, '\n', client->bufofs);
 	if (!eol)
@@ -544,44 +976,74 @@ reparse:
 
 	/* Do something useful with this message now */
 	buflen = eol - client->buf + 1;
-	if (unlikely(buflen > MAX_MSGSIZE && !client->remote)) {
+	if (unlikely(buflen > MAX_MSGSIZE &&
+		     (!client->remote || buflen > MAX_REMOTE_MSGSIZE))) {
 		LOGNOTICE("Client id %"PRId64" fd %d message oversize, disconnecting", client->id, client->fd);
 		return false;
 	}
 
-	if (!(val = json_loads(client->buf, JSON_DISABLE_EOF_CHECK, NULL))) {
+	/* Filter out non- or incomplete json */
+	if (unlikely(client->buf[0] != '{' ||
+	    !(sdoc = yyjson_read(client->buf, strlen(client->buf), YYJSON_READ_STOP_WHEN_DONE)))) {
 		char *buf = strdup("Invalid JSON, disconnecting\n");
 
 		LOGINFO("Client id %"PRId64" sent invalid json message %s", client->id, client->buf);
-		send_client(ckp, cdata, client->id, buf);
+		send_client(cdata, client->id, buf);
 		return false;
 	} else {
+		yyjson_mut_doc *doc = yyjson_doc_mut_copy(sdoc, &ckyyalc);
+		yyjson_mut_val *root = yyjson_mut_doc_get_root(doc);
+
+		yyjson_doc_free(sdoc);
+
 		if (client->passthrough) {
+			double subclient_id = yyjson_mut_get_num(yyjson_mut_obj_get(root, "client_id"));
 			int64_t passthrough_id;
 
-			json_getdel_int64(&passthrough_id, val, "client_id");
-			passthrough_id = (client->id << 32) | passthrough_id;
-			json_object_set_new_nocheck(val, "client_id", json_integer(passthrough_id));
+			/* Sanitise the remotely supplied subclient id which may
+			 * only occupy the lower 32 bits, avoiding undefined
+			 * behaviour casting out of range values and preventing
+			 * bits being set in another client's id space. NaN
+			 * fails both comparisons here. */
+			if (unlikely(!(subclient_id >= 0 && subclient_id < 4294967296.0)))
+				subclient_id = 0;
+			passthrough_id = (client->id << 32) | (int64_t)subclient_id;
+			/* Strip only after reading the remotely supplied subclient
+			 * id above, which is a legitimate input on this path. */
+			strip_reserved_keys(root, false);
+			yyjson_mut_obj_add_sint(doc, root, "client_id", passthrough_id);
 		} else {
-			if (ckp->redirector && !client->redirected && strstr(client->buf, "mining.submit"))
-				parse_redirector_share(cdata, client, val);
-			json_object_set_new_nocheck(val, "client_id", json_integer(client->id));
-			json_object_set_new_nocheck(val, "address", json_string(client->address_name));
+			if (ckpool.redirector) {
+				const char *method = yyjson_mut_get_str(
+					yyjson_mut_obj_get(root, "method"));
+
+				if (method && !safecmp(method, "mining.submit"))
+					parse_redirector_share(cdata, client, root);
+			}
+			strip_reserved_keys(root, true);
+			yyjson_mut_obj_add_sint(doc, root, "client_id", client->id);
+			yyjson_mut_obj_add_str(doc, root, "address", client->address_name);
 		}
-		json_object_set_new_nocheck(val, "server", json_integer(client->server));
+		yyjson_mut_obj_add_sint(doc, root, "server", client->server);
+
+		/* This peer has delivered a complete, parseable message so it
+		 * is speaking the protocol and is no longer reapable as idle. */
+		ck_wlock(&cdata->lock);
+		client->got_msg = true;
+		ck_wunlock(&cdata->lock);
 
 		/* Do not send messages of clients we've already dropped. We
 		 * do this unlocked as the occasional false negative can be
 		 * filtered by the stratifier. */
 		if (likely(!client->invalid)) {
-			if (!ckp->passthrough)
-				stratifier_add_recv(ckp, val);
-			if (ckp->node)
-				stratifier_add_recv(ckp, json_deep_copy(val));
-			if (ckp->passthrough)
-				generator_add_send(ckp, val);
+			if (!ckpool.passthrough)
+				stratifier_add_yyrecv(doc);
+			else if (ckpool.node)
+				stratifier_add_yyrecv(doc);
+			else if (ckpool.passthrough)
+				generator_add_send(doc);
 		} else
-			json_decref(val);
+			yyjson_mut_doc_free(doc);
 	}
 	client->bufofs -= buflen;
 	if (client->bufofs)
@@ -610,7 +1072,44 @@ static client_instance_t *ref_client_by_id(cdata_t *cdata, int64_t id)
 	return client;
 }
 
-static void redirect_client(ckpool_t *ckp, client_instance_t *client);
+/* Safely drop a client from a context that does not already hold a reference
+ * to it, taking one for the duration. */
+static void drop_client_by_id(cdata_t *cdata, const int64_t id)
+{
+	client_instance_t *client = ref_client_by_id(cdata, id);
+
+	if (unlikely(!client))
+		return;
+	invalidate_client(cdata, client);
+	dec_instance_ref(cdata, client);
+}
+
+static void add_remote_client(cdata_t *cdata, int64_t id)
+{
+	client_instance_t *client;
+	yyjson_mut_doc *doc;
+	bool found = false;
+	char *buf;
+
+	ck_wlock(&cdata->lock);
+	HASH_FIND_I64(cdata->clients, &id, client);
+	if (likely(client)) {
+		found = true;
+		client->remote = true;
+	}
+	ck_wunlock(&cdata->lock);
+
+	if (likely(found))
+		LOGWARNING("Added trusted remote client %ld", id);
+	else
+		LOGWARNING("Unable to find trusted remote client %ld", id);
+	doc = yyjson_mut_pack("{sb}", "result", found);
+	buf = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, NULL);
+	yyjson_mut_doc_free(doc);
+	send_client(cdata, id, buf);
+}
+
+static void redirect_client(client_instance_t *client);
 
 static bool redirect_matches(cdata_t *cdata, client_instance_t *client)
 {
@@ -623,11 +1122,11 @@ static bool redirect_matches(cdata_t *cdata, client_instance_t *client)
 	return redirect;
 }
 
-static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
+static void client_event_processor(struct epoll_event *event)
 {
 	const uint32_t events = event->events;
 	const uint64_t id = event->data.u64;
-	cdata_t *cdata = ckp->cdata;
+	cdata_t *cdata = ckpool.cdata;
 	client_instance_t *client;
 
 	client = ref_client_by_id(cdata, id);
@@ -640,8 +1139,8 @@ static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
 	if (likely(events & EPOLLIN)) {
 		/* Rearm the client for epoll events if we have successfully
 		 * parsed a message from it */
-		if (unlikely(!parse_client_msg(ckp, cdata, client))) {
-			invalidate_client(ckp, cdata, client);
+		if (unlikely(!parse_client_msg(cdata, client))) {
+			invalidate_client(cdata, client);
 			goto out;
 		}
 	}
@@ -659,15 +1158,15 @@ static void client_event_processor(ckpool_t *ckp, struct epoll_event *event)
 			LOGINFO("Client id %"PRId64" fd %d epollerr HUP in epoll with errno %d: %s",
 				client->id, client->fd, error, strerror(error));
 		}
-		invalidate_client(cdata->pi->ckp, cdata, client);
+		invalidate_client(cdata, client);
 	} else if (unlikely(events & EPOLLHUP)) {
 		/* Client connection reset by peer */
 		LOGINFO("Client id %"PRId64" fd %d HUP in epoll", client->id, client->fd);
-		invalidate_client(cdata->pi->ckp, cdata, client);
+		invalidate_client(cdata, client);
 	} else if (unlikely(events & EPOLLRDHUP)) {
 		/* Client disconnected by peer */
 		LOGINFO("Client id %"PRId64" fd %d RDHUP in epoll", client->id, client->fd);
-		invalidate_client(cdata->pi->ckp, cdata, client);
+		invalidate_client(cdata, client);
 	}
 out:
 	if (likely(!client->invalid)) {
@@ -681,13 +1180,124 @@ outnoclient:
 	free(event);
 }
 
+/* Seconds a connected socket may go without delivering a single complete
+ * protocol message before it is reaped, matching the stratifier's existing
+ * policy for clients that connect but never authorise. */
+#define IDLE_ACCEPT_TIMEOUT 60
+/* Maximum clients reaped per sweep. Any remainder is caught on the next pass,
+ * which keeps the instance lock held briefly and avoids allocating under it. */
+#define IDLE_REAP_BATCH 128
+
+/* True if this socket has outlived its pre-session deadline. Caller holds
+ * cdata->lock so event-worker phase transitions cannot race this snapshot.
+ * timeout/why are populated on true (and on SV2 true-paths) for the reap log. */
+static bool client_pre_session_expired(const client_instance_t *client,
+				       time_t now_t, int *timeout,
+				       const char **why)
+{
+#ifdef HAVE_SV2
+	if (client->sv2) {
+		bool hs_inflight = !client->sv2_noise_done;
+
+		if (likely(client->sv2_has_channel))
+			return false;
+		if (hs_inflight)
+			*why = "without completing Noise handshake";
+		else if (!client->sv2_setup_time)
+			*why = "without SetupConnection";
+		else
+			*why = client->sv2_jd ? "without allocating a job token" :
+						"without opening a channel";
+		return sv2_pre_session_expired(hs_inflight, client->sv2_setup_time,
+					       client->sv2_has_channel,
+					       client->accept_time, now_t, timeout);
+	}
+#endif
+	*timeout = IDLE_ACCEPT_TIMEOUT;
+	*why = "without a message";
+	if (likely(client->got_msg))
+		return false;
+	return now_t - client->accept_time > IDLE_ACCEPT_TIMEOUT;
+}
+
+/* Reap sockets that connected but have never become a real session.
+ * A stratum_instance_t is only created once a whole message reaches the
+ * stratifier, so these are invisible to the stratifier's unauthorised client
+ * reaper while still holding an fd and a maxclients slot - and for SV2, a slot
+ * in the global handshake inflight limit, which dropping the client releases
+ * via sv2_conn_free. SV2 is three-phase: Noise (10s from accept),
+ * SetupConnection (60s from accept), then channel/token (60s from Success). */
+static void reap_idle_clients(cdata_t *cdata)
+{
+	int64_t ids[IDLE_REAP_BATCH];
+	client_instance_t *client, *tmp;
+	time_t now_t = time(NULL);
+	int nids = 0, i, timeout;
+	const char *why;
+
+	ck_rlock(&cdata->lock);
+	HASH_ITER(hh, cdata->clients, client, tmp) {
+		if (client->invalid)
+			continue;
+		if (likely(!client_pre_session_expired(client, now_t, &timeout, &why)))
+			continue;
+		ids[nids++] = client->id;
+		if (unlikely(nids >= IDLE_REAP_BATCH))
+			break;
+	}
+	ck_runlock(&cdata->lock);
+
+	for (i = 0; i < nids; i++) {
+		bool expired;
+
+		client = ref_client_by_id(cdata, ids[i]);
+		if (unlikely(!client))
+			continue;
+		int fd = -1;
+
+		/* The final phase check and invalidation are one atomic operation
+		 * against event-worker progress updates. */
+		ck_wlock(&cdata->lock);
+		expired = client_pre_session_expired(client, now_t, &timeout, &why);
+		if (expired)
+			fd = __drop_client(cdata, client);
+		ck_wunlock(&cdata->lock);
+		if (!expired) {
+			dec_instance_ref(cdata, client);
+			continue;
+		}
+		/* A concurrent invalidator may have won before the write lock. */
+		if (fd < 0) {
+			dec_instance_ref(cdata, client);
+			continue;
+		}
+		LOGNOTICE("Reaping client id %"PRId64" %s idle %s for %d seconds",
+			  client->id, client->address_name, why, timeout);
+		finish_invalidate_client(cdata, client, fd);
+		dec_instance_ref(cdata, client);
+	}
+}
+
+static void expire_redirector_shares(cdata_t *cdata)
+{
+	client_instance_t *client, *tmp;
+	time_t now_t = time(NULL);
+
+	ck_wlock(&cdata->lock);
+	HASH_ITER(hh, cdata->clients, client, tmp) {
+		if (client->shares)
+			__expire_redir_shares(cdata, client, now_t);
+	}
+	ck_wunlock(&cdata->lock);
+}
+
 /* Waits on fds ready to read on from the list stored in conn_instance and
  * handles the incoming messages */
 static void *receiver(void *arg)
 {
+	time_t last_reap = time(NULL);
 	cdata_t *cdata = (cdata_t *)arg;
 	struct epoll_event *event = ckzalloc(sizeof(struct epoll_event));
-	ckpool_t *ckp = cdata->ckp;
 	uint64_t serverfds, i;
 	int ret, epfd;
 
@@ -698,7 +1308,7 @@ static void *receiver(void *arg)
 		LOGEMERG("FATAL: Failed to create epoll in receiver");
 		goto out;
 	}
-	serverfds = ckp->serverurls;
+	serverfds = ckpool.serverurls;
 	/* Add all the serverfds to the epoll */
 	for (i = 0; i < serverfds; i++) {
 		/* The small values will be less than the first client ids */
@@ -712,15 +1322,26 @@ static void *receiver(void *arg)
 	}
 
 	/* Wait for the stratifier to be ready for us */
-	while (!ckp->stratifier_ready)
+	while (!ckpool.stratifier_ready)
 		cksleep_ms(10);
 
 	while (42) {
 		uint64_t edu64;
+		time_t now_t;
 
 		while (unlikely(!cdata->accept))
 			cksleep_ms(10);
 		ret = epoll_wait(epfd, event, 1, 1000);
+		/* The epoll timeout gives us a roughly once per second tick to
+		 * sweep idle sockets on without a dedicated thread. Rate limit
+		 * it since a busy pool returns from epoll_wait immediately. */
+		now_t = time(NULL);
+		if (now_t != last_reap) {
+			last_reap = now_t;
+			reap_idle_clients(cdata);
+			if (ckpool.redirector)
+				expire_redirector_shares(cdata);
+		}
 		if (unlikely(ret < 1)) {
 			if (unlikely(ret == -1)) {
 				LOGEMERG("FATAL: Failed to epoll_wait in receiver");
@@ -750,7 +1371,7 @@ out:
 
 /* Send a sender_send message and return true if we've finished sending it or
  * are unable to send any more. */
-static bool send_sender_send(ckpool_t *ckp, cdata_t *cdata, sender_send_t *sender_send)
+static bool send_sender_send(cdata_t *cdata, sender_send_t *sender_send)
 {
 	client_instance_t *client = sender_send->client;
 	time_t now_t;
@@ -765,10 +1386,35 @@ static bool send_sender_send(ckpool_t *ckp, cdata_t *cdata, sender_send_t *sende
 	client->sending = sender_send;
 	now_t = time(NULL);
 
+#ifdef HAVE_SV2
+	/* Noise outbound encrypt runs only here — the csender shard is the
+	 * single writer for this client's send CipherState. Encrypt once on
+	 * first attempt (before any partial write). */
+	if (sender_send->sv2_encrypt) {
+		uint8_t *ct = NULL;
+		size_t ctlen = 0;
+
+		if (!client->sv2c ||
+		    !sv2_conn_encrypt(client->sv2c, (const uint8_t *)sender_send->buf,
+				      (size_t)sender_send->len, &ct, &ctlen)) {
+			LOGINFO("SV2 encrypt failed client %"PRId64" on sender shard, dropping",
+				client->id);
+			sender_send->sv2_encrypt = false;
+			invalidate_client(cdata, client);
+			goto out_true;
+		}
+		dealloc(sender_send->buf);
+		sender_send->buf = (char *)ct;
+		sender_send->len = (int)ctlen;
+		sender_send->ofs = 0;
+		sender_send->sv2_encrypt = false;
+	}
+#endif
+
 	/* Increase sendbufsize to match large messages sent to clients - this
 	 * usually only applies to clients as mining nodes. */
-	if (unlikely(!ckp->wmem_warn && sender_send->len > client->sendbufsize))
-		client->sendbufsize = set_sendbufsize(ckp, client->fd, sender_send->len);
+	if (unlikely(!ckpool.wmem_warn && sender_send->len > client->sendbufsize))
+		client->sendbufsize = set_sendbufsize(client->fd, sender_send->len);
 
 	while (sender_send->len) {
 		int ret = write(client->fd, sender_send->buf + sender_send->ofs, sender_send->len);
@@ -778,7 +1424,7 @@ static bool send_sender_send(ckpool_t *ckp, cdata_t *cdata, sender_send_t *sende
 			if (unlikely(client->blocked_time && now_t - client->blocked_time >= 60)) {
 				LOGNOTICE("Client id %"PRId64" fd %d blocked for >60 seconds, disconnecting",
 					  client->id, client->fd);
-				invalidate_client(ckp, cdata, client);
+				invalidate_client(cdata, client);
 				goto out_true;
 			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK || !ret) {
@@ -788,7 +1434,7 @@ static bool send_sender_send(ckpool_t *ckp, cdata_t *cdata, sender_send_t *sende
 			}
 			LOGINFO("Client id %"PRId64" fd %d disconnected with write errno %d:%s",
 				client->id, client->fd, errno, strerror(errno));
-			invalidate_client(ckp, cdata, client);
+			invalidate_client(cdata, client);
 			goto out_true;
 		}
 		sender_send->ofs += ret;
@@ -802,7 +1448,18 @@ out_true:
 
 static void clear_sender_send(sender_send_t *sender_send, cdata_t *cdata)
 {
-	dec_instance_ref(cdata, sender_send->client);
+	client_instance_t *client = sender_send->client;
+	csender_t *cs = &cdata->csenders[(uint64_t)client->id % cdata->nsenders];
+
+	/* Reverse the accounting taken in queue_sender_send under the same
+	 * lock that applied it. */
+	mutex_lock(&cs->lock);
+	client->queued_bytes -= sender_send->qlen;
+	if (unlikely(client->queued_bytes < 0))
+		client->queued_bytes = 0;
+	mutex_unlock(&cs->lock);
+
+	dec_instance_ref(cdata, client);
 	free(sender_send->buf);
 	free(sender_send);
 }
@@ -812,11 +1469,13 @@ static void clear_sender_send(sender_send_t *sender_send, cdata_t *cdata)
  * only send to those clients ready to receive data. */
 static void *sender(void *arg)
 {
-	cdata_t *cdata = (cdata_t *)arg;
+	csender_t *cs = (csender_t *)arg;
+	cdata_t *cdata = cs->cdata;
 	sender_send_t *sends = NULL;
-	ckpool_t *ckp = cdata->ckp;
+	char procname[16];
 
-	rename_proc("csender");
+	snprintf(procname, sizeof(procname), "csender%d", cs->id);
+	rename_proc(procname);
 
 	while (42) {
 		int64_t sends_queued = 0, sends_size = 0;
@@ -824,7 +1483,7 @@ static void *sender(void *arg)
 
 		/* Check all sends to see if they can be written out */
 		DL_FOREACH_SAFE(sends, sending, tmp) {
-			if (send_sender_send(ckp, cdata, sending)) {
+			if (send_sender_send(cdata, sending)) {
 				DL_DELETE(sends, sending);
 				clear_sender_send(sending, cdata);
 			} else {
@@ -833,30 +1492,84 @@ static void *sender(void *arg)
 			}
 		}
 
-		mutex_lock(&cdata->sender_lock);
-		cdata->sends_delayed += sends_queued;
-		cdata->sends_queued = sends_queued;
-		cdata->sends_size = sends_size;
+		mutex_lock(&cs->lock);
+		cs->sends_delayed += sends_queued;
+		cs->sends_queued = sends_queued;
+		cs->sends_size = sends_size;
 		/* Poll every 10ms if there are no new sends. */
-		if (!cdata->sender_sends) {
+		if (!cs->sends) {
 			const ts_t polltime = {0, 10000000};
 			ts_t timeout_ts;
 
 			ts_realtime(&timeout_ts);
 			timeraddspec(&timeout_ts, &polltime);
-			cond_timedwait(&cdata->sender_cond, &cdata->sender_lock, &timeout_ts);
+			cond_timedwait(&cs->cond, &cs->lock, &timeout_ts);
 		}
-		if (cdata->sender_sends) {
-			DL_CONCAT(sends, cdata->sender_sends);
-			cdata->sender_sends = NULL;
+		if (cs->sends) {
+			DL_CONCAT(sends, cs->sends);
+			cs->sends = NULL;
 		}
-		mutex_unlock(&cdata->sender_lock);
+		mutex_unlock(&cs->lock);
 	}
 	/* We shouldn't get here unless there's an error */
 	return NULL;
 }
 
-static int add_redirect(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
+/* Append a pending send to the shard owning this client (client id modulo
+ * nsenders) and wake that sender thread. A given client always maps to the
+ * same shard, keeping its send state single-writer. */
+/* Bytes queued but unsent to one client before it is considered unable to keep
+ * up and dropped. Node and trusted remote peers legitimately receive far larger
+ * messages than a miner so they get a higher ceiling. Both are overridden by
+ * the maxsendqueue config option. */
+#define DEFAULT_SENDQUEUE_LIMIT (1024 * 1024)
+#define REMOTE_SENDQUEUE_LIMIT (64 * 1024 * 1024)
+
+static int64_t client_sendqueue_limit(const client_instance_t *client)
+{
+	int64_t limit;
+
+	if (ckpool.maxsendqueue > 0)
+		return ckpool.maxsendqueue;
+	if (client->remote || client->passthrough)
+		return REMOTE_SENDQUEUE_LIMIT;
+	/* Scale with the socket send buffer so clients on fat links are not
+	 * penalised, with a floor for the common case. */
+	limit = (int64_t)client->sendbufsize * 4;
+	if (limit < DEFAULT_SENDQUEUE_LIMIT)
+		limit = DEFAULT_SENDQUEUE_LIMIT;
+	return limit;
+}
+
+static void queue_sender_send(cdata_t *cdata, client_instance_t *client,
+			      sender_send_t *sender_send)
+{
+	csender_t *cs = &cdata->csenders[(uint64_t)client->id % cdata->nsenders];
+	int64_t queued;
+
+	sender_send->qlen = sender_send->len;
+
+	mutex_lock(&cs->lock);
+	cs->sends_generated++;
+	client->queued_bytes += sender_send->qlen;
+	queued = client->queued_bytes;
+	DL_APPEND(cs->sends, sender_send);
+	pthread_cond_signal(&cs->cond);
+	mutex_unlock(&cs->lock);
+
+	/* A client that reads just enough to keep resetting the blocked
+	 * timeout can otherwise accumulate queued messages without bound, so
+	 * cap the queue independently of blocked_time. Drop outside the send
+	 * lock as invalidate_client takes the instance lock. */
+	if (unlikely(queued > client_sendqueue_limit(client) && !client->invalid)) {
+		LOGNOTICE("Client id %"PRId64" fd %d %s exceeded send queue limit with %"PRId64
+			  " bytes queued, disconnecting", client->id, client->fd,
+			  client->address_name, queued);
+		drop_client_by_id(cdata, client->id);
+	}
+}
+
+static int add_redirect(cdata_t *cdata, client_instance_t *client)
 {
 	redirect_t *redirect;
 	bool found;
@@ -867,7 +1580,7 @@ static int add_redirect(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client
 		redirect = ckzalloc(sizeof(redirect_t));
 		strcpy(redirect->address_name, client->address_name);
 		redirect->redirect_no = cdata->redirect++;
-		if (cdata->redirect >= ckp->redirecturls)
+		if (cdata->redirect >= ckpool.redirecturls)
 			cdata->redirect = 0;
 		HASH_ADD_STR(cdata->redirects, address_name, redirect);
 		found = false;
@@ -880,101 +1593,110 @@ static int add_redirect(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client
 	return redirect->redirect_no;
 }
 
-static void redirect_client(ckpool_t *ckp, client_instance_t *client)
+static void redirect_client(client_instance_t *client)
 {
 	sender_send_t *sender_send;
-	cdata_t *cdata = ckp->cdata;
-	json_t *val;
+	cdata_t *cdata = ckpool.cdata;
+	yyjson_mut_doc *doc;
+	size_t len;
 	char *buf;
 	int num;
 
-	/* Set the redirected boool to only try redirecting them once */
+	/* Latch once under the same lock used by redirect/share state. */
+	ck_wlock(&cdata->lock);
+	if (client->redirected || !client->authorised) {
+		ck_wunlock(&cdata->lock);
+		return;
+	}
 	client->redirected = true;
+	__free_redir_shares(cdata, client);
+	ck_wunlock(&cdata->lock);
 
-	num = add_redirect(ckp, cdata, client);
-	JSON_CPACK(val, "{sosss[ssi]}", "id", json_null(), "method", "client.reconnect",
-		   "params", ckp->redirecturl[num], ckp->redirectport[num], 0);
-	buf = json_dumps(val, JSON_EOL | JSON_COMPACT);
-	json_decref(val);
+	num = add_redirect(cdata, client);
+	doc = yyjson_mut_pack("{snsss[ssi]}", "id", "method", "client.reconnect",
+			      "params", ckpool.redirecturl[num], ckpool.redirectport[num], 0);
+	buf = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, &len);
+	yyjson_mut_doc_free(doc);
 
 	sender_send = ckzalloc(sizeof(sender_send_t));
 	sender_send->client = client;
 	sender_send->buf = buf;
-	sender_send->len = strlen(buf);
+	sender_send->len = len;
 	inc_instance_ref(cdata, client);
 
-	mutex_lock(&cdata->sender_lock);
-	cdata->sends_generated++;
-	DL_APPEND(cdata->sender_sends, sender_send);
-	pthread_cond_signal(&cdata->sender_cond);
-	mutex_unlock(&cdata->sender_lock);
+	queue_sender_send(cdata, client, sender_send);
 }
 
 /* Look for accepted shares in redirector mode to know we can redirect this
- * client to a protected server. */
+ * client to a protected server. Any matching in-flight id is dropped, accepted
+ * or not, so rejected replies cannot pin the list. */
 static bool test_redirector_shares(cdata_t *cdata, client_instance_t *client, const char *buf)
 {
-	json_t *val = json_loads(buf, 0, NULL);
-	share_t *share, *found = NULL;
-	bool ret = false;
+	yyjson_doc *doc = yyjson_read(buf, strlen(buf), 0);
+	share_t *share, *tmp;
+	yyjson_val *val, *res_val;
+	bool ret = false, found = false, result = false;
 	int64_t id;
 
-	if (!val) {
+	if (!doc) {
 		/* Can happen when responding to invalid json from client */
 		LOGINFO("Invalid json response to client %"PRId64 "%s", client->id, buf);
 		return ret;
 	}
-	if (!json_get_int64(&id, val, "id")) {
+	val = yyjson_doc_get_root(doc);
+	if (!yyjson_obj_get_int64(&id, val, "id")) {
 		LOGINFO("Failed to find response id");
 		goto out;
 	}
 
-	ck_rlock(&cdata->lock);
-	DL_FOREACH(client->shares, share) {
-		if (share->id == id) {
-			LOGDEBUG("Found matching share %"PRId64" in trs for client %"PRId64,
-				 id, client->id);
-			found = share;
-			break;
-		}
-	}
-	ck_runlock(&cdata->lock);
+	res_val = yyjson_obj_get(val, "result");
+	if (!yyjson_is_bool(res_val)) {
+		yyjson_val *err_val = yyjson_obj_get(val, "error");
 
-	if (found) {
-		bool result = false;
-
-		if (!json_get_bool(&result, val, "result")) {
+		if (unlikely(!(yyjson_is_null(res_val) && err_val && !yyjson_is_null(err_val)))) {
 			LOGINFO("Failed to find result in trs share");
 			goto out;
 		}
-		if (!json_is_null(json_object_get(val, "error"))) {
-			LOGINFO("Got error for trs share");
-			goto out;
+		result = false;
+	} else
+		result = yyjson_get_bool(res_val);
+	if (!yyjson_is_null(yyjson_obj_get(val, "error"))) {
+		LOGINFO("Got error for trs share");
+		result = false;
+	}
+
+	ck_wlock(&cdata->lock);
+	if (!client->authorised || client->redirected) {
+		ck_wunlock(&cdata->lock);
+		goto out;
+	}
+	__expire_redir_shares(cdata, client, time(NULL));
+	DL_FOREACH_SAFE(client->shares, share, tmp) {
+		if (share->id == id) {
+			LOGDEBUG("Found matching share %"PRId64" in trs for client %"PRId64,
+				 id, client->id);
+			__unlink_redir_share(cdata, client, share);
+			found = true;
+			break;
 		}
-		if (!result) {
-			LOGDEBUG("Rejected trs share");
-			goto out;
-		}
+	}
+	if (found && result) {
 		LOGNOTICE("Found accepted share for client %"PRId64" - redirecting",
 			   client->id);
+		__free_redir_shares(cdata, client);
 		ret = true;
-
-		/* Clear the list now since we don't need it any more */
-		ck_wlock(&cdata->lock);
-		DL_FOREACH_SAFE(client->shares, share, found) {
-			DL_DELETE(client->shares, share);
-			dealloc(share);
-		}
-		ck_wunlock(&cdata->lock);
 	}
+	ck_wunlock(&cdata->lock);
+	if (found && !result)
+		LOGDEBUG("Rejected trs share");
 out:
-	json_decref(val);
+	yyjson_doc_free(doc);
 	return ret;
 }
 
 /* Send a client by id a heap allocated buffer, allowing this function to
  * free the ram. */
-static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *buf)
+static void send_client(cdata_t *cdata, const int64_t id, char *buf)
 {
 	sender_send_t *sender_send;
 	client_instance_t *client;
@@ -993,9 +1715,9 @@ static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *b
 		return;
 	}
 
-	if (unlikely(ckp->node && !id)) {
+	if (unlikely(ckpool.node && !id)) {
 		LOGDEBUG("Message for node: %s", buf);
-		send_proc(ckp->stratifier, buf);
+		send_proc(ckpool.stratifier, buf);
 		free(buf);
 		return;
 	}
@@ -1013,10 +1735,10 @@ static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *b
 			/* Now see if the subclient exists */
 			client = ref_client_by_id(cdata, client_id);
 			if (client) {
-				invalidate_client(ckp, cdata, client);
+				invalidate_client(cdata, client);
 				dec_instance_ref(cdata, client);
 			} else
-				stratifier_drop_id(ckp, id);
+				stratifier_drop_id(id);
 			free(buf);
 			return;
 		}
@@ -1024,11 +1746,18 @@ static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *b
 		client = ref_client_by_id(cdata, id);
 		if (unlikely(!client)) {
 			LOGINFO("Connector failed to find client id %"PRId64" to send to", id);
-			stratifier_drop_id(ckp, id);
+			stratifier_drop_id(id);
 			free(buf);
 			return;
 		}
-		if (ckp->redirector && !client->redirected && client->authorised) {
+		if (ckpool.redirector) {
+			bool redirectable;
+
+			ck_rlock(&cdata->lock);
+			redirectable = client->authorised && !client->redirected;
+			ck_runlock(&cdata->lock);
+			if (!redirectable)
+				goto queue_send;
 			/* If clients match the IP of clients that have already
 			 * been whitelisted as finding valid shares then
 			 * redirect them immediately. */
@@ -1039,43 +1768,49 @@ static void send_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id, char *b
 		}
 	}
 
+queue_send:
 	sender_send = ckzalloc(sizeof(sender_send_t));
 	sender_send->client = client;
 	sender_send->buf = buf;
 	sender_send->len = len;
 
-	mutex_lock(&cdata->sender_lock);
-	cdata->sends_generated++;
-	DL_APPEND(cdata->sender_sends, sender_send);
-	pthread_cond_signal(&cdata->sender_cond);
-	mutex_unlock(&cdata->sender_lock);
+	queue_sender_send(cdata, client, sender_send);
 
 	/* Redirect after sending response to shares and authorise */
 	if (unlikely(redirect))
-		redirect_client(ckp, client);
+		redirect_client(client);
 }
 
-static void send_client_json(ckpool_t *ckp, cdata_t *cdata, int64_t client_id, json_t *json_msg)
+static void
+_send_client_yyjson(cdata_t *cdata, int64_t client_id, yyjson_mut_doc *doc,
+		    const char *file, const char *func, const int line)
 {
 	client_instance_t *client;
 	char *msg;
 
-	if (ckp->node && (client = ref_client_by_id(cdata, client_id))) {
-		json_t *val = json_deep_copy(json_msg);
-
-		json_object_set_new_nocheck(val, "client_id", json_integer(client_id));
-		json_object_set_new_nocheck(val, "address", json_string(client->address_name));
-		json_object_set_new_nocheck(val, "server", json_integer(client->server));
-		dec_instance_ref(cdata, client);
-		stratifier_add_recv(ckp, val);
+	if (unlikely(!doc)) {
+		LOGWARNING("_send_client_yyjson received NULL doc from %s %s:%d", file, func, line);
+		return;
 	}
-	if (ckp->passthrough && client_id)
-		json_object_del(json_msg, "node.method");
 
-	msg = json_dumps(json_msg, JSON_EOL | JSON_COMPACT);
-	send_client(ckp, cdata, client_id, msg);
-	json_decref(json_msg);
+	if (ckpool.node && (client = ref_client_by_id(cdata, client_id))) {
+		yyjson_mut_doc *tmp_doc = yyjson_mut_doc_mut_copy(doc, &ckyyalc);
+		yyjson_mut_val *root = yyjson_mut_doc_get_root(tmp_doc);
+
+		strip_reserved_keys(root, true);
+		yyjson_mut_obj_add_sint(tmp_doc, root, "client_id", client_id);
+		yyjson_mut_obj_add_str(tmp_doc, root, "address", client->address_name);
+		yyjson_mut_obj_add_sint(tmp_doc, root, "server", client->server);
+		dec_instance_ref(cdata, client);
+		stratifier_add_yyrecv(tmp_doc);
+	}
+	msg = yyjson_mut_write(doc, YYJSON_WRITE_NEWLINE_AT_END, NULL);
+	send_client(cdata, client_id, msg);
+	yyjson_mut_doc_free(doc);
 }
+
+#define send_client_yyjson(cdata, client_id, doc) \
+	_send_client_yyjson(cdata, client_id, doc, __FILE__, __func__, __LINE__)
 
 /* When testing if a client exists, passthrough clients don't exist when their
  * parent no longer exists. */
@@ -1094,24 +1829,26 @@ static bool client_exists(cdata_t *cdata, int64_t id)
 	return !!client;
 }
 
-static void passthrough_client(ckpool_t *ckp, cdata_t *cdata, client_instance_t *client)
+static void passthrough_client(cdata_t *cdata, client_instance_t *client)
 {
-	json_t *val;
+	yyjson_mut_doc *doc;
 
 	LOGINFO("Connector adding passthrough client %"PRId64, client->id);
 	client->passthrough = true;
-	JSON_CPACK(val, "{sb}", "result", true);
-	send_client_json(ckp, cdata, client->id, val);
-	if (!ckp->rmem_warn)
-		set_recvbufsize(ckp, client->fd, 1048576);
-	if (!ckp->wmem_warn)
-		client->sendbufsize = set_sendbufsize(ckp, client->fd, 1048576);
+	doc = yyjson_mut_pack("{sb}", "result", true);
+	send_client_yyjson(cdata, client->id, doc);
+	if (!ckpool.rmem_warn)
+		set_recvbufsize(client->fd, 1048576);
+	if (!ckpool.wmem_warn)
+		client->sendbufsize = set_sendbufsize(client->fd, 1048576);
 }
 
-static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
+static bool connect_upstream(connsock_t *cs)
 {
-	json_t *req, *val = NULL, *res_val, *err_val;
+	yyjson_val *res_val, *err_val;
+	yyjson_doc *val = NULL;
 	bool res, ret = false;
+	yyjson_mut_doc *req;
 	float timeout = 10;
 
 	cksem_wait(&cs->sem);
@@ -1123,16 +1860,16 @@ static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 	keep_sockalive(cs->fd);
 
 	/* We want large send buffers for upstreaming messages */
-	if (!ckp->rmem_warn)
-		set_recvbufsize(ckp, cs->fd, 2097152);
-	if (!ckp->wmem_warn)
-		cs->sendbufsiz = set_sendbufsize(ckp, cs->fd, 2097152);
+	if (!ckpool.rmem_warn)
+		set_recvbufsize(cs->fd, 2097152);
+	if (!ckpool.wmem_warn)
+		cs->sendbufsiz = set_sendbufsize(cs->fd, 2097152);
 
-	JSON_CPACK(req, "{ss,s[s]}",
-			"method", "mining.remote",
-			"params", PACKAGE"/"VERSION);
-	res = send_json_msg(cs, req);
-	json_decref(req);
+	req = yyjson_mut_pack("{ss,s[s]}",
+			      "method", "mining.remote",
+			      "params", PACKAGE"/"VERSION);
+	res = send_yyjson_msg(cs, req);
+	yyjson_mut_doc_free(req);
 	if (!res) {
 		LOGWARNING("Failed to send message in connect_upstream");
 		goto out;
@@ -1141,13 +1878,13 @@ static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 		LOGWARNING("Failed to receive line in connect_upstream");
 		goto out;
 	}
-	val = json_msg_result(cs->buf, &res_val, &err_val);
+	val = yyjson_msg_result(cs->buf, &res_val, &err_val);
 	if (!val || !res_val) {
 		LOGWARNING("Failed to get a json result in connect_upstream, got: %s",
 			 cs->buf);
 		goto out;
 	}
-	ret = json_is_true(res_val);
+	ret = yyjson_is_true(res_val);
 	if (!ret) {
 		LOGWARNING("Denied upstream trusted connection");
 		goto out;
@@ -1156,14 +1893,16 @@ static bool connect_upstream(ckpool_t *ckp, connsock_t *cs)
 		   cs->url, cs->port);
 	ret = true;
 out:
+	if (val)
+		yyjson_doc_free(val);
 	cksem_post(&cs->sem);
 
 	return ret;
 }
 
-static void usend_process(ckpool_t *ckp, char *buf)
+static void usend_process(char *buf)
 {
-	cdata_t *cdata = ckp->cdata;
+	cdata_t *cdata = ckpool.cdata;
 	connsock_t *cs = &cdata->upstream_cs;
 	int len, sent;
 
@@ -1183,7 +1922,7 @@ static void usend_process(ckpool_t *ckp, char *buf)
 		}
 		do
 			sleep(5);
-		while (!connect_upstream(ckp, cs));
+		while (!connect_upstream(cs));
 	}
 out:
 	free(buf);
@@ -1197,10 +1936,9 @@ static void ping_upstream(cdata_t *cdata)
 	ckmsgq_add(cdata->upstream_sends, buf);
 }
 
-static void *urecv_process(void *arg)
+static void *urecv_process(void __maybe_unused *arg)
 {
-	ckpool_t *ckp = (ckpool_t *)arg;
-	cdata_t *cdata = ckp->cdata;
+	cdata_t *cdata = ckpool.cdata;
 	connsock_t *cs = &cdata->upstream_cs;
 	bool alive = true;
 
@@ -1209,9 +1947,11 @@ static void *urecv_process(void *arg)
 	pthread_detach(pthread_self());
 
 	while (42) {
+		yyjson_mut_val *root;
+		yyjson_mut_doc *doc;
 		const char *method;
 		float timeout = 5;
-		json_t *val;
+		yyjson_doc *idoc;
 		int ret;
 
 		cksem_wait(&cs->sem);
@@ -1227,35 +1967,37 @@ static void *urecv_process(void *arg)
 			goto nomsg;
 		}
 		alive = true;
-		val = json_loads(cs->buf, 0, NULL);
-		if (unlikely(!val)) {
+		idoc = yyjson_read(cs->buf, strlen(cs->buf), 0);
+		if (unlikely(!idoc)) {
 			LOGWARNING("Received non-json msg from upstream pool %s",
 				   cs->buf);
 			goto nomsg;
 		}
-		method = json_string_value(json_object_get(val, "method"));
+		doc = yyjson_doc_mut_copy(idoc, &ckyyalc);
+		yyjson_doc_free(idoc);
+		root = yyjson_mut_doc_get_root(doc);
+		method = yyjson_mut_get_str(yyjson_mut_obj_get(root, "method"));
 		if (unlikely(!method)) {
 			LOGWARNING("Failed to find method from upstream pool json %s",
 				   cs->buf);
-			json_decref(val);
 			goto decref;
 		}
 		if (!safecmp(method, stratum_msgs[SM_TRANSACTIONS]))
-			parse_upstream_txns(ckp, val);
+			parse_upstream_txns(root);
 		else if (!safecmp(method, stratum_msgs[SM_AUTHRESULT]))
-			parse_upstream_auth(ckp, val);
+			parse_upstream_auth(root);
 		else if (!safecmp(method, stratum_msgs[SM_WORKINFO]))
-			parse_upstream_workinfo(ckp, val);
+			parse_upstream_workinfo(root);
 		else if (!safecmp(method, stratum_msgs[SM_BLOCK]))
-			parse_upstream_block(ckp, val);
+			parse_upstream_block(doc, root);
 		else if (!safecmp(method, stratum_msgs[SM_REQTXNS]))
-			parse_upstream_reqtxns(ckp, val);
+			parse_upstream_reqtxns(root);
 		else if (!safecmp(method, "pong"))
 			LOGDEBUG("Received upstream pong");
 		else
 			LOGWARNING("Unrecognised upstream method %s", method);
 decref:
-		json_decref(val);
+		yyjson_mut_doc_free(doc);
 nomsg:
 		cksem_post(&cs->sem);
 
@@ -1265,72 +2007,95 @@ nomsg:
 	return NULL;
 }
 
-static bool setup_upstream(ckpool_t *ckp, cdata_t *cdata)
+static bool setup_upstream(cdata_t *cdata)
 {
 	connsock_t *cs = &cdata->upstream_cs;
 	bool ret = false;
 	pthread_t pth;
 
-	cs->ckp = ckp;
-	if (!ckp->upstream) {
+	if (!ckpool.upstream) {
 		LOGEMERG("No upstream server set in remote trusted server mode");
 		goto out;
 	}
-	if (!extract_sockaddr(ckp->upstream, &cs->url, &cs->port)) {
-		LOGEMERG("Failed to extract upstream address from %s", ckp->upstream);
+	if (!extract_sockaddr(ckpool.upstream, &cs->url, &cs->port)) {
+		LOGEMERG("Failed to extract upstream address from %s", ckpool.upstream);
 		goto out;
 	}
 
 	cksem_init(&cs->sem);
 	cksem_post(&cs->sem);
 
-	while (!connect_upstream(ckp, cs))
+	while (!connect_upstream(cs))
 		cksleep_ms(5000);
 
-	create_pthread(&pth, urecv_process, ckp);
-	cdata->upstream_sends = create_ckmsgq(ckp, "usender", &usend_process);
+	create_pthread(&pth, urecv_process, NULL);
+	cdata->upstream_sends = create_ckmsgq("usender", &usend_process);
 	ret = true;
 out:
 	return ret;
 }
 
-static void client_message_processor(ckpool_t *ckp, json_t *json_msg)
+static void client_yymessage_processor(yyjson_mut_doc *doc)
 {
-	cdata_t *cdata = ckp->cdata;
+	cdata_t *cdata = ckpool.cdata;
 	client_instance_t *client;
+	yyjson_mut_val *root;
 	int64_t client_id;
 
+	if (unlikely(!doc)) {
+		LOGWARNING("client_yymessage_processor received NULL doc");
+		return;
+	}
+	root = yyjson_mut_doc_get_root(doc);
 	/* Extract the client id from the json message and remove its entry */
-	client_id = json_integer_value(json_object_get(json_msg, "client_id"));
-	json_object_del(json_msg, "client_id");
+	client_id = yyjson_mut_get_num(yyjson_mut_obj_get(root, "client_id"));
+	yyjson_mut_obj_remove_key(root, "client_id");
 	/* Put client_id back in for a passthrough subclient, passing its
 	 * upstream client_id instead of the passthrough's. */
 	if (subclient(client_id))
-		json_object_set_new_nocheck(json_msg, "client_id", json_integer(client_id & 0xffffffffll));
+		yyjson_mut_obj_add_sint(doc, root, "client_id", client_id & 0xffffffffll);
 
 	/* Flag redirector clients once they've been authorised */
-	if (ckp->redirector && (client = ref_client_by_id(cdata, client_id))) {
-		if (!client->redirected && !client->authorised) {
-			json_t *method_val = json_object_get(json_msg, "node.method");
-			const char *method = json_string_value(method_val);
+	if (ckpool.redirector && (client = ref_client_by_id(cdata, client_id))) {
+		yyjson_mut_val *method_val = yyjson_mut_obj_get(root, "node.method");
+		const char *method = yyjson_mut_get_str(method_val);
 
-			if (!safecmp(method, stratum_msgs[SM_AUTHRESULT]))
+		if (!safecmp(method, stratum_msgs[SM_AUTHRESULT])) {
+			bool authorised = yyjson_mut_is_true(
+				yyjson_mut_obj_get(root, "result"));
+
+			ck_wlock(&cdata->lock);
+			/* Only pre-authorisation request IDs are unsafe. Preserve
+			 * in-flight submits across a successful re-authorisation. */
+			if (!client->authorised && authorised)
+				__free_redir_shares(cdata, client);
+			/* Once any worker authorises successfully, a later failed
+			 * re-authentication must not revoke redirect eligibility. */
+			if (!client->redirected && authorised)
 				client->authorised = true;
+			ck_wunlock(&cdata->lock);
 		}
 		dec_instance_ref(cdata, client);
 	}
-	send_client_json(ckp, cdata, client_id, json_msg);
+	send_client_yyjson(cdata, client_id, doc);
 }
 
-void connector_add_message(ckpool_t *ckp, json_t *val)
+void _connector_add_yymessage(yyjson_mut_doc *doc, const char *file,
+			     const char *func, const int line)
 {
-	cdata_t *cdata = ckp->cdata;
+	cdata_t *cdata = ckpool.cdata;
 
-	ckmsgq_add(cdata->cmpq, val);
+	if (unlikely(!doc)) {
+		LOGWARNING("_connector_add_yymessage received NULL doc from %s %s:%d",
+			   file, func, line);
+		return;
+	}
+
+	ckmsgq_add(cdata->cympq, doc);
 }
 
 /* Send the passthrough the terminate node.method */
-static void drop_passthrough_client(ckpool_t *ckp, cdata_t *cdata, const int64_t id)
+static void drop_passthrough_client(cdata_t *cdata, const int64_t id)
 {
 	int64_t client_id;
 	char *msg;
@@ -1340,12 +2105,13 @@ static void drop_passthrough_client(ckpool_t *ckp, cdata_t *cdata, const int64_t
 	/* We have a direct connection to the passthrough's connector so we
 	 * can send it any regular commands. */
 	ASPRINTF(&msg, "dropclient=%"PRId64"\n", client_id);
-	send_client(ckp, cdata, id, msg);
+	send_client(cdata, id, msg);
 }
 
 char *connector_stats(void *data, const int runtime)
 {
-	json_t *val = json_object(), *subval;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(&ckyyalc);
+	yyjson_mut_val *root = yyjson_mut_obj(doc), *subval;
 	client_instance_t *client;
 	int objects, generated;
 	cdata_t *cdata = data;
@@ -1353,9 +2119,11 @@ char *connector_stats(void *data, const int runtime)
 	int64_t memsize;
 	char *buf;
 
+	yyjson_mut_doc_set_root(doc, root);
+
 	/* If called in passthrough mode we log stats instead of the stratifier */
 	if (runtime)
-		json_set_int(val, "runtime", runtime);
+		yyjson_mut_obj_add_int(doc, root, "runtime", runtime);
 
 	ck_rlock(&cdata->lock);
 	objects = HASH_COUNT(cdata->clients);
@@ -1363,8 +2131,8 @@ char *connector_stats(void *data, const int runtime)
 	generated = cdata->clients_generated;
 	ck_runlock(&cdata->lock);
 
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "clients", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,si}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "clients", subval);
 
 	ck_rlock(&cdata->lock);
 	DL_COUNT2(cdata->dead_clients, client, objects, dead_next);
@@ -1372,27 +2140,40 @@ char *connector_stats(void *data, const int runtime)
 	ck_runlock(&cdata->lock);
 
 	memsize = objects * sizeof(client_instance_t);
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", generated);
-	json_set_object(val, "dead", subval);
+	subval = yyjson_mut_pack_val(doc, "{si,sI,si}", "count", objects, "memory", memsize, "generated", generated);
+	yyjson_mut_obj_add_val(doc, root, "dead", subval);
 
 	objects = 0;
 	memsize = 0;
 
-	mutex_lock(&cdata->sender_lock);
-	DL_FOREACH(cdata->sender_sends, send) {
-		objects++;
-		memsize += sizeof(sender_send_t) + send->len + 1;
+	/* Aggregate the pending-send and stats counters across all shards. */
+	{
+		int64_t sends_generated = 0, sends_queued = 0, sends_size = 0, sends_delayed = 0;
+		int i;
+
+		for (i = 0; i < cdata->nsenders; i++) {
+			csender_t *cs = &cdata->csenders[i];
+
+			mutex_lock(&cs->lock);
+			DL_FOREACH(cs->sends, send) {
+				objects++;
+				memsize += sizeof(sender_send_t) + send->len + 1;
+			}
+			sends_generated += cs->sends_generated;
+			sends_queued += cs->sends_queued;
+			sends_size += cs->sends_size;
+			sends_delayed += cs->sends_delayed;
+			mutex_unlock(&cs->lock);
+		}
+		subval = yyjson_mut_pack_val(doc, "{si,sI,sI}", "count", objects, "memory", memsize, "generated", sends_generated);
+		yyjson_mut_obj_add_val(doc, root, "sends", subval);
+
+		subval = yyjson_mut_pack_val(doc, "{sI,sI,sI}", "count", sends_queued, "memory", sends_size, "generated", sends_delayed);
+		yyjson_mut_obj_add_val(doc, root, "delays", subval);
 	}
-	JSON_CPACK(subval, "{si,si,si}", "count", objects, "memory", memsize, "generated", cdata->sends_generated);
-	json_set_object(val, "sends", subval);
 
-	JSON_CPACK(subval, "{si,si,si}", "count", cdata->sends_queued, "memory", cdata->sends_size, "generated", cdata->sends_delayed);
-	mutex_unlock(&cdata->sender_lock);
-
-	json_set_object(val, "delays", subval);
-
-	buf = json_dumps(val, JSON_NO_UTF8 | JSON_PRESERVE_ORDER);
-	json_decref(val);
+	buf = yyjson_mut_write(doc, 0, NULL);
+	yyjson_mut_doc_free(doc);
 	if (runtime)
 		LOGNOTICE("Passthrough:%s", buf);
 	else
@@ -1400,11 +2181,11 @@ char *connector_stats(void *data, const int runtime)
 	return buf;
 }
 
-void connector_send_fd(ckpool_t *ckp, const int fdno, const int sockd)
+void connector_send_fd(const int fdno, const int sockd)
 {
-	cdata_t *cdata = ckp->cdata;
+	cdata_t *cdata = ckpool.cdata;
 
-	if (fdno > -1 && fdno < ckp->serverurls)
+	if (fdno > -1 && fdno < ckpool.serverurls)
 		send_fd(cdata->serverfd[fdno], sockd);
 	else
 		LOGWARNING("Connector asked to send invalid fd %d", fdno);
@@ -1413,7 +2194,6 @@ void connector_send_fd(ckpool_t *ckp, const int fdno, const int sockd)
 static void connector_loop(proc_instance_t *pi, cdata_t *cdata)
 {
 	unix_msg_t *umsg = NULL;
-	ckpool_t *ckp = pi->ckp;
 	time_t last_stats;
 	int64_t client_id;
 	int ret = 0;
@@ -1422,7 +2202,7 @@ static void connector_loop(proc_instance_t *pi, cdata_t *cdata)
 	last_stats = cdata->start_time;
 
 retry:
-	if (ckp->passthrough) {
+	if (ckpool.passthrough) {
 		time_t diff = time(NULL);
 
 		if (diff - last_stats >= 60) {
@@ -1448,9 +2228,13 @@ retry:
 	/* The bulk of the messages will be json messages to send to clients
 	 * so look for them first. */
 	if (likely(buf[0] == '{')) {
-		json_t *val = json_loads(buf, JSON_DISABLE_EOF_CHECK, NULL);
+		yyjson_doc *sdoc = yyjson_read(buf, strlen(buf), YYJSON_READ_STOP_WHEN_DONE);
 
-		ckmsgq_add(cdata->cmpq, val);
+		if (likely(sdoc)) {
+			yyjson_mut_doc *doc = yyjson_doc_mut_copy(sdoc, &ckyyalc);
+			yyjson_doc_free(sdoc);
+			ckmsgq_add(cdata->cympq, doc);
+		}
 	} else if (cmdmatch(buf, "dropclient")) {
 		client_instance_t *client;
 
@@ -1461,7 +2245,7 @@ retry:
 		}
 		/* A passthrough client */
 		if (subclient(client_id)) {
-			drop_passthrough_client(ckp, cdata, client_id);
+			drop_passthrough_client(cdata, client_id);
 			goto retry;
 		}
 		client = ref_client_by_id(cdata, client_id);
@@ -1469,7 +2253,7 @@ retry:
 			LOGINFO("Connector failed to find client id %"PRId64" to drop", client_id);
 			goto retry;
 		}
-		ret = invalidate_client(ckp, cdata, client);
+		ret = invalidate_client(cdata, client);
 		dec_instance_ref(cdata, client);
 		if (ret >= 0)
 			LOGINFO("Connector dropped client id: %"PRId64, client_id);
@@ -1482,7 +2266,7 @@ retry:
 		if (client_exists(cdata, client_id))
 			goto retry;
 		LOGINFO("Connector detected non-existent client id: %"PRId64, client_id);
-		stratifier_drop_id(ckp, client_id);
+		stratifier_drop_id(client_id);
 	} else if (cmdmatch(buf, "ping")) {
 		LOGDEBUG("Connector received ping request");
 		send_unix_msg(umsg->sockd, "pong");
@@ -1492,7 +2276,7 @@ retry:
 	} else if (cmdmatch(buf, "reject")) {
 		LOGDEBUG("Connector received reject signal");
 		cdata->accept = false;
-		if (ckp->passthrough)
+		if (ckpool.passthrough)
 			drop_all_clients(cdata);
 	} else if (cmdmatch(buf, "stats")) {
 		char *msg;
@@ -1501,7 +2285,7 @@ retry:
 		msg = connector_stats(cdata, 0);
 		send_unix_msg(umsg->sockd, msg);
 	} else if (cmdmatch(buf, "loglevel")) {
-		sscanf(buf, "loglevel=%d", &ckp->loglevel);
+		sscanf(buf, "loglevel=%d", &ckpool.loglevel);
 	} else if (cmdmatch(buf, "passthrough")) {
 		client_instance_t *client;
 
@@ -1515,14 +2299,19 @@ retry:
 			LOGINFO("Connector failed to find client id %"PRId64" to pass through", client_id);
 			goto retry;
 		}
-		passthrough_client(ckp, cdata, client);
+		passthrough_client(cdata, client);
 		dec_instance_ref(cdata, client);
 	} else if (cmdmatch(buf, "getxfd")) {
 		int fdno = -1;
 
 		sscanf(buf, "getxfd%d", &fdno);
-		if (fdno > -1 && fdno < ckp->serverurls)
+		if (fdno > -1 && fdno < ckpool.serverurls)
 			send_fd(cdata->serverfd[fdno], umsg->sockd);
+	} else if (cmdmatch(buf, "remote")) {
+		int64_t client = -1;
+
+		sscanf(buf, "remote=%ld", &client);
+		add_remote_client(cdata, client);
 	} else
 		LOGWARNING("Unhandled connector message: %s", buf);
 	goto retry;
@@ -1533,112 +2322,94 @@ void *connector(void *arg)
 	proc_instance_t *pi = (proc_instance_t *)arg;
 	cdata_t *cdata = ckzalloc(sizeof(cdata_t));
 	char newurl[INET6_ADDRSTRLEN], newport[8];
-	int threads, sockd, i, tries = 0, ret;
-	ckpool_t *ckp = pi->ckp;
-	const int on = 1;
+	int threads, sockd, i, tries = 0;
 
 	rename_proc(pi->processname);
-	LOGWARNING("%s connector starting", ckp->name);
-	ckp->cdata = cdata;
-	cdata->ckp = ckp;
+	LOGWARNING("%s connector starting", ckpool.name);
+	ckpool.cdata = cdata;
 
-	if (!ckp->serverurls) {
-		/* No serverurls have been specified. Bind to all interfaces
-		 * on default sockets. */
-		struct sockaddr_in serv_addr;
+	/* serverurls always set in main: explicit SV1 and/or SV2, or one default SV1. */
+	cdata->serverfd = ckalloc(sizeof(int *) * ckpool.serverurls);
 
-		cdata->serverfd = ckalloc(sizeof(int *));
+	for (i = 0; i < ckpool.serverurls; i++) {
+		char oldurl[INET6_ADDRSTRLEN], oldport[8];
+		char *serverurl = ckpool.serverurl[i];
+		const char *kind = "SV1";
+		int port;
 
-		sockd = socket(AF_INET, SOCK_STREAM, 0);
-		if (sockd < 0) {
-			LOGERR("Connector failed to open socket");
+#ifdef HAVE_SV2
+		if (ckpool.server_sv2 && ckpool.server_sv2[i]) {
+			if (ckpool.server_sv2_jd && ckpool.server_sv2_jd[i])
+				kind = "SV2 Job Declaration";
+			else
+				kind = "SV2 mining";
+		}
+#endif
+		if (!url_from_serverurl(serverurl, newurl, newport)) {
+			LOGWARNING("Failed to extract resolved url from %s", serverurl);
 			goto out;
 		}
-		setsockopt(sockd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-		memset(&serv_addr, 0, sizeof(serv_addr));
-		serv_addr.sin_family = AF_INET;
-		serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-		serv_addr.sin_port = htons(ckp->proxy ? 3334 : 3333);
-		do {
-			ret = bind(sockd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
+		port = atoi(newport);
+		/* All high port servers are treated as highdiff ports (SV1 and
+		 * SV2). Mirrored by report_config() for --testconfig, which
+		 * never gets this far; keep the two rules in step. */
+		if (port > 4000 && ckpool.server_highdiff) {
+			LOGNOTICE("Highdiff server %s", serverurl);
+			ckpool.server_highdiff[i] = true;
+		}
+		sockd = ckpool.oldconnfd[i];
+		if (url_from_socket(sockd, oldurl, oldport)) {
+			if (strcmp(newurl, oldurl) || strcmp(newport, oldport)) {
+				LOGWARNING("Handed over socket url %s:%s does not match config %s:%s, creating new socket",
+					   oldurl, oldport, newurl, newport);
+				Close(sockd);
+			}
+		}
 
-			if (!ret)
+		do {
+			if (sockd > 0)
+				break;
+			sockd = bind_socket(newurl, newport);
+			if (sockd > 0)
 				break;
 			LOGWARNING("Connector failed to bind to socket, retrying in 5s");
 			sleep(5);
 		} while (++tries < 25);
-		if (ret < 0) {
+
+		if (sockd < 0) {
 			LOGERR("Connector failed to bind to socket for 2 minutes");
-			Close(sockd);
 			goto out;
 		}
-		/* Set listen backlog to larger than SOMAXCONN in case the
-		 * system configuration supports it */
 		if (listen(sockd, 8192) < 0) {
 			LOGERR("Connector failed to listen on socket");
 			Close(sockd);
 			goto out;
 		}
-		cdata->serverfd[0] = sockd;
-		url_from_socket(sockd, newurl, newport);
-		ASPRINTF(&ckp->serverurl[0], "%s:%s", newurl, newport);
-		ckp->serverurls = 1;
-	} else {
-		cdata->serverfd = ckalloc(sizeof(int *) * ckp->serverurls);
-
-		for (i = 0; i < ckp->serverurls; i++) {
-			char oldurl[INET6_ADDRSTRLEN], oldport[8];
-			char *serverurl = ckp->serverurl[i];
-			int port;
-
-			if (!url_from_serverurl(serverurl, newurl, newport)) {
-				LOGWARNING("Failed to extract resolved url from %s", serverurl);
-				goto out;
-			}
-			port = atoi(newport);
-			/* All high port servers are treated as highdiff ports */
-			if (port > 4000) {
-				LOGNOTICE("Highdiff server %s", serverurl);
-				ckp->server_highdiff[i] = true;
-			}
-			sockd = ckp->oldconnfd[i];
-			if (url_from_socket(sockd, oldurl, oldport)) {
-				if (strcmp(newurl, oldurl) || strcmp(newport, oldport)) {
-					LOGWARNING("Handed over socket url %s:%s does not match config %s:%s, creating new socket",
-						   oldurl, oldport, newurl, newport);
-					Close(sockd);
-				}
-			}
-
-			do {
-				if (sockd > 0)
-					break;
-				sockd = bind_socket(newurl, newport);
-				if (sockd > 0)
-					break;
-				LOGWARNING("Connector failed to bind to socket, retrying in 5s");
-				sleep(5);
-			} while (++tries < 25);
-
-			if (sockd < 0) {
-				LOGERR("Connector failed to bind to socket for 2 minutes");
-				goto out;
-			}
-			if (listen(sockd, 8192) < 0) {
-				LOGERR("Connector failed to listen on socket");
-				Close(sockd);
-				goto out;
-			}
-			cdata->serverfd[i] = sockd;
-		}
+		cdata->serverfd[i] = sockd;
+		LOGWARNING("Bound serverurl[%d]: %s (%s)", i, serverurl, kind);
 	}
 
 	if (tries)
-		LOGWARNING("Connector successfully bound to socket");
+		LOGWARNING("Connector successfully bound after retries");
 
-	cdata->cmpq = create_ckmsgq(ckp, "cmpq", &client_message_processor);
+#ifdef HAVE_SV2
+	/* Paths defaulted in parse_config to {socket_dir}sv2_{authority,static}.key */
+	if (ckpool.sv2urls || ckpool.sv2jdurls) {
+		const char *auth_path = ckpool.sv2_authority_key;
+		const char *stat_path = ckpool.sv2_static_key;
 
-	if (ckp->remote && !setup_upstream(ckp, cdata))
+		if (!sv2_init_server_keys(auth_path, stat_path))
+			LOGERR("SV2 Noise key init failed — SV2 clients will be rejected");
+		else
+			LOGWARNING("SV2 Noise server keys ready (auth=%s static=%s)",
+				   auth_path ? auth_path : "(null)",
+				   stat_path ? stat_path : "(null)");
+	}
+#endif
+
+	cdata->cympq = create_ckmsgq("cympq", &client_yymessage_processor);
+
+	if (ckpool.remote && !setup_upstream(cdata))
 		goto out;
 
 	cklock_init(&cdata->lock);
@@ -1646,17 +2417,25 @@ void *connector(void *arg)
 	cdata->nfds = 0;
 	/* Set the client id to the highest serverurl count to distinguish
 	 * them from the server fds in epoll. */
-	cdata->client_ids = ckp->serverurls;
-	mutex_init(&cdata->sender_lock);
-	cond_init(&cdata->sender_cond);
-	create_pthread(&cdata->pth_sender, sender, cdata);
+	cdata->client_ids = ckpool.serverurls;
 	threads = sysconf(_SC_NPROCESSORS_ONLN) / 2 ? : 1;
-	cdata->cevents = create_ckmsgqs(ckp, "cevent", &client_event_processor, threads);
+	cdata->nsenders = threads;
+	cdata->csenders = ckzalloc(sizeof(csender_t) * cdata->nsenders);
+	for (i = 0; i < cdata->nsenders; i++) {
+		csender_t *cs = &cdata->csenders[i];
+
+		cs->cdata = cdata;
+		cs->id = i;
+		mutex_init(&cs->lock);
+		cond_init(&cs->cond);
+		create_pthread(&cs->pth, sender, cs);
+	}
+	cdata->cevents = create_ckmsgqs("cevent", &client_event_processor, threads);
 	create_pthread(&cdata->pth_receiver, receiver, cdata);
 	cdata->start_time = time(NULL);
 
-	ckp->connector_ready = true;
-	LOGWARNING("%s connector ready", ckp->name);
+	ckpool.connector_ready = true;
+	LOGWARNING("%s connector ready", ckpool.name);
 
 	connector_loop(pi, cdata);
 out:

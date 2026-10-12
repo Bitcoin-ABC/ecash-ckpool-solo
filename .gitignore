@@ -22,6 +22,8 @@ config.guess
 config.sub
 
 *~
+logs/*
+solobtc/*
 
 ext_deps
 config.h.in
@@ -40,4 +42,6 @@ ltmain.sh
 
 libtool
 
-
+test-driver
+src/jansson-2.14/jansson_private_config.h.in
+src/jansson-2.14/test-driver

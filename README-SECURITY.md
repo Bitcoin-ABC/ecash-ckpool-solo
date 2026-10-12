@@ -1,0 +1,4 @@
+# Security
+
+As the almost exclusive developer and maintainer, please send all possible
+security issues directly to me via email Con Kolivas <kernel@kolivas.org>
